@@ -1,0 +1,78 @@
+.walk-pricing-section{
+padding:80px 0;
+}
+
+.services-hero{
+background:#111;
+color:white;
+padding:90px 0;
+}
+
+.page-hero-text{
+max-width:650px;
+}
+
+.pricing-card-grid{
+display:grid;
+grid-template-columns:repeat(3,1fr);
+gap:25px;
+margin-top:40px;
+}
+
+.pricing-service-card{
+background:white;
+padding:35px 28px;
+border-radius:22px;
+box-shadow:0 12px 30px rgba(0,0,0,0.08);
+}
+
+.pricing-service-card h3{
+margin-top:0;
+text-align:center;
+font-size:24px;
+margin-bottom:20px;
+}
+
+.pricing-tier{
+display:flex;
+justify-content:space-between;
+border-bottom:1px solid #eee;
+padding:10px 0;
+font-size:15px;
+}
+
+.pricing-savings-box{
+margin-top:16px;
+padding-top:6px;
+}
+
+.pricing-savings-box p{
+margin:6px 0;
+text-align:center;
+font-size:14px;
+color:#555;
+}
+
+.gold{
+color:#d4af37;
+}
+
+.featured-pricing{
+border:2px solid #d4af37;
+}
+
+.section-heading{
+text-align:center;
+}
+
+@media(max-width:900px){
+.pricing-card-grid{
+grid-template-columns:1fr 1fr;
+}
+}
+
+@media(max-width:600px){
+.pricing-card-grid{
+grid-template-columns:1fr;
+}
+}
