@@ -1,542 +1,296 @@
 <?php
-require_once __DIR__ . '/includes/member_config.php';
+session_start();
 
-$member = currentMember($pdo);
-
-if (!$member) {
-    $member = [
-        'id' => 0,
-        'username' => 'Preview Member',
-        'email' => 'member@example.com',
-        'phone' => '(631) 555-1234',
-        'preferred_login' => 'email',
-        'email_verified' => 1
-    ];
+if (!isset($_SESSION['walker_id'])) {
+    header('Location: walker-login.php');
+    exit;
 }
 
-$selectedWalkId = (int)($_GET['walk_id'] ?? 0);
-$walkOptions = [];
-$walk = null;
-$session = null;
+$walkId = isset($_GET['walk_id']) ? (int) $_GET['walk_id'] : 0;
 
-if ((int)$member['id'] > 0) {
-    $walkListStmt = $pdo->prepare("
-        SELECT
-            walks.id,
-            walks.walk_date,
-            walks.walk_time,
-            walks.status,
-            dogs.dog_name
-        FROM walks
-        INNER JOIN dogs ON dogs.id = walks.dog_id
-        WHERE walks.member_id = :member_id
-        ORDER BY walks.walk_date DESC, walks.walk_time DESC
-    ");
-    $walkListStmt->execute([':member_id' => $member['id']]);
-    $walkOptions = $walkListStmt->fetchAll(PDO::FETCH_ASSOC);
+if ($walkId <= 0) {
+    die('Invalid walk ID.');
+}
 
-    if ($selectedWalkId <= 0 && !empty($walkOptions)) {
-        $selectedWalkId = (int)$walkOptions[0]['id'];
-    }
+function getPreferredColumn(PDO $db, string $table, array $preferredColumns): ?string
+{
+    $stmt = $db->query("PRAGMA table_info($table)");
+    $columns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $available = array_map(fn($col) => $col['name'], $columns);
 
-    if ($selectedWalkId > 0) {
-        $stmt = $pdo->prepare("
-            SELECT
-                walks.*,
-                dogs.dog_name
-            FROM walks
-            INNER JOIN dogs ON dogs.id = walks.dog_id
-            WHERE walks.id = :walk_id
-              AND walks.member_id = :member_id
-            LIMIT 1
-        ");
-        $stmt->execute([
-            ':walk_id' => $selectedWalkId,
-            ':member_id' => $member['id']
-        ]);
-        $walk = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($walk) {
-            $sessionStmt = $pdo->prepare("
-                SELECT *
-                FROM walk_sessions
-                WHERE walk_id = :walk_id
-                LIMIT 1
-            ");
-            $sessionStmt->execute([':walk_id' => $selectedWalkId]);
-            $session = $sessionStmt->fetch(PDO::FETCH_ASSOC);
+    foreach ($preferredColumns as $column) {
+        if (in_array($column, $available, true)) {
+            return $column;
         }
     }
+
+    return null;
 }
 
-if (!$walk) {
-    $selectedWalkId = 1;
-    $walkOptions = [
-        [
-            'id' => 1,
-            'dog_name' => 'Bentley',
-            'walk_date' => date('Y-m-d'),
-            'walk_time' => '13:00',
-            'status' => 'Walker Assigned'
-        ]
-    ];
+try {
+    $db = new PDO('sqlite:' . __DIR__ . '/data/members.sqlite');
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-    $walk = [
-        'id' => 1,
-        'dog_name' => 'Bentley',
-        'walk_date' => date('Y-m-d'),
-        'walk_time' => '13:00',
-        'duration_minutes' => 30,
-        'walker_name' => 'John Walker',
-        'walker_phone' => '(631) 555-8181',
-        'status' => 'Walker Assigned'
-    ];
+    $dogColumn = getPreferredColumn($db, 'dogs', [
+        'name', 'dog_name', 'full_name', 'pet_name', 'first_name'
+    ]);
 
-    $session = [
-        'session_status' => 'Walker Assigned',
-        'eta_minutes' => 10,
-        'current_location' => 'Waiting for GPS updates',
-        'current_lat' => 40.7829,
-        'current_lng' => -73.9654,
-        'last_update' => 'Waiting for real GPS updates.',
-        'bathroom_update' => 'No bathroom update yet',
-        'photo_note' => 'No photo update yet',
-        'route_note' => 'No route yet',
-        'route_points' => json_encode([
-            ['lat' => 40.7829, 'lng' => -73.9654, 'at' => date('Y-m-d H:i:s')]
-        ])
-    ];
-}
+    $memberColumn = getPreferredColumn($db, 'members', [
+        'full_name', 'name', 'member_name', 'first_name', 'email'
+    ]);
 
-function trackingSteps(string $status): array {
-    $map = [
-        'Walker Assigned' => 1,
-        'Accepted' => 1,
-        'On The Way' => 2,
-        'Arrived' => 3,
-        'Walk Started' => 4,
-        'Bathroom Break' => 5,
-        'Walk Completed' => 6
-    ];
+    $dogSelect = $dogColumn ? "d.$dogColumn AS dog_name" : "'Dog' AS dog_name";
+    $memberSelect = $memberColumn ? "m.$memberColumn AS member_name" : "'Member' AS member_name";
 
-    $current = $map[$status] ?? 1;
+    $sql = "
+        SELECT
+            w.*,
+            $dogSelect,
+            $memberSelect
+        FROM walks w
+        LEFT JOIN dogs d ON d.id = w.dog_id
+        LEFT JOIN members m ON m.id = w.member_id
+        WHERE w.id = :walk_id
+          AND w.walker_id = :walker_id
+        LIMIT 1
+    ";
 
-    return [
-        ['label' => 'Assigned', 'done' => $current >= 1],
-        ['label' => 'On The Way', 'done' => $current >= 2],
-        ['label' => 'Arrived', 'done' => $current >= 3],
-        ['label' => 'Walk Started', 'done' => $current >= 4],
-        ['label' => 'Bathroom', 'done' => $current >= 5],
-        ['label' => 'Completed', 'done' => $current >= 6],
-    ];
+    $stmt = $db->prepare($sql);
+    $stmt->execute([
+        ':walk_id' => $walkId,
+        ':walker_id' => $_SESSION['walker_id']
+    ]);
+
+    $walk = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$walk) {
+        die('Walk not found or not assigned to you.');
+    }
+} catch (Exception $e) {
+    die('Database error: ' . $e->getMessage());
 }
 ?>
-<?php include 'includes/header.php'; ?>
-<?php include 'includes/nav.php'; ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Tracking | Doggie Dorian's</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f6f3ee;
+            color: #1f1f1f;
+        }
 
-<link
-  rel="stylesheet"
-  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-  crossorigin=""
->
-<script
-  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-  crossorigin=""
-></script>
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px;
+        }
 
-<style>
-.tracking-page {
-  background: #f4f1ea;
-  min-height: calc(100vh - 120px);
-  padding: 32px 20px 60px;
-}
-.tracking-shell {
-  max-width: 1380px;
-  margin: 0 auto;
-  display: grid;
-  gap: 24px;
-}
-.tracking-hero {
-  background: linear-gradient(135deg, #111111 0%, #2b2414 100%);
-  color: #ffffff;
-  border-radius: 30px;
-  padding: 34px;
-  box-shadow: 0 14px 40px rgba(0,0,0,0.12);
-}
-.tracking-hero h1 {
-  margin: 0 0 10px;
-  font-size: 38px;
-}
-.tracking-hero p {
-  margin: 0;
-  max-width: 780px;
-  color: rgba(255,255,255,0.82);
-}
-.hero-actions {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 18px;
-}
-.hero-link {
-  display: inline-block;
-  background: rgba(255,255,255,0.08);
-  color: #ffffff;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 999px;
-  padding: 12px 16px;
-  font-weight: 700;
-}
-.tracking-grid {
-  display: grid;
-  grid-template-columns: 1.15fr 0.85fr;
-  gap: 24px;
-}
-.tracking-card {
-  background: #ffffff;
-  border-radius: 26px;
-  padding: 28px;
-  box-shadow: 0 12px 30px rgba(0,0,0,0.07);
-}
-.walk-switcher {
-  display: flex;
-  justify-content: space-between;
-  gap: 14px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
-}
-.walk-switcher form {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-.walk-switcher select {
-  padding: 12px 14px;
-  border: 1px solid #ddd;
-  border-radius: 14px;
-  font-size: 15px;
-}
-.walk-switcher button {
-  background: #111111;
-  color: #ffffff;
-  border: none;
-  border-radius: 999px;
-  padding: 12px 16px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.live-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: #dcfce7;
-  color: #166534;
-  border-radius: 999px;
-  padding: 10px 14px;
-  font-size: 13px;
-  font-weight: 700;
-}
-.live-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #16a34a;
-}
-#liveMap {
-  height: 420px;
-  border-radius: 18px;
-  overflow: hidden;
-}
-.info-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 14px;
-  margin-top: 18px;
-}
-.info-box {
-  background: #f7f4ee;
-  border-radius: 16px;
-  padding: 14px 16px;
-}
-.info-box strong {
-  display: block;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #777777;
-  margin-bottom: 6px;
-}
-.timeline {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 10px;
-  margin-top: 18px;
-}
-.timeline-step {
-  background: #f7f4ee;
-  border-radius: 16px;
-  padding: 12px 8px;
-  text-align: center;
-  font-size: 13px;
-  color: #888888;
-}
-.timeline-step.done {
-  background: #d4af37;
-  color: #111111;
-  font-weight: 700;
-}
-.update-list {
-  display: grid;
-  gap: 14px;
-}
-.update-box {
-  background: #f7f4ee;
-  border-radius: 18px;
-  padding: 16px;
-}
-.status-pill {
-  display: inline-block;
-  padding: 10px 14px;
-  border-radius: 999px;
-  background: #111111;
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 700;
-}
-@media (max-width: 1000px) {
-  .tracking-grid {
-    grid-template-columns: 1fr;
-  }
-}
-@media (max-width: 800px) {
-  .timeline,
-  .info-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-  .tracking-hero h1 {
-    font-size: 30px;
-  }
-}
-@media (max-width: 600px) {
-  .timeline,
-  .info-grid {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
+        .top-card {
+            background: #ffffff;
+            border-radius: 18px;
+            padding: 24px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+            margin-bottom: 20px;
+        }
 
-<main class="tracking-page">
-  <div class="tracking-shell">
+        h1 {
+            margin: 0 0 10px;
+            font-size: 32px;
+        }
 
-    <section class="tracking-hero">
-      <h1>Live Walk Tracking</h1>
-      <p>
-        This view now supports a real moving map, route trail, and live GPS updates from the walker device.
-      </p>
+        .meta {
+            display: grid;
+            gap: 8px;
+            margin-top: 12px;
+            color: #555;
+        }
 
-      <div class="hero-actions">
-        <a href="dashboard.php" class="hero-link">Back to Dashboard</a>
-        <a href="my-walks.php" class="hero-link">Back to My Walks</a>
-      </div>
-    </section>
+        .status {
+            display: inline-block;
+            padding: 10px 16px;
+            border-radius: 999px;
+            background: #111;
+            color: #fff;
+            font-weight: bold;
+            margin-top: 14px;
+        }
 
-    <section class="tracking-grid">
+        #map {
+            width: 100%;
+            height: 550px;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        }
 
-      <div class="tracking-card">
-        <div class="walk-switcher">
-          <form method="get">
-            <select name="walk_id">
-              <?php foreach ($walkOptions as $option): ?>
-                <option value="<?= e((string)$option['id']) ?>" <?= (int)$option['id'] === (int)$selectedWalkId ? 'selected' : '' ?>>
-                  <?= e($option['dog_name']) ?> — <?= e($option['walk_date']) ?> <?= e($option['walk_time']) ?>
-                </option>
-              <?php endforeach; ?>
-            </select>
-            <button type="submit">Open Walk</button>
-          </form>
+        .controls {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
 
-          <div class="live-indicator">
-            <span class="live-dot"></span>
-            Polling live GPS every 5 seconds
-          </div>
-        </div>
+        button {
+            background: #111;
+            color: #fff;
+            border: none;
+            padding: 14px 18px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 600;
+        }
 
-        <h2>Live Map</h2>
-        <div id="liveMap"></div>
+        button.secondary {
+            background: #c7a97d;
+            color: #111;
+        }
 
-        <div class="info-grid">
-          <div class="info-box">
-            <strong>Current Status</strong>
-            <span id="sessionStatus"><?= e($session['session_status'] ?? 'Walker Assigned') ?></span>
-          </div>
-
-          <div class="info-box">
-            <strong>ETA</strong>
-            <span id="etaMinutes"><?= e((string)($session['eta_minutes'] ?? '')) ?></span>
-          </div>
-
-          <div class="info-box">
-            <strong>Current Location</strong>
-            <span id="currentLocation"><?= e($session['current_location'] ?? 'Waiting for GPS') ?></span>
-          </div>
-
-          <div class="info-box">
-            <strong>Last GPS Ping</strong>
-            <span id="lastGpsAt"><?= e($session['last_gps_at'] ?? 'Not yet') ?></span>
-          </div>
-        </div>
-
-        <div class="timeline" id="timelineWrap">
-          <?php foreach (trackingSteps($session['session_status'] ?? 'Walker Assigned') as $step): ?>
-            <div class="timeline-step <?= $step['done'] ? 'done' : '' ?>">
-              <?= e($step['label']) ?>
+        .log {
+            margin-top: 16px;
+            background: #fff;
+            padding: 16px;
+            border-radius: 16px;
+            min-height: 60px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+            color: #444;
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="top-card">
+            <h1>Live Walk Tracking</h1>
+            <div class="meta">
+                <div><strong>Dog:</strong> <?php echo htmlspecialchars($walk['dog_name'] ?? 'Dog'); ?></div>
+                <div><strong>Client:</strong> <?php echo htmlspecialchars($walk['member_name'] ?? 'Member'); ?></div>
+                <div><strong>Date:</strong> <?php echo htmlspecialchars($walk['walk_date']); ?></div>
+                <div><strong>Time:</strong> <?php echo htmlspecialchars($walk['walk_time']); ?></div>
             </div>
-          <?php endforeach; ?>
+            <div class="status">GPS Ready for Walk #<?php echo (int)$walkId; ?></div>
         </div>
-      </div>
 
-      <div class="tracking-card">
-        <h3>Walk Details</h3>
-
-        <div class="update-list">
-          <div class="update-box">
-            <strong>Dog</strong><br>
-            <?= e($walk['dog_name']) ?>
-          </div>
-
-          <div class="update-box">
-            <strong>Date & Time</strong><br>
-            <?= e($walk['walk_date']) ?> at <?= e($walk['walk_time']) ?>
-          </div>
-
-          <div class="update-box">
-            <strong>Duration</strong><br>
-            <?= e((string)$walk['duration_minutes']) ?> Minutes
-          </div>
-
-          <div class="update-box">
-            <strong>Walker</strong><br>
-            <?= e($walk['walker_name'] ?: 'Not assigned yet') ?>
-            <?php if (!empty($walk['walker_phone'])): ?>
-              <br><?= e($walk['walker_phone']) ?>
-            <?php endif; ?>
-          </div>
-
-          <div class="update-box">
-            <strong>Last Update</strong><br>
-            <span id="lastUpdate"><?= e($session['last_update'] ?? 'No updates yet') ?></span>
-          </div>
-
-          <div class="update-box">
-            <strong>Bathroom Update</strong><br>
-            <span id="bathroomUpdate"><?= e($session['bathroom_update'] ?? 'No bathroom update yet') ?></span>
-          </div>
-
-          <div class="update-box">
-            <strong>Photo Update</strong><br>
-            <span id="photoNote"><?= e($session['photo_note'] ?? 'No photo update yet') ?></span>
-          </div>
-
-          <div class="update-box">
-            <strong>Route Note</strong><br>
-            <span id="routeNote"><?= e($session['route_note'] ?? 'No route note yet') ?></span>
-          </div>
+        <div class="controls">
+            <button id="startTrackingBtn">Start Live Tracking</button>
+            <button id="stopTrackingBtn" class="secondary">Stop Tracking</button>
         </div>
-      </div>
 
-    </section>
+        <div id="map"></div>
+        <div class="log" id="logBox">Waiting to start GPS tracking...</div>
+    </div>
 
-  </div>
-</main>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        const walkId = <?php echo (int)$walkId; ?>;
+        let watchId = null;
+        let map = L.map('map').setView([40.7831, -73.9712], 13);
+        let marker = null;
+        let polyline = L.polyline([], { weight: 5 }).addTo(map);
+        let routePoints = [];
 
-<script>
-const walkId = <?= (int)$selectedWalkId ?>;
-const initialLat = <?= isset($session['current_lat']) && $session['current_lat'] !== null ? (float)$session['current_lat'] : 40.7829 ?>;
-const initialLng = <?= isset($session['current_lng']) && $session['current_lng'] !== null ? (float)$session['current_lng'] : -73.9654 ?>;
-const initialRoute = <?= !empty($session['route_points']) ? $session['route_points'] : json_encode([['lat' => (isset($session['current_lat']) && $session['current_lat'] !== null ? (float)$session['current_lat'] : 40.7829), 'lng' => (isset($session['current_lng']) && $session['current_lng'] !== null ? (float)$session['current_lng'] : -73.9654)]]) ?>;
+        const logBox = document.getElementById('logBox');
+        const startBtn = document.getElementById('startTrackingBtn');
+        const stopBtn = document.getElementById('stopTrackingBtn');
 
-const map = L.map('liveMap').setView([initialLat, initialLng], 15);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
 
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '&copy; OpenStreetMap'
-}).addTo(map);
+        function logMessage(message) {
+            const now = new Date().toLocaleTimeString();
+            logBox.innerHTML = `<strong>${now}</strong> — ${message}`;
+        }
 
-let marker = L.marker([initialLat, initialLng]).addTo(map);
-let polyline = L.polyline(
-  (initialRoute || []).map(p => [p.lat, p.lng]),
-  { weight: 5 }
-).addTo(map);
+        async function sendLocation(position) {
+            const payload = {
+                walk_id: walkId,
+                latitude: position.coords.latitude,
+                longitude: position.coords.longitude,
+                accuracy: position.coords.accuracy,
+                speed: position.coords.speed,
+                heading: position.coords.heading
+            };
 
-function renderTimeline(status) {
-  const order = {
-    'Walker Assigned': 1,
-    'Accepted': 1,
-    'On The Way': 2,
-    'Arrived': 3,
-    'Walk Started': 4,
-    'Bathroom Break': 5,
-    'Walk Completed': 6
-  };
+            try {
+                const response = await fetch('walker-location-update.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
 
-  const current = order[status] || 1;
-  const labels = ['Assigned', 'On The Way', 'Arrived', 'Walk Started', 'Bathroom', 'Completed'];
-  const wrap = document.getElementById('timelineWrap');
+                const result = await response.json();
 
-  wrap.innerHTML = '';
+                if (!result.success) {
+                    logMessage('Location save failed: ' + (result.message || 'Unknown error'));
+                    return;
+                }
 
-  labels.forEach((label, index) => {
-    const div = document.createElement('div');
-    div.className = 'timeline-step' + ((index + 1) <= current ? ' done' : '');
-    div.textContent = label;
-    wrap.appendChild(div);
-  });
-}
+                const latLng = [payload.latitude, payload.longitude];
 
-function updateMap(data) {
-  if (!data || !data.ok) return;
+                if (!marker) {
+                    marker = L.marker(latLng).addTo(map).bindPopup('Your current location');
+                    map.setView(latLng, 16);
+                } else {
+                    marker.setLatLng(latLng);
+                }
 
-  const session = data.session || {};
-  const lat = session.current_lat;
-  const lng = session.current_lng;
-  const route = Array.isArray(session.route_points) ? session.route_points : [];
+                routePoints.push(latLng);
+                polyline.setLatLngs(routePoints);
 
-  document.getElementById('sessionStatus').textContent = session.session_status || 'Walker Assigned';
-  document.getElementById('etaMinutes').textContent = session.eta_minutes !== null && session.eta_minutes !== undefined ? `${session.eta_minutes} minutes` : 'Not set';
-  document.getElementById('currentLocation').textContent = session.current_location || 'Waiting for GPS';
-  document.getElementById('lastGpsAt').textContent = session.last_gps_at || 'Not yet';
-  document.getElementById('lastUpdate').textContent = session.last_update || 'No updates yet';
-  document.getElementById('bathroomUpdate').textContent = session.bathroom_update || 'No bathroom update yet';
-  document.getElementById('photoNote').textContent = session.photo_note || 'No photo update yet';
-  document.getElementById('routeNote').textContent = session.route_note || 'No route note yet';
+                logMessage(
+                    `Location updated. Lat: ${payload.latitude.toFixed(6)}, Lng: ${payload.longitude.toFixed(6)}`
+                );
+            } catch (error) {
+                logMessage('Network error while sending GPS location.');
+            }
+        }
 
-  renderTimeline(session.session_status || 'Walker Assigned');
+        function startTracking() {
+            if (!navigator.geolocation) {
+                logMessage('Geolocation is not supported by this browser.');
+                return;
+            }
 
-  if (lat !== null && lng !== null) {
-    marker.setLatLng([lat, lng]);
-    map.setView([lat, lng], map.getZoom());
-  }
+            if (watchId !== null) {
+                logMessage('Tracking is already running.');
+                return;
+            }
 
-  if (route.length > 0) {
-    polyline.setLatLngs(route.map(point => [point.lat, point.lng]));
-  }
-}
+            watchId = navigator.geolocation.watchPosition(
+                sendLocation,
+                function(error) {
+                    logMessage('GPS error: ' + error.message);
+                },
+                {
+                    enableHighAccuracy: true,
+                    maximumAge: 2000,
+                    timeout: 10000
+                }
+            );
 
-async function pollTracking() {
-  try {
-    const response = await fetch(`tracking-data.php?walk_id=${walkId}&_=${Date.now()}`);
-    const data = await response.json();
-    updateMap(data);
-  } catch (error) {
-    console.error('Tracking poll failed:', error);
-  }
-}
+            logMessage('Live GPS tracking started.');
+        }
 
-setInterval(pollTracking, 5000);
-</script>
+        function stopTracking() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+                logMessage('Live GPS tracking stopped.');
+            } else {
+                logMessage('Tracking was not running.');
+            }
+        }
 
-<?php include 'includes/footer.php'; ?>
+        startBtn.addEventListener('click', startTracking);
+        stopBtn.addEventListener('click', stopTracking);
+    </script>
+</body>
+</html>
