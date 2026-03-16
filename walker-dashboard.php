@@ -1,613 +1,794 @@
 <?php
 require_once __DIR__ . '/includes/member_config.php';
-requireWalkerLogin();
 
-$walker = currentWalker($pdo);
-if (!$walker) {
-    session_destroy();
-    redirectTo('walker-login.php');
-}
+function hasColumn(PDO $pdo, string $table, string $column): bool {
+    static $cache = [];
 
-$allowedStatuses = [
-    'Accepted',
-    'On The Way',
-    'Arrived',
-    'Walk Started',
-    'Bathroom Break',
-    'Walk Completed'
-];
-
-$success = '';
-$errors = [];
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $walkId = (int)($_POST['walk_id'] ?? 0);
-    $action = trim($_POST['action_type'] ?? '');
-    $walkerNotes = trim($_POST['walker_notes'] ?? '');
-    $bathroomUpdate = trim($_POST['bathroom_update'] ?? '');
-    $photoNote = trim($_POST['photo_note'] ?? '');
-    $currentLocation = trim($_POST['current_location'] ?? '');
-    $etaMinutes = trim($_POST['eta_minutes'] ?? '');
-
-    if ($walkId <= 0 || !in_array($action, $allowedStatuses, true)) {
-        $errors[] = 'Invalid walk update.';
+    $key = $table . '.' . $column;
+    if (isset($cache[$key])) {
+        return $cache[$key];
     }
 
-    $ownedWalkStmt = $pdo->prepare("
-        SELECT id
-        FROM walks
-        WHERE id = :walk_id
-          AND walker_id = :walker_id
+    try {
+        $stmt = $pdo->query("PRAGMA table_info($table)");
+        $columns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($columns as $col) {
+            if (($col['name'] ?? '') === $column) {
+                $cache[$key] = true;
+                return true;
+            }
+        }
+    } catch (Throwable $e) {
+    }
+
+    $cache[$key] = false;
+    return false;
+}
+
+function normalizeWalkStatus(?string $status): string {
+    $status = strtolower(trim((string)$status));
+
+    $allowed = [
+        'pending',
+        'approved',
+        'assigned',
+        'arrived',
+        'in_progress',
+        'completed',
+        'cancelled'
+    ];
+
+    return in_array($status, $allowed, true) ? $status : 'pending';
+}
+
+function statusLabel(string $status): string {
+    return match ($status) {
+        'pending' => 'Pending',
+        'approved' => 'Approved',
+        'assigned' => 'Assigned',
+        'arrived' => 'Arrived',
+        'in_progress' => 'In Progress',
+        'completed' => 'Completed',
+        'cancelled' => 'Cancelled',
+        default => ucfirst(str_replace('_', ' ', $status))
+    };
+}
+
+function statusClass(string $status): string {
+    return match ($status) {
+        'pending' => 'pending',
+        'approved' => 'approved',
+        'assigned' => 'assigned',
+        'arrived' => 'arrived',
+        'in_progress' => 'in-progress',
+        'completed' => 'completed',
+        'cancelled' => 'cancelled',
+        default => 'pending'
+    };
+}
+
+$walkerId = (int)($_SESSION['walker_id'] ?? 0);
+
+if ($walkerId <= 0) {
+    header('Location: walker-login.php');
+    exit;
+}
+
+$walker = null;
+$walkerName = 'Walker';
+$walkerEmail = '';
+
+try {
+    $walkerStmt = $pdo->prepare("
+        SELECT id, name, email, is_active
+        FROM walkers
+        WHERE id = :id
         LIMIT 1
     ");
-    $ownedWalkStmt->execute([
-        ':walk_id' => $walkId,
-        ':walker_id' => $walker['id']
-    ]);
-    $ownedWalk = $ownedWalkStmt->fetch(PDO::FETCH_ASSOC);
+    $walkerStmt->execute([':id' => $walkerId]);
+    $walker = $walkerStmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!$ownedWalk) {
-        $errors[] = 'This walk is not assigned to your walker account.';
+    if (!$walker || (isset($walker['is_active']) && (int)$walker['is_active'] !== 1)) {
+        unset($_SESSION['walker_id']);
+        header('Location: walker-login.php');
+        exit;
     }
 
-    if (!$errors) {
-        $updateWalk = $pdo->prepare("
-            UPDATE walks
-            SET status = :status,
-                walker_name = :walker_name,
-                walker_phone = :walker_phone,
-                walker_notes = :walker_notes
-            WHERE id = :id
-              AND walker_id = :walker_id
-        ");
-        $updateWalk->execute([
-            ':status' => $action,
-            ':walker_name' => $walker['full_name'],
-            ':walker_phone' => $walker['phone'],
-            ':walker_notes' => $walkerNotes !== '' ? $walkerNotes : null,
-            ':id' => $walkId,
-            ':walker_id' => $walker['id']
-        ]);
+    $walkerName = trim((string)($walker['name'] ?? ''));
+    $walkerEmail = trim((string)($walker['email'] ?? ''));
 
-        $checkSession = $pdo->prepare("
-            SELECT id
-            FROM walk_sessions
-            WHERE walk_id = :walk_id
-            LIMIT 1
-        ");
-        $checkSession->execute([':walk_id' => $walkId]);
-        $existingSession = $checkSession->fetch(PDO::FETCH_ASSOC);
+    if ($walkerName === '') {
+        $walkerName = 'Walker';
+    }
+} catch (Throwable $e) {
+    unset($_SESSION['walker_id']);
+    header('Location: walker-login.php');
+    exit;
+}
 
-        $lastUpdate = match ($action) {
-            'Accepted' => 'Walker accepted this walk.',
-            'On The Way' => 'Walker is on the way.',
-            'Arrived' => 'Walker has arrived.',
-            'Walk Started' => 'The walk has started.',
-            'Bathroom Break' => 'Bathroom update posted during walk.',
-            'Walk Completed' => 'The walk has been completed.',
-            default => 'Walk updated.'
-        };
+$walksTableHasWalkerId = hasColumn($pdo, 'walks', 'walker_id');
+$walksTableHasNotes = hasColumn($pdo, 'walks', 'notes');
 
-        if ($existingSession) {
-            $updateSession = $pdo->prepare("
-                UPDATE walk_sessions
-                SET session_status = :session_status,
-                    eta_minutes = :eta_minutes,
-                    current_location = :current_location,
-                    last_update = :last_update,
-                    bathroom_update = :bathroom_update,
-                    photo_note = :photo_note,
-                    route_note = :route_note,
-                    started_at = CASE WHEN :session_status = 'Walk Started' AND started_at IS NULL THEN CURRENT_TIMESTAMP ELSE started_at END,
-                    completed_at = CASE WHEN :session_status = 'Walk Completed' THEN CURRENT_TIMESTAMP ELSE completed_at END
-                WHERE walk_id = :walk_id
-            ");
-            $updateSession->execute([
-                ':session_status' => $action,
-                ':eta_minutes' => $etaMinutes !== '' ? (int)$etaMinutes : null,
-                ':current_location' => $currentLocation !== '' ? $currentLocation : null,
-                ':last_update' => $lastUpdate,
-                ':bathroom_update' => $bathroomUpdate !== '' ? $bathroomUpdate : null,
-                ':photo_note' => $photoNote !== '' ? $photoNote : null,
-                ':route_note' => $currentLocation !== '' ? 'Walker updated location to ' . $currentLocation : null,
-                ':walk_id' => $walkId
-            ]);
-        } else {
-            $insertSession = $pdo->prepare("
-                INSERT INTO walk_sessions (
-                    walk_id,
-                    session_status,
-                    eta_minutes,
-                    current_location,
-                    last_update,
-                    bathroom_update,
-                    photo_note,
-                    route_note,
-                    started_at,
-                    completed_at
-                ) VALUES (
-                    :walk_id,
-                    :session_status,
-                    :eta_minutes,
-                    :current_location,
-                    :last_update,
-                    :bathroom_update,
-                    :photo_note,
-                    :route_note,
-                    CASE WHEN :session_status = 'Walk Started' THEN CURRENT_TIMESTAMP ELSE NULL END,
-                    CASE WHEN :session_status = 'Walk Completed' THEN CURRENT_TIMESTAMP ELSE NULL END
-                )
-            ");
-            $insertSession->execute([
-                ':walk_id' => $walkId,
-                ':session_status' => $action,
-                ':eta_minutes' => $etaMinutes !== '' ? (int)$etaMinutes : null,
-                ':current_location' => $currentLocation !== '' ? $currentLocation : null,
-                ':last_update' => $lastUpdate,
-                ':bathroom_update' => $bathroomUpdate !== '' ? $bathroomUpdate : null,
-                ':photo_note' => $photoNote !== '' ? $photoNote : null,
-                ':route_note' => $currentLocation !== '' ? 'Walker updated location to ' . $currentLocation : null
-            ]);
+$flashMessage = '';
+$flashType = 'success';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = trim((string)($_POST['action'] ?? ''));
+    $walkId = (int)($_POST['walk_id'] ?? 0);
+    $notes = trim((string)($_POST['notes'] ?? ''));
+
+    if ($walkId > 0) {
+        try {
+            $whereParts = ["id = :id"];
+            $params = [':id' => $walkId];
+
+            if ($walksTableHasWalkerId) {
+                $whereParts[] = "walker_id = :walker_id";
+                $params[':walker_id'] = $walkerId;
+            } else {
+                $whereParts[] = "walker_name = :walker_name";
+                $params[':walker_name'] = $walkerName;
+            }
+
+            $whereSql = implode(' AND ', $whereParts);
+
+            if ($action === 'mark_arrived') {
+                if ($walksTableHasNotes) {
+                    $stmt = $pdo->prepare("
+                        UPDATE walks
+                        SET status = 'arrived',
+                            notes = :notes
+                        WHERE $whereSql
+                    ");
+                    $stmt->execute($params + [':notes' => $notes]);
+                } else {
+                    $stmt = $pdo->prepare("
+                        UPDATE walks
+                        SET status = 'arrived'
+                        WHERE $whereSql
+                    ");
+                    $stmt->execute($params);
+                }
+
+                $flashMessage = 'Walk marked as arrived.';
+            }
+
+            if ($action === 'start_walk') {
+                if ($walksTableHasNotes) {
+                    $stmt = $pdo->prepare("
+                        UPDATE walks
+                        SET status = 'in_progress',
+                            notes = :notes
+                        WHERE $whereSql
+                    ");
+                    $stmt->execute($params + [':notes' => $notes]);
+                } else {
+                    $stmt = $pdo->prepare("
+                        UPDATE walks
+                        SET status = 'in_progress'
+                        WHERE $whereSql
+                    ");
+                    $stmt->execute($params);
+                }
+
+                $flashMessage = 'Walk started successfully.';
+            }
+
+            if ($action === 'complete_walk') {
+                if ($walksTableHasNotes) {
+                    $stmt = $pdo->prepare("
+                        UPDATE walks
+                        SET status = 'completed',
+                            notes = :notes
+                        WHERE $whereSql
+                    ");
+                    $stmt->execute($params + [':notes' => $notes]);
+                } else {
+                    $stmt = $pdo->prepare("
+                        UPDATE walks
+                        SET status = 'completed'
+                        WHERE $whereSql
+                    ");
+                    $stmt->execute($params);
+                }
+
+                $flashMessage = 'Walk marked as completed.';
+            }
+
+            if ($action === 'save_notes' && $walksTableHasNotes) {
+                $stmt = $pdo->prepare("
+                    UPDATE walks
+                    SET notes = :notes
+                    WHERE $whereSql
+                ");
+                $stmt->execute($params + [':notes' => $notes]);
+
+                $flashMessage = 'Walk notes updated.';
+            }
+        } catch (Throwable $e) {
+            $flashType = 'error';
+            $flashMessage = 'Unable to update this walk right now.';
         }
-
-        $success = 'Walk updated successfully.';
     }
 }
 
-$stmt = $pdo->prepare("
-    SELECT
-        walks.*,
-        dogs.dog_name,
-        dogs.temperament,
-        members.email AS member_email,
-        members.phone AS member_phone,
-        members.username AS member_username,
-        walk_sessions.session_status,
-        walk_sessions.current_location,
-        walk_sessions.bathroom_update,
-        walk_sessions.photo_note
-    FROM walks
-    INNER JOIN dogs ON dogs.id = walks.dog_id
-    INNER JOIN members ON members.id = walks.member_id
-    LEFT JOIN walk_sessions ON walk_sessions.walk_id = walks.id
-    WHERE walks.status <> 'Cancelled'
-      AND walks.walker_id = :walker_id
-    ORDER BY walks.walk_date ASC, walks.walk_time ASC
-");
-$stmt->execute([':walker_id' => $walker['id']]);
-$walks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$assignedWalks = [];
+$todayWalks = [];
+$completedWalks = [];
 
-$todayCount = count($walks);
+try {
+    if ($walksTableHasWalkerId) {
+        $baseWhere = "walks.walker_id = :walker_id";
+        $baseParams = [':walker_id' => $walkerId];
+    } else {
+        $baseWhere = "walks.walker_name = :walker_name";
+        $baseParams = [':walker_name' => $walkerName];
+    }
+
+    $commonSelect = "
+        SELECT
+            walks.*,
+            dogs.dog_name,
+            dogs.breed,
+            dogs.size,
+            members.email AS member_email,
+            members.username AS member_username
+        FROM walks
+        INNER JOIN dogs ON dogs.id = walks.dog_id
+        INNER JOIN members ON members.id = walks.member_id
+    ";
+
+    $assignedStmt = $pdo->prepare("
+        $commonSelect
+        WHERE $baseWhere
+          AND walks.status IN ('approved', 'assigned', 'arrived', 'in_progress')
+        ORDER BY walks.walk_date ASC, walks.walk_time ASC, walks.created_at DESC
+    ");
+    $assignedStmt->execute($baseParams);
+    $assignedWalks = $assignedStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $todayStmt = $pdo->prepare("
+        $commonSelect
+        WHERE $baseWhere
+          AND walks.walk_date = :today
+        ORDER BY walks.walk_time ASC, walks.created_at DESC
+    ");
+    $todayStmt->execute($baseParams + [':today' => date('Y-m-d')]);
+    $todayWalks = $todayStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $completedStmt = $pdo->prepare("
+        $commonSelect
+        WHERE $baseWhere
+          AND walks.status = 'completed'
+        ORDER BY walks.walk_date DESC, walks.walk_time DESC, walks.created_at DESC
+        LIMIT 8
+    ");
+    $completedStmt->execute($baseParams);
+    $completedWalks = $completedStmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $assignedWalks = [];
+    $todayWalks = [];
+    $completedWalks = [];
+    if ($flashMessage === '') {
+        $flashType = 'error';
+        $flashMessage = 'Unable to load walker assignments right now.';
+    }
+}
+
+$stats = [
+    'assigned' => 0,
+    'today' => 0,
+    'in_progress' => 0,
+    'completed' => 0,
+];
+
+$stats['assigned'] = count($assignedWalks);
+$stats['today'] = count($todayWalks);
+
+foreach ($assignedWalks as $walk) {
+    if (normalizeWalkStatus($walk['status'] ?? '') === 'in_progress') {
+        $stats['in_progress']++;
+    }
+}
+
+$stats['completed'] = count($completedWalks);
 ?>
 <?php include 'includes/header.php'; ?>
 <?php include 'includes/nav.php'; ?>
 
 <style>
-.walker-page {
-  background: #f4f1ea;
-  min-height: calc(100vh - 120px);
-  padding: 32px 20px 60px;
+.walker-dashboard-page{
+  background:#f4f1ea;
+  min-height:calc(100vh - 120px);
+  padding:32px 18px 60px;
 }
-.walker-shell {
-  max-width: 1380px;
-  margin: 0 auto;
-  display: grid;
-  gap: 24px;
+.walker-dashboard-shell{
+  max-width:1440px;
+  margin:0 auto;
+  display:grid;
+  gap:22px;
 }
-.walker-hero {
-  background: linear-gradient(135deg, #111111 0%, #2b2414 100%);
-  color: #ffffff;
-  border-radius: 30px;
-  padding: 34px;
-  box-shadow: 0 14px 40px rgba(0,0,0,0.12);
+.walker-hero{
+  background:linear-gradient(135deg,#111111 0%,#2b2414 100%);
+  color:#fff;
+  border-radius:28px;
+  padding:34px 28px;
+  box-shadow:0 14px 40px rgba(0,0,0,0.12);
 }
-.walker-hero h1 {
-  margin: 0 0 10px;
-  font-size: 38px;
+.walker-hero h1{
+  margin:0 0 10px;
+  font-size:38px;
 }
-.walker-hero p {
-  margin: 0;
-  color: rgba(255,255,255,0.82);
+.walker-hero p{
+  margin:0;
+  color:rgba(255,255,255,0.82);
+  max-width:920px;
+  line-height:1.6;
 }
-.hero-badges {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 20px;
+.hero-links{
+  display:flex;
+  gap:12px;
+  flex-wrap:wrap;
+  margin-top:18px;
 }
-.hero-badge {
-  background: rgba(255,255,255,0.08);
-  color: #ffffff;
-  border-radius: 999px;
-  padding: 10px 14px;
-  font-weight: 700;
-  font-size: 13px;
+.hero-links a{
+  display:inline-block;
+  padding:12px 16px;
+  border-radius:999px;
+  font-weight:700;
+  text-decoration:none;
+  background:rgba(255,255,255,0.08);
+  color:#fff;
+  border:1px solid rgba(255,255,255,0.08);
 }
-.message {
-  border-radius: 14px;
-  padding: 14px 16px;
+.flash-message{
+  border-radius:18px;
+  padding:14px 16px;
+  font-weight:700;
 }
-.message.error {
-  background: #fff3f3;
-  color: #9b1c1c;
+.flash-message.success{
+  background:#eaf6ef;
+  color:#1f6b40;
+  border:1px solid #cfe8d8;
 }
-.message.success {
-  background: #f4fbf2;
-  color: #256029;
+.flash-message.error{
+  background:#fff0ee;
+  color:#8f2e25;
+  border:1px solid #f1d2cc;
 }
-.walker-list {
-  display: grid;
-  gap: 20px;
+.stats-grid{
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:16px;
 }
-.walker-card {
-  background: #ffffff;
-  border-radius: 24px;
-  padding: 24px;
-  box-shadow: 0 12px 30px rgba(0,0,0,0.07);
+.stat-card{
+  background:#fff;
+  border-radius:22px;
+  padding:22px;
+  box-shadow:0 12px 30px rgba(0,0,0,0.07);
 }
-.walker-top {
-  display: flex;
-  justify-content: space-between;
-  gap: 18px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
+.stat-card .label{
+  color:#777;
+  font-size:12px;
+  text-transform:uppercase;
+  letter-spacing:1px;
+  margin-bottom:10px;
+  font-weight:700;
 }
-.walker-top h2 {
-  margin: 0;
-  font-size: 24px;
+.stat-card .value{
+  font-size:32px;
+  font-weight:800;
+  color:#111;
 }
-.walker-sub {
-  margin-top: 8px;
-  color: #666666;
+.section-card{
+  background:#fff;
+  border-radius:24px;
+  padding:24px;
+  box-shadow:0 12px 30px rgba(0,0,0,0.07);
 }
-.walker-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
+.section-card h2{
+  margin:0 0 16px;
 }
-.walker-box {
-  background: #f7f4ee;
-  border-radius: 16px;
-  padding: 14px 16px;
+.walk-list{
+  display:grid;
+  gap:18px;
 }
-.walker-box strong {
-  display: block;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #777777;
-  margin-bottom: 6px;
+.walk-card{
+  background:#f7f4ee;
+  border-radius:22px;
+  overflow:hidden;
 }
-.status-pill {
-  display: inline-block;
-  padding: 10px 14px;
-  border-radius: 999px;
-  background: #d4af37;
-  color: #111111;
-  font-size: 13px;
-  font-weight: 700;
+.walk-head{
+  padding:18px 20px;
+  background:linear-gradient(180deg,#f8f4ec 0%,#f7f4ee 100%);
+  border-bottom:1px solid #eadfce;
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:16px;
+  flex-wrap:wrap;
 }
-.walker-form {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
+.walk-head h3{
+  margin:0 0 8px;
+  font-size:24px;
 }
-.walker-form .full {
-  grid-column: 1 / -1;
+.walk-sub{
+  color:#666;
+  font-size:14px;
+  line-height:1.6;
 }
-.walker-form label {
-  display: block;
-  font-weight: 700;
-  margin-bottom: 8px;
+.status-pill{
+  display:inline-block;
+  padding:9px 13px;
+  border-radius:999px;
+  color:#fff;
+  font-size:12px;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.7px;
 }
-.walker-form input,
-.walker-form select,
-.walker-form textarea {
-  width: 100%;
-  padding: 13px 14px;
-  border: 1px solid #ddd;
-  border-radius: 14px;
-  font-size: 15px;
-  font-family: Arial, sans-serif;
+.status-pill.pending{ background:#8a6a2f; }
+.status-pill.approved{ background:#2e7d4f; }
+.status-pill.assigned{ background:#2f5f94; }
+.status-pill.arrived{ background:#8d5ca8; }
+.status-pill.in-progress{ background:#5b48a0; }
+.status-pill.completed{ background:#1f6f5f; }
+.status-pill.cancelled{ background:#9d3b35; }
+
+.walk-body{
+  padding:20px;
+  display:grid;
+  gap:16px;
 }
-.walker-form textarea {
-  min-height: 100px;
-  resize: vertical;
+.info-grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:16px;
 }
-.walker-button {
-  display: inline-block;
-  background: #111111;
-  color: #ffffff;
-  border: none;
-  border-radius: 999px;
-  padding: 14px 20px;
-  font-weight: 700;
-  cursor: pointer;
+.info-card{
+  background:#fff;
+  border-radius:18px;
+  padding:18px;
 }
-.logout-link {
-  display: inline-block;
-  background: #ffffff;
-  color: #111111;
-  padding: 12px 18px;
-  border-radius: 999px;
-  font-weight: 700;
+.info-card h4{
+  margin:0 0 12px;
+  color:#111;
 }
-.empty-state {
-  background: #ffffff;
-  border-radius: 24px;
-  padding: 24px;
-  box-shadow: 0 12px 30px rgba(0,0,0,0.07);
-  color: #666666;
+.meta{
+  color:#666;
+  line-height:1.7;
+  font-size:14px;
 }
-.gps-controls {
-  margin-top: 16px;
-  background: #111111;
-  color: #ffffff;
-  border-radius: 18px;
-  padding: 18px;
+.meta strong{
+  color:#111;
 }
-.gps-controls h4 {
-  margin: 0 0 12px;
+.actions-grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:16px;
 }
-.gps-buttons {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
+.action-card{
+  background:#fff;
+  border-radius:18px;
+  padding:18px;
 }
-.gps-button {
-  border: none;
-  border-radius: 999px;
-  padding: 12px 16px;
-  font-weight: 700;
-  cursor: pointer;
+.action-card h4{
+  margin:0 0 14px;
 }
-.gps-start {
-  background: #d4af37;
-  color: #111111;
+.action-card form{
+  display:grid;
+  gap:12px;
 }
-.gps-stop {
-  background: #ffffff;
-  color: #111111;
+.action-card textarea{
+  width:100%;
+  border:1px solid #ddd4c6;
+  background:#fff;
+  border-radius:14px;
+  padding:12px 14px;
+  font-size:14px;
+  min-height:96px;
+  resize:vertical;
 }
-.gps-status {
-  margin-top: 12px;
-  font-size: 14px;
-  color: rgba(255,255,255,0.85);
+.action-buttons{
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
 }
-@media (max-width: 950px) {
-  .walker-grid,
-  .walker-form {
-    grid-template-columns: 1fr;
+.btn-dark,
+.btn-gold,
+.btn-light,
+.btn-green,
+.btn-blue{
+  border:none;
+  border-radius:999px;
+  padding:11px 16px;
+  font-weight:700;
+  text-decoration:none;
+  cursor:pointer;
+  display:inline-block;
+  text-align:center;
+}
+.btn-dark{ background:#111; color:#fff; }
+.btn-gold{ background:#b8955f; color:#fff; }
+.btn-light{ background:#efebe2; color:#111; }
+.btn-green{ background:#2e7d4f; color:#fff; }
+.btn-blue{ background:#2f5f94; color:#fff; }
+
+.summary-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:22px;
+}
+.simple-list{
+  display:grid;
+  gap:12px;
+}
+.simple-item{
+  background:#f7f4ee;
+  border-radius:18px;
+  padding:16px;
+}
+.simple-item strong{
+  display:block;
+  color:#111;
+  margin-bottom:6px;
+}
+.simple-item .small-meta{
+  color:#666;
+  line-height:1.6;
+  font-size:14px;
+}
+.empty-state{
+  background:#f7f4ee;
+  border-radius:18px;
+  padding:18px;
+  color:#666;
+}
+@media (max-width:1200px){
+  .info-grid,
+  .actions-grid,
+  .summary-grid{
+    grid-template-columns:1fr;
   }
-  .walker-hero h1 {
-    font-size: 30px;
+}
+@media (max-width:900px){
+  .stats-grid{
+    grid-template-columns:repeat(2,1fr);
+  }
+}
+@media (max-width:700px){
+  .stats-grid{
+    grid-template-columns:1fr;
+  }
+  .walker-hero h1{
+    font-size:30px;
+  }
+  .walker-hero,
+  .section-card,
+  .stat-card,
+  .walk-body,
+  .walk-head{
+    padding:20px;
   }
 }
 </style>
 
-<main class="walker-page">
-  <div class="walker-shell">
+<main class="walker-dashboard-page">
+  <div class="walker-dashboard-shell">
 
     <section class="walker-hero">
-      <h1>Walker Portal</h1>
-      <p>Welcome, <?= e($walker['full_name']) ?>. You only see walks assigned to your account.</p>
+      <h1>Walker Operations Dashboard</h1>
+      <p>
+        Welcome, <?= e($walkerName) ?>. View assigned walks, mark arrival, start active services, complete visits, and keep luxury client care smooth and organized.
+      </p>
 
-      <div class="hero-badges">
-        <span class="hero-badge">Active Walker</span>
-        <span class="hero-badge"><?= $todayCount ?> Assigned Walk<?= $todayCount === 1 ? '' : 's' ?></span>
-        <span class="hero-badge"><?= e($walker['email']) ?></span>
-      </div>
-
-      <div style="margin-top:18px;">
-        <a href="walker-logout.php" class="logout-link">Log Out</a>
+      <div class="hero-links">
+        <a href="live-tracking.php">Live Tracking</a>
+        <a href="admin-bookings.php">Admin Bookings</a>
+        <a href="walker-logout.php">Log Out</a>
       </div>
     </section>
 
-    <?php if ($errors): ?>
-      <div class="message error">
-        <?php foreach ($errors as $error): ?>
-          <div><?= e($error) ?></div>
-        <?php endforeach; ?>
+    <?php if ($flashMessage !== ''): ?>
+      <div class="flash-message <?= e($flashType) ?>">
+        <?= e($flashMessage) ?>
       </div>
     <?php endif; ?>
 
-    <?php if ($success): ?>
-      <div class="message success"><?= e($success) ?></div>
-    <?php endif; ?>
-
-    <?php if (!$walks): ?>
-      <div class="empty-state">
-        No walks are currently assigned to your walker account.
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Assigned Queue</div>
+        <div class="value"><?= e((string)$stats['assigned']) ?></div>
       </div>
-    <?php else: ?>
-      <section class="walker-list">
-        <?php foreach ($walks as $walk): ?>
-          <div class="walker-card">
-            <div class="walker-top">
-              <div>
-                <h2><?= e($walk['dog_name']) ?></h2>
-                <div class="walker-sub">
-                  Client: <?= e($walk['member_username'] ?: $walk['member_email']) ?>
+      <div class="stat-card">
+        <div class="label">Today's Walks</div>
+        <div class="value"><?= e((string)$stats['today']) ?></div>
+      </div>
+      <div class="stat-card">
+        <div class="label">In Progress</div>
+        <div class="value"><?= e((string)$stats['in_progress']) ?></div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Completed</div>
+        <div class="value"><?= e((string)$stats['completed']) ?></div>
+      </div>
+    </section>
+
+    <section class="section-card">
+      <h2>Active & Assigned Walks</h2>
+
+      <?php if (!$assignedWalks): ?>
+        <div class="empty-state">No assigned walks found right now.</div>
+      <?php else: ?>
+        <div class="walk-list">
+          <?php foreach ($assignedWalks as $walk): ?>
+            <?php
+              $currentStatus = normalizeWalkStatus($walk['status'] ?? 'pending');
+              $currentNotes = (string)($walk['notes'] ?? '');
+            ?>
+            <article class="walk-card">
+              <div class="walk-head">
+                <div>
+                  <h3><?= e($walk['dog_name']) ?> — Walk #<?= e((string)$walk['id']) ?></h3>
+                  <div class="walk-sub">
+                    Scheduled: <?= e($walk['walk_date']) ?> at <?= e($walk['walk_time']) ?><br>
+                    Member: <?= e($walk['member_username'] ?: $walk['member_email']) ?>
+                  </div>
+                </div>
+
+                <span class="status-pill <?= e(statusClass($currentStatus)) ?>">
+                  <?= e(statusLabel($currentStatus)) ?>
+                </span>
+              </div>
+
+              <div class="walk-body">
+                <div class="info-grid">
+                  <div class="info-card">
+                    <h4>Client</h4>
+                    <div class="meta">
+                      <strong>Username:</strong> <?= e($walk['member_username'] ?: 'N/A') ?><br>
+                      <strong>Email:</strong> <?= e($walk['member_email']) ?><br>
+                      <strong>Member ID:</strong> <?= e((string)$walk['member_id']) ?>
+                    </div>
+                  </div>
+
+                  <div class="info-card">
+                    <h4>Dog Details</h4>
+                    <div class="meta">
+                      <strong>Name:</strong> <?= e($walk['dog_name']) ?><br>
+                      <strong>Breed:</strong> <?= e($walk['breed'] ?: 'N/A') ?><br>
+                      <strong>Size:</strong> <?= e($walk['size'] ?: 'N/A') ?><br>
+                      <strong>Duration:</strong> <?= e((string)$walk['duration_minutes']) ?> minutes
+                    </div>
+                  </div>
+
+                  <div class="info-card">
+                    <h4>Service Flow</h4>
+                    <div class="meta">
+                      <strong>Walker:</strong> <?= e($walk['walker_name'] ?: $walkerName) ?><br>
+                      <strong>Date:</strong> <?= e($walk['walk_date']) ?><br>
+                      <strong>Time:</strong> <?= e($walk['walk_time']) ?><br>
+                      <strong>Status:</strong> <?= e(statusLabel($currentStatus)) ?>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="actions-grid">
+                  <div class="action-card">
+                    <h4>Mark Arrived</h4>
+                    <form method="POST">
+                      <input type="hidden" name="action" value="mark_arrived">
+                      <input type="hidden" name="walk_id" value="<?= e((string)$walk['id']) ?>">
+
+                      <?php if ($walksTableHasNotes): ?>
+                        <textarea name="notes" placeholder="Arrival note, access note, lobby update, or greeting details..."><?= e($currentNotes) ?></textarea>
+                      <?php endif; ?>
+
+                      <div class="action-buttons">
+                        <button type="submit" class="btn-gold">Mark Arrived</button>
+                      </div>
+                    </form>
+                  </div>
+
+                  <div class="action-card">
+                    <h4>Start Walk</h4>
+                    <form method="POST">
+                      <input type="hidden" name="action" value="start_walk">
+                      <input type="hidden" name="walk_id" value="<?= e((string)$walk['id']) ?>">
+
+                      <?php if ($walksTableHasNotes): ?>
+                        <textarea name="notes" placeholder="Starting walk note, temperament update, route plan, or quick observation..."><?= e($currentNotes) ?></textarea>
+                      <?php endif; ?>
+
+                      <div class="action-buttons">
+                        <button type="submit" class="btn-blue">Start Walk</button>
+                        <a href="live-tracking.php" class="btn-light">Open Tracking</a>
+                      </div>
+                    </form>
+                  </div>
+
+                  <div class="action-card">
+                    <h4>Complete Walk</h4>
+                    <form method="POST">
+                      <input type="hidden" name="action" value="complete_walk">
+                      <input type="hidden" name="walk_id" value="<?= e((string)$walk['id']) ?>">
+
+                      <?php if ($walksTableHasNotes): ?>
+                        <textarea name="notes" placeholder="Completion note, potty update, mood, behavior, or premium service summary..."><?= e($currentNotes) ?></textarea>
+                      <?php endif; ?>
+
+                      <div class="action-buttons">
+                        <button type="submit" class="btn-green">Complete Walk</button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+
+                <?php if ($walksTableHasNotes): ?>
+                  <div class="action-card">
+                    <h4>Save Notes Only</h4>
+                    <form method="POST">
+                      <input type="hidden" name="action" value="save_notes">
+                      <input type="hidden" name="walk_id" value="<?= e((string)$walk['id']) ?>">
+                      <textarea name="notes" placeholder="General service notes..."><?= e($currentNotes) ?></textarea>
+                      <div class="action-buttons">
+                        <button type="submit" class="btn-dark">Save Notes</button>
+                      </div>
+                    </form>
+                  </div>
+                <?php endif; ?>
+              </div>
+            </article>
+          <?php endforeach; ?>
+        </div>
+      <?php endif; ?>
+    </section>
+
+    <section class="summary-grid">
+      <div class="section-card">
+        <h2>Today's Schedule</h2>
+
+        <?php if (!$todayWalks): ?>
+          <div class="empty-state">No walks scheduled for today.</div>
+        <?php else: ?>
+          <div class="simple-list">
+            <?php foreach ($todayWalks as $walk): ?>
+              <?php $currentStatus = normalizeWalkStatus($walk['status'] ?? 'pending'); ?>
+              <div class="simple-item">
+                <strong><?= e($walk['walk_time']) ?> — <?= e($walk['dog_name']) ?></strong>
+                <div class="small-meta">
+                  <?= e($walk['member_username'] ?: $walk['member_email']) ?><br>
+                  <?= e((string)$walk['duration_minutes']) ?> minutes • <?= e(statusLabel($currentStatus)) ?>
                 </div>
               </div>
-              <div>
-                <span class="status-pill"><?= e($walk['status']) ?></span>
-              </div>
-            </div>
-
-            <div class="walker-grid">
-              <div class="walker-box">
-                <strong>Date</strong>
-                <?= e($walk['walk_date']) ?>
-              </div>
-              <div class="walker-box">
-                <strong>Time</strong>
-                <?= e($walk['walk_time']) ?>
-              </div>
-              <div class="walker-box">
-                <strong>Duration</strong>
-                <?= e((string)$walk['duration_minutes']) ?> Minutes
-              </div>
-              <div class="walker-box">
-                <strong>Temperament</strong>
-                <?= e($walk['temperament'] ?: 'Not added') ?>
-              </div>
-              <div class="walker-box">
-                <strong>Client Notes</strong>
-                <?= e($walk['notes'] ?: 'No client notes') ?>
-              </div>
-              <div class="walker-box">
-                <strong>Client Phone</strong>
-                <?= e($walk['member_phone'] ?: 'Not added') ?>
-              </div>
-              <div class="walker-box">
-                <strong>Current Location</strong>
-                <?= e($walk['current_location'] ?: 'Not updated yet') ?>
-              </div>
-              <div class="walker-box">
-                <strong>Bathroom Update</strong>
-                <?= e($walk['bathroom_update'] ?: 'No update yet') ?>
-              </div>
-            </div>
-
-            <form method="post" class="walker-form">
-              <input type="hidden" name="walk_id" value="<?= e((string)$walk['id']) ?>">
-
-              <div>
-                <label>Status Action</label>
-                <select name="action_type" required>
-                  <?php foreach ($allowedStatuses as $status): ?>
-                    <option value="<?= e($status) ?>" <?= $walk['status'] === $status ? 'selected' : '' ?>>
-                      <?= e($status) ?>
-                    </option>
-                  <?php endforeach; ?>
-                </select>
-              </div>
-
-              <div>
-                <label>ETA Minutes</label>
-                <input type="number" min="0" name="eta_minutes" value="">
-              </div>
-
-              <div>
-                <label>Current Location</label>
-                <input type="text" name="current_location" placeholder="Central Park South">
-              </div>
-
-              <div>
-                <label>Bathroom Update</label>
-                <input type="text" name="bathroom_update" placeholder="Peed once, no poop yet">
-              </div>
-
-              <div>
-                <label>Photo Note</label>
-                <input type="text" name="photo_note" placeholder="Photo uploaded near park entrance">
-              </div>
-
-              <div class="full">
-                <label>Walker Notes</label>
-                <textarea name="walker_notes" placeholder="Dog was calm, traffic was light, great energy today..."><?= e($walk['walker_notes'] ?: '') ?></textarea>
-              </div>
-
-              <div class="full">
-                <button type="submit" class="walker-button">Update Assigned Walk</button>
-              </div>
-            </form>
-
-            <div class="gps-controls" data-walk-id="<?= e((string)$walk['id']) ?>">
-              <h4>Real GPS Tracking</h4>
-              <div class="gps-buttons">
-                <button class="gps-button gps-start" type="button" onclick="startGps(<?= (int)$walk['id'] ?>)">Start Live GPS</button>
-                <button class="gps-button gps-stop" type="button" onclick="stopGps(<?= (int)$walk['id'] ?>)">Stop Live GPS</button>
-                <a class="gps-button gps-stop" href="live-tracking.php?walk_id=<?= (int)$walk['id'] ?>" style="text-decoration:none;">Open Live Map</a>
-              </div>
-              <div class="gps-status" id="gps-status-<?= (int)$walk['id'] ?>">GPS not running.</div>
-            </div>
+            <?php endforeach; ?>
           </div>
-        <?php endforeach; ?>
-      </section>
-    <?php endif; ?>
+        <?php endif; ?>
+      </div>
+
+      <div class="section-card">
+        <h2>Recent Completed Walks</h2>
+
+        <?php if (!$completedWalks): ?>
+          <div class="empty-state">No completed walks yet.</div>
+        <?php else: ?>
+          <div class="simple-list">
+            <?php foreach ($completedWalks as $walk): ?>
+              <div class="simple-item">
+                <strong><?= e($walk['dog_name']) ?> — <?= e($walk['walk_date']) ?></strong>
+                <div class="small-meta">
+                  <?= e($walk['member_username'] ?: $walk['member_email']) ?><br>
+                  <?= e($walk['walk_time']) ?> • <?= e((string)$walk['duration_minutes']) ?> minutes
+                </div>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
+      </div>
+    </section>
 
   </div>
 </main>
-
-<script>
-let gpsWatchId = null;
-let activeWalkId = null;
-
-function setGpsStatus(walkId, message) {
-  const el = document.getElementById(`gps-status-${walkId}`);
-  if (el) el.textContent = message;
-}
-
-async function sendGpsUpdate(walkId, lat, lng) {
-  const formData = new FormData();
-  formData.append('walk_id', walkId);
-  formData.append('lat', lat);
-  formData.append('lng', lng);
-  formData.append('current_location', `Lat ${lat.toFixed(6)}, Lng ${lng.toFixed(6)}`);
-
-  const response = await fetch('walker-location-update.php', {
-    method: 'POST',
-    body: formData
-  });
-
-  return response.json();
-}
-
-function startGps(walkId) {
-  if (!navigator.geolocation) {
-    setGpsStatus(walkId, 'Geolocation is not supported on this device.');
-    return;
-  }
-
-  if (gpsWatchId !== null) {
-    navigator.geolocation.clearWatch(gpsWatchId);
-    gpsWatchId = null;
-  }
-
-  activeWalkId = walkId;
-  setGpsStatus(walkId, 'Starting GPS... please allow location access.');
-
-  gpsWatchId = navigator.geolocation.watchPosition(
-    async (position) => {
-      const lat = position.coords.latitude;
-      const lng = position.coords.longitude;
-
-      try {
-        const result = await sendGpsUpdate(walkId, lat, lng);
-        if (result.ok) {
-          setGpsStatus(
-            walkId,
-            `Live GPS active. Last sent: ${lat.toFixed(6)}, ${lng.toFixed(6)}`
-          );
-        } else {
-          setGpsStatus(walkId, 'GPS update failed: ' + (result.error || 'Unknown error'));
-        }
-      } catch (error) {
-        setGpsStatus(walkId, 'GPS update failed. Check connection.');
-      }
-    },
-    (error) => {
-      setGpsStatus(walkId, 'Location error: ' + error.message);
-    },
-    {
-      enableHighAccuracy: true,
-      maximumAge: 0,
-      timeout: 10000
-    }
-  );
-}
-
-function stopGps(walkId) {
-  if (gpsWatchId !== null) {
-    navigator.geolocation.clearWatch(gpsWatchId);
-    gpsWatchId = null;
-  }
-  activeWalkId = null;
-  setGpsStatus(walkId, 'GPS stopped.');
-}
-</script>
 
 <?php include 'includes/footer.php'; ?>
