@@ -1,496 +1,755 @@
 <?php
-require_once __DIR__ . '/includes/member_config.php';
+session_start();
+require_once __DIR__ . '/data/config/db.php';
 
-$member = currentMember($pdo);
-
-if (!$member) {
-    $member = [
-        'id' => 0,
-        'username' => 'Preview Member',
-        'email' => 'member@example.com',
-        'phone' => '(631) 555-1234',
-        'preferred_login' => 'email',
-        'email_verified' => 1
-    ];
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit;
 }
 
-$errors = [];
+$userId = $_SESSION['user_id'];
+$fullName = $_SESSION['full_name'] ?? 'Member';
+
 $success = '';
+$error = '';
+$pets = [];
 
-$dogId = '';
-$walkDate = '';
-$walkTime = '';
-$durationMinutes = '30';
-$notes = '';
-
-$dogs = [];
-$walks = [];
-
-if ((int)$member['id'] > 0) {
-    $dogStmt = $pdo->prepare("
-        SELECT *
-        FROM dogs
-        WHERE member_id = :member_id
-        ORDER BY dog_name ASC
+try {
+    $petsStmt = $pdo->prepare("
+        SELECT id, pet_name, breed, status
+        FROM pets
+        WHERE user_id = ? AND status = 'active'
+        ORDER BY pet_name ASC
     ");
-    $dogStmt->execute([':member_id' => $member['id']]);
-    $dogs = $dogStmt->fetchAll(PDO::FETCH_ASSOC);
-} else {
-    $dogs = [
-        ['id' => 1, 'dog_name' => 'Bentley'],
-        ['id' => 2, 'dog_name' => 'Luna']
-    ];
+    $petsStmt->execute([$userId]);
+    $pets = $petsStmt->fetchAll();
+} catch (PDOException $e) {
+    die('Could not load pets: ' . $e->getMessage());
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $dogId = trim($_POST['dog_id'] ?? '');
-    $walkDate = trim($_POST['walk_date'] ?? '');
-    $walkTime = trim($_POST['walk_time'] ?? '');
-    $durationMinutes = trim($_POST['duration_minutes'] ?? '30');
-    $notes = trim($_POST['notes'] ?? '');
+    $petId = trim($_POST['pet_id'] ?? '');
+    $serviceType = trim($_POST['service_type'] ?? '');
+    $serviceDate = trim($_POST['service_date'] ?? '');
+    $serviceTime = trim($_POST['service_time'] ?? '');
+    $durationMinutes = trim($_POST['duration_minutes'] ?? '');
+    $dogSize = trim($_POST['dog_size'] ?? '');
+    $accessNotes = trim($_POST['access_notes'] ?? '');
+    $clientNotes = trim($_POST['client_notes'] ?? '');
 
-    if ($dogId === '') {
-        $errors[] = 'Please choose a dog.';
-    }
+    $allowedServices = ['walk', 'daycare', 'boarding', 'drop-in visit', 'pet taxi'];
+    $allowedDurations = ['15', '20', '30', '45', '60'];
+    $allowedSizes = ['small', 'medium', 'large'];
 
-    if ($walkDate === '') {
-        $errors[] = 'Please choose a walk date.';
-    }
+    if ($petId === '' || $serviceType === '' || $serviceDate === '' || $serviceTime === '') {
+        $error = 'Please complete all required fields.';
+    } elseif (!in_array($serviceType, $allowedServices, true)) {
+        $error = 'Please choose a valid service.';
+    } elseif ($serviceType === 'walk' && !in_array($durationMinutes, $allowedDurations, true)) {
+        $error = 'Please choose a valid walk duration.';
+    } elseif ($serviceType === 'boarding' && !in_array($dogSize, $allowedSizes, true)) {
+        $error = 'Please choose a dog size for boarding.';
+    } else {
+        try {
+            $petCheckStmt = $pdo->prepare("
+                SELECT id, pet_name
+                FROM pets
+                WHERE id = ? AND user_id = ? AND status = 'active'
+                LIMIT 1
+            ");
+            $petCheckStmt->execute([$petId, $userId]);
+            $pet = $petCheckStmt->fetch();
 
-    if ($walkTime === '') {
-        $errors[] = 'Please choose a walk time.';
-    }
+            if (!$pet) {
+                $error = 'That pet could not be found on your account.';
+            } else {
+                $price = 0;
 
-    if (!in_array($durationMinutes, ['15', '20', '30', '45', '60'], true)) {
-        $errors[] = 'Please choose a valid walk duration.';
-    }
+                if ($serviceType === 'walk') {
+                    $walkPricing = [
+                        '15' => 18.00,
+                        '20' => 22.00,
+                        '30' => 27.00,
+                        '45' => 36.00,
+                        '60' => 45.00
+                    ];
+                    $price = $walkPricing[$durationMinutes] ?? 0;
+                } elseif ($serviceType === 'boarding') {
+                    $boardingPricing = [
+                        'small' => 80.00,
+                        'medium' => 100.00,
+                        'large' => 120.00
+                    ];
+                    $price = $boardingPricing[$dogSize] ?? 0;
+                    $durationMinutes = null;
+                } elseif ($serviceType === 'daycare') {
+                    $price = 45.00;
+                    $durationMinutes = null;
+                } elseif ($serviceType === 'drop-in visit') {
+                    $price = 30.00;
+                    $durationMinutes = null;
+                } elseif ($serviceType === 'pet taxi') {
+                    $price = 35.00;
+                    $durationMinutes = null;
+                }
 
-    if ((int)$member['id'] > 0 && $dogId !== '') {
-        $checkDog = $pdo->prepare("
-            SELECT id
-            FROM dogs
-            WHERE id = :dog_id AND member_id = :member_id
-            LIMIT 1
-        ");
-        $checkDog->execute([
-            ':dog_id' => $dogId,
-            ':member_id' => $member['id']
-        ]);
+                $extraNotes = $clientNotes;
+                if ($serviceType === 'boarding' && $dogSize !== '') {
+                    $sizeLabel = ucfirst($dogSize) . ' dog';
+                    $extraNotes = "Boarding size: {$sizeLabel}" . ($clientNotes !== '' ? "\n\n" . $clientNotes : '');
+                }
 
-        if (!$checkDog->fetch()) {
-            $errors[] = 'That dog profile does not belong to this account.';
+                $insertStmt = $pdo->prepare("
+                    INSERT INTO bookings (
+                        user_id,
+                        pet_id,
+                        assigned_walker_id,
+                        service_type,
+                        service_date,
+                        service_time,
+                        duration_minutes,
+                        status,
+                        access_notes,
+                        client_notes,
+                        price,
+                        is_instant_booking
+                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'pending', ?, ?, ?, 0)
+                ");
+
+                $insertStmt->execute([
+                    $userId,
+                    $petId,
+                    $serviceType,
+                    $serviceDate,
+                    $serviceTime,
+                    $durationMinutes !== null && $durationMinutes !== '' ? (int)$durationMinutes : null,
+                    $accessNotes !== '' ? $accessNotes : null,
+                    $extraNotes !== '' ? $extraNotes : null,
+                    $price
+                ]);
+
+                $success = 'Your booking request has been submitted successfully.';
+                $_POST = [];
+            }
+        } catch (PDOException $e) {
+            $error = 'Could not create booking: ' . $e->getMessage();
         }
     }
-
-    if (!$errors && (int)$member['id'] > 0) {
-        $insert = $pdo->prepare("
-            INSERT INTO walks (
-                member_id,
-                dog_id,
-                walk_date,
-                walk_time,
-                duration_minutes,
-                notes,
-                status
-            ) VALUES (
-                :member_id,
-                :dog_id,
-                :walk_date,
-                :walk_time,
-                :duration_minutes,
-                :notes,
-                'Requested'
-            )
-        ");
-
-        $insert->execute([
-            ':member_id' => $member['id'],
-            ':dog_id' => $dogId,
-            ':walk_date' => $walkDate,
-            ':walk_time' => $walkTime,
-            ':duration_minutes' => (int)$durationMinutes,
-            ':notes' => $notes
-        ]);
-
-        $success = 'Walk request submitted successfully.';
-        $dogId = '';
-        $walkDate = '';
-        $walkTime = '';
-        $durationMinutes = '30';
-        $notes = '';
-    } elseif (!$errors && (int)$member['id'] === 0) {
-        $success = 'Preview mode only. Log in with a real account to save walk requests.';
-    }
 }
 
-if ((int)$member['id'] > 0) {
-    $walkStmt = $pdo->prepare("
-        SELECT
-            walks.*,
-            dogs.dog_name
-        FROM walks
-        INNER JOIN dogs ON dogs.id = walks.dog_id
-        WHERE walks.member_id = :member_id
-        ORDER BY walks.walk_date ASC, walks.walk_time ASC
-        LIMIT 8
-    ");
-    $walkStmt->execute([':member_id' => $member['id']]);
-    $walks = $walkStmt->fetchAll(PDO::FETCH_ASSOC);
-} else {
-    $walks = [
-        [
-            'dog_name' => 'Bentley',
-            'walk_date' => date('Y-m-d', strtotime('+1 day')),
-            'walk_time' => '13:00',
-            'duration_minutes' => 30,
-            'status' => 'Scheduled',
-            'notes' => 'Preview walk request'
-        ]
-    ];
+function oldValue(string $key): string
+{
+    return htmlspecialchars($_POST[$key] ?? '');
 }
 ?>
-<?php include 'includes/header.php'; ?>
-<?php include 'includes/nav.php'; ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Book a Luxury Service | Doggie Dorian's</title>
+    <style>
+        * { box-sizing: border-box; }
 
-<style>
-.book-walk-page {
-  background: #f4f1ea;
-  min-height: calc(100vh - 120px);
-  padding: 32px 20px 60px;
-}
+        :root {
+            --bg: #f4f1eb;
+            --panel: rgba(255, 255, 255, 0.78);
+            --panel-solid: #ffffff;
+            --text: #171717;
+            --muted: #6b655d;
+            --line: rgba(27, 27, 27, 0.08);
+            --gold: #b69152;
+            --gold-deep: #8e6b34;
+            --shadow: 0 24px 60px rgba(34, 28, 18, 0.12);
+            --radius-xl: 28px;
+        }
 
-.book-walk-shell {
-  max-width: 1320px;
-  margin: 0 auto;
-  display: grid;
-  gap: 24px;
-}
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(182, 145, 82, 0.12), transparent 32%),
+                radial-gradient(circle at top right, rgba(0, 0, 0, 0.05), transparent 28%),
+                linear-gradient(180deg, #f8f5ef 0%, #f1ede6 100%);
+        }
 
-.book-walk-hero {
-  background: linear-gradient(135deg, #111111 0%, #2b2414 100%);
-  color: #ffffff;
-  border-radius: 30px;
-  padding: 34px;
-  box-shadow: 0 14px 40px rgba(0,0,0,0.12);
-}
+        .page {
+            min-height: 100vh;
+            padding: 30px 18px 56px;
+        }
 
-.book-walk-hero h1 {
-  margin: 0 0 10px;
-  font-size: 38px;
-}
+        .wrap {
+            max-width: 1240px;
+            margin: 0 auto;
+        }
 
-.book-walk-hero p {
-  margin: 0;
-  max-width: 760px;
-  color: rgba(255,255,255,0.82);
-}
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 18px;
+        }
 
-.hero-actions {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 18px;
-}
+        .brand-block {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
 
-.hero-link {
-  display: inline-block;
-  background: rgba(255,255,255,0.08);
-  color: #ffffff;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 999px;
-  padding: 12px 16px;
-  font-weight: 700;
-}
+        .brand-kicker {
+            font-size: 12px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--gold-deep);
+            font-weight: 700;
+        }
 
-.book-walk-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-}
+        .brand {
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: -0.6px;
+        }
 
-.walk-card {
-  background: #ffffff;
-  border-radius: 26px;
-  padding: 28px;
-  box-shadow: 0 12px 30px rgba(0,0,0,0.07);
-}
+        .nav-links {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
 
-.walk-card h2 {
-  margin-top: 0;
-  margin-bottom: 18px;
-}
+        .nav-links a {
+            text-decoration: none;
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(14px);
+            padding: 12px 16px;
+            border-radius: 999px;
+            box-shadow: 0 10px 30px rgba(31, 25, 17, 0.08);
+            font-weight: 700;
+        }
 
-.form-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
+        .hero {
+            position: relative;
+            overflow: hidden;
+            border-radius: 34px;
+            padding: 40px;
+            margin-bottom: 24px;
+            background:
+                linear-gradient(135deg, rgba(15, 15, 15, 0.97) 0%, rgba(35, 31, 26, 0.95) 52%, rgba(92, 70, 38, 0.93) 100%);
+            color: #fff;
+            box-shadow: var(--shadow);
+        }
 
-.form-group {
-  display: flex;
-  flex-direction: column;
-}
+        .hero-grid {
+            position: relative;
+            z-index: 1;
+            display: grid;
+            grid-template-columns: 1.25fr 0.75fr;
+            gap: 24px;
+            align-items: end;
+        }
 
-.form-group.full {
-  grid-column: 1 / -1;
-}
+        .eyebrow {
+            display: inline-block;
+            margin-bottom: 14px;
+            padding: 8px 12px;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 999px;
+            background: rgba(255,255,255,0.08);
+            color: rgba(255,255,255,0.9);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 1.8px;
+            text-transform: uppercase;
+        }
 
-.form-group label {
-  font-weight: 700;
-  margin-bottom: 8px;
-}
+        .hero h1 {
+            margin: 0 0 12px;
+            font-size: 46px;
+            line-height: 1.02;
+            letter-spacing: -1px;
+            max-width: 700px;
+        }
 
-.form-group input,
-.form-group select,
-.form-group textarea {
-  padding: 14px 16px;
-  border: 1px solid #ddd;
-  border-radius: 16px;
-  font-size: 15px;
-  font-family: Arial, sans-serif;
-}
+        .hero p {
+            margin: 0;
+            max-width: 700px;
+            color: rgba(255, 255, 255, 0.84);
+            line-height: 1.7;
+            font-size: 16px;
+        }
 
-.form-group textarea {
-  min-height: 120px;
-  resize: vertical;
-}
+        .hero-panel {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 24px;
+            padding: 22px;
+            backdrop-filter: blur(10px);
+        }
 
-.save-button {
-  display: inline-block;
-  background: #d4af37;
-  color: #111111;
-  border: none;
-  border-radius: 999px;
-  padding: 14px 22px;
-  font-weight: 700;
-  cursor: pointer;
-}
+        .hero-panel .mini-label {
+            margin: 0 0 8px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1.6px;
+            color: rgba(255,255,255,0.74);
+            font-weight: 700;
+        }
 
-.message {
-  border-radius: 14px;
-  padding: 14px 16px;
-  margin-bottom: 18px;
-}
+        .hero-panel .mini-value {
+            margin: 0 0 12px;
+            font-size: 26px;
+            font-weight: 700;
+        }
 
-.message.error {
-  background: #fff3f3;
-  color: #9b1c1c;
-}
+        .hero-panel .mini-copy {
+            margin: 0;
+            color: rgba(255,255,255,0.8);
+            line-height: 1.6;
+            font-size: 14px;
+        }
 
-.message.success {
-  background: #f4fbf2;
-  color: #256029;
-}
+        .layout {
+            display: grid;
+            grid-template-columns: 1.12fr 0.88fr;
+            gap: 24px;
+        }
 
-.walk-request-list {
-  display: grid;
-  gap: 16px;
-}
+        .card {
+            background: var(--panel);
+            border: 1px solid rgba(255,255,255,0.8);
+            backdrop-filter: blur(16px);
+            border-radius: var(--radius-xl);
+            padding: 30px;
+            box-shadow: var(--shadow);
+        }
 
-.walk-request-item {
-  background: #f7f4ee;
-  border-radius: 20px;
-  padding: 18px;
-}
+        .card-dark {
+            background:
+                linear-gradient(180deg, rgba(27, 27, 27, 0.96) 0%, rgba(43, 38, 31, 0.95) 100%);
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
 
-.walk-request-item h3 {
-  margin: 0 0 8px;
-  font-size: 20px;
-}
+        .card h2,
+        .card-dark h2 {
+            margin: 0 0 8px;
+            font-size: 28px;
+        }
 
-.walk-meta {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 14px;
-  margin-top: 14px;
-}
+        .card-subtext,
+        .card-dark .card-subtext {
+            margin: 0 0 24px;
+            line-height: 1.7;
+            font-size: 15px;
+        }
 
-.walk-meta-box {
-  background: #ffffff;
-  border-radius: 14px;
-  padding: 12px 14px;
-}
+        .card-subtext { color: var(--muted); }
+        .card-dark .card-subtext { color: rgba(255,255,255,0.78); }
 
-.walk-meta-box strong {
-  display: block;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #777777;
-  margin-bottom: 6px;
-}
+        .message {
+            margin-bottom: 20px;
+            padding: 15px 16px;
+            border-radius: 16px;
+            font-size: 14px;
+            line-height: 1.6;
+            font-weight: 700;
+        }
 
-.status-pill {
-  display: inline-block;
-  margin-top: 10px;
-  padding: 9px 12px;
-  border-radius: 999px;
-  background: #111111;
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 700;
-}
+        .error {
+            background: rgba(180, 36, 36, 0.08);
+            color: #8c1f1f;
+            border: 1px solid rgba(180, 36, 36, 0.12);
+        }
 
-.empty-state {
-  background: #f7f4ee;
-  border-radius: 20px;
-  padding: 22px;
-  color: #666666;
-}
+        .success {
+            background: rgba(29, 126, 58, 0.08);
+            color: #165f2d;
+            border: 1px solid rgba(29, 126, 58, 0.12);
+        }
 
-@media (max-width: 980px) {
-  .book-walk-grid {
-    grid-template-columns: 1fr;
-  }
-}
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+        }
 
-@media (max-width: 700px) {
-  .form-grid,
-  .walk-meta {
-    grid-template-columns: 1fr;
-  }
+        .full { grid-column: 1 / -1; }
 
-  .book-walk-hero h1 {
-    font-size: 30px;
-  }
-}
-</style>
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+        }
 
-<main class="book-walk-page">
-  <div class="book-walk-shell">
+        label {
+            font-weight: 700;
+            font-size: 14px;
+        }
 
-    <section class="book-walk-hero">
-      <h1>Book a Walk</h1>
-      <p>
-        Request a walk for one of your dogs, choose the date and time, and add
-        any special notes for your walker.
-      </p>
+        .field-note {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: -2px;
+        }
 
-      <div class="hero-actions">
-        <a href="dashboard.php" class="hero-link">Back to Dashboard</a>
-        <a href="my-dogs.php" class="hero-link">Manage Dogs</a>
-      </div>
-    </section>
+        input,
+        select,
+        textarea {
+            width: 100%;
+            border: 1px solid var(--line);
+            background: rgba(255,255,255,0.86);
+            padding: 14px 16px;
+            border-radius: 16px;
+            font-size: 15px;
+            color: var(--text);
+            font-family: Arial, sans-serif;
+        }
 
-    <section class="book-walk-grid">
+        textarea {
+            min-height: 130px;
+            resize: vertical;
+        }
 
-      <div class="walk-card">
-        <h2>New Walk Request</h2>
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: rgba(182, 145, 82, 0.8);
+            box-shadow: 0 0 0 4px rgba(182, 145, 82, 0.14);
+        }
 
-        <?php if ($errors): ?>
-          <div class="message error">
-            <?php foreach ($errors as $error): ?>
-              <div><?= e($error) ?></div>
-            <?php endforeach; ?>
-          </div>
-        <?php endif; ?>
+        .service-accent {
+            border-radius: 18px;
+            padding: 16px 18px;
+            background: linear-gradient(180deg, rgba(182,145,82,0.1), rgba(182,145,82,0.04));
+            border: 1px solid rgba(182,145,82,0.16);
+            margin-bottom: 20px;
+        }
 
-        <?php if ($success): ?>
-          <div class="message success"><?= e($success) ?></div>
-        <?php endif; ?>
+        .service-accent-title {
+            margin: 0 0 6px;
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--gold-deep);
+        }
 
-        <?php if (!$dogs): ?>
-          <div class="empty-state">
-            You need to add a dog profile before booking a walk.
-            <br><br>
-            <a href="my-dogs.php">Go to My Dogs</a>
-          </div>
-        <?php else: ?>
-          <form method="post" action="">
-            <div class="form-grid">
+        .service-accent-copy {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.6;
+            font-size: 14px;
+        }
 
-              <div class="form-group">
-                <label for="dog_id">Choose Dog</label>
-                <select id="dog_id" name="dog_id" required>
-                  <option value="">Select a dog</option>
-                  <?php foreach ($dogs as $dog): ?>
-                    <option value="<?= e((string)$dog['id']) ?>" <?= $dogId === (string)$dog['id'] ? 'selected' : '' ?>>
-                      <?= e($dog['dog_name']) ?>
-                    </option>
-                  <?php endforeach; ?>
-                </select>
-              </div>
+        .actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 28px;
+            flex-wrap: wrap;
+        }
 
-              <div class="form-group">
-                <label for="duration_minutes">Walk Duration</label>
-                <select id="duration_minutes" name="duration_minutes" required>
-                  <option value="15" <?= $durationMinutes === '15' ? 'selected' : '' ?>>15 Minutes</option>
-                  <option value="20" <?= $durationMinutes === '20' ? 'selected' : '' ?>>20 Minutes</option>
-                  <option value="30" <?= $durationMinutes === '30' ? 'selected' : '' ?>>30 Minutes</option>
-                  <option value="45" <?= $durationMinutes === '45' ? 'selected' : '' ?>>45 Minutes</option>
-                  <option value="60" <?= $durationMinutes === '60' ? 'selected' : '' ?>>60 Minutes</option>
-                </select>
-              </div>
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 52px;
+            padding: 0 20px;
+            border-radius: 999px;
+            text-decoration: none;
+            font-weight: 700;
+            border: none;
+            cursor: pointer;
+            font-size: 15px;
+        }
 
-              <div class="form-group">
-                <label for="walk_date">Walk Date</label>
-                <input id="walk_date" name="walk_date" type="date" value="<?= e($walkDate) ?>" required>
-              </div>
+        .btn-primary {
+            background: linear-gradient(135deg, var(--gold) 0%, #d8bc7b 100%);
+            color: #171717;
+            box-shadow: 0 14px 30px rgba(182, 145, 82, 0.24);
+        }
 
-              <div class="form-group">
-                <label for="walk_time">Preferred Time</label>
-                <input id="walk_time" name="walk_time" type="time" value="<?= e($walkTime) ?>" required>
-              </div>
+        .btn-secondary {
+            background: rgba(17,17,17,0.06);
+            color: var(--text);
+            border: 1px solid rgba(17,17,17,0.08);
+        }
 
-              <div class="form-group full">
-                <label for="notes">Special Notes</label>
-                <textarea id="notes" name="notes" placeholder="Potty routine, leash notes, energy level, access instructions..."><?= e($notes) ?></textarea>
-              </div>
+        .info-stack {
+            display: grid;
+            gap: 16px;
+        }
 
-              <div class="form-group full">
-                <button class="save-button" type="submit">Submit Walk Request</button>
-              </div>
+        .price-box {
+            border-radius: 22px;
+            padding: 20px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
 
-            </div>
-          </form>
-        <?php endif; ?>
-      </div>
+        .price-box h3 {
+            margin: 0 0 10px;
+            font-size: 18px;
+        }
 
-      <div class="walk-card">
-        <h2>Recent Walk Requests</h2>
+        .price-box p {
+            margin: 0;
+            line-height: 1.7;
+            color: rgba(255,255,255,0.82);
+            font-size: 14px;
+        }
 
-        <?php if (!$walks): ?>
-          <div class="empty-state">
-            No walk requests yet. Your submitted walks will appear here.
-          </div>
-        <?php else: ?>
-          <div class="walk-request-list">
-            <?php foreach ($walks as $walk): ?>
-              <div class="walk-request-item">
-                <h3><?= e($walk['dog_name']) ?></h3>
+        .notice {
+            border-radius: 20px;
+            padding: 22px;
+            background: rgba(17, 17, 17, 0.04);
+            border: 1px dashed rgba(17, 17, 17, 0.14);
+            color: var(--muted);
+            line-height: 1.7;
+        }
 
-                <div class="walk-meta">
-                  <div class="walk-meta-box">
-                    <strong>Date</strong>
-                    <?= e($walk['walk_date']) ?>
-                  </div>
+        .notice a {
+            color: var(--gold-deep);
+            font-weight: 700;
+            text-decoration: none;
+        }
 
-                  <div class="walk-meta-box">
-                    <strong>Time</strong>
-                    <?= e($walk['walk_time']) ?>
-                  </div>
+        .pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 18px;
+        }
 
-                  <div class="walk-meta-box">
-                    <strong>Duration</strong>
-                    <?= e((string)$walk['duration_minutes']) ?> Minutes
-                  </div>
+        .pill {
+            padding: 10px 14px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: rgba(255,255,255,0.84);
+            font-size: 13px;
+            font-weight: 700;
+        }
 
-                  <div class="walk-meta-box">
-                    <strong>Notes</strong>
-                    <?= e($walk['notes'] ?: 'No notes added') ?>
-                  </div>
+        @media (max-width: 1024px) {
+            .hero-grid,
+            .layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .page { padding: 18px 14px 40px; }
+            .hero { padding: 26px; border-radius: 26px; }
+            .hero h1 { font-size: 34px; }
+            .card, .card-dark { padding: 22px; }
+            .grid { grid-template-columns: 1fr; }
+            .brand { font-size: 24px; }
+        }
+    </style>
+    <script>
+        function toggleFields() {
+            const serviceType = document.getElementById('service_type').value;
+            const durationWrap = document.getElementById('duration-wrap');
+            const boardingWrap = document.getElementById('boarding-wrap');
+
+            durationWrap.style.display = serviceType === 'walk' ? 'block' : 'none';
+            boardingWrap.style.display = serviceType === 'boarding' ? 'block' : 'none';
+
+            if (serviceType !== 'walk') {
+                document.getElementById('duration_minutes').value = '';
+            }
+
+            if (serviceType !== 'boarding') {
+                document.getElementById('dog_size').value = '';
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', toggleFields);
+    </script>
+</head>
+<body>
+    <div class="page">
+        <div class="wrap">
+            <div class="topbar">
+                <div class="brand-block">
+                    <div class="brand-kicker">Private Pet Concierge</div>
+                    <div class="brand">Doggie Dorian’s</div>
                 </div>
 
-                <span class="status-pill"><?= e($walk['status']) ?></span>
-              </div>
-            <?php endforeach; ?>
-          </div>
-        <?php endif; ?>
-      </div>
+                <div class="nav-links">
+                    <a href="dashboard.php">Dashboard</a>
+                    <a href="add-pet.php">Add Pet</a>
+                    <a href="profile.php">Profile</a>
+                    <a href="logout.php">Logout</a>
+                </div>
+            </div>
 
-    </section>
+            <section class="hero">
+                <div class="hero-grid">
+                    <div>
+                        <span class="eyebrow">Luxury Booking Experience</span>
+                        <h1>Book elevated care with confidence, detail, and discretion.</h1>
+                        <p>
+                            Welcome, <?php echo htmlspecialchars($fullName); ?>. Submit your request for a polished,
+                            concierge-level service experience designed around convenience, trust, and premium care.
+                        </p>
 
-  </div>
-</main>
+                        <div class="pill-row">
+                            <span class="pill">Concierge presentation</span>
+                            <span class="pill">Premium service request flow</span>
+                            <span class="pill">Luxury pricing display</span>
+                        </div>
+                    </div>
 
-<?php include 'includes/footer.php'; ?>
+                    <div class="hero-panel">
+                        <p class="mini-label">Signature Boarding Pricing</p>
+                        <p class="mini-value">Small $80 • Medium $100 • Large $120</p>
+                        <p class="mini-copy">
+                            Boarding reflects size-based pricing for a more tailored and professional service menu.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="layout">
+                <div class="card">
+                    <h2>Booking Request</h2>
+                    <p class="card-subtext">
+                        Complete the details below and we’ll save the request to your account with pending status for review.
+                    </p>
+
+                    <div class="service-accent">
+                        <p class="service-accent-title">Concierge-Level Booking</p>
+                        <p class="service-accent-copy">
+                            Every request is reviewed with care, attention to detail, and a service-first approach designed to feel seamless and elevated.
+                        </p>
+                    </div>
+
+                    <?php if ($error !== ''): ?>
+                        <div class="message error"><?php echo htmlspecialchars($error); ?></div>
+                    <?php endif; ?>
+
+                    <?php if ($success !== ''): ?>
+                        <div class="message success"><?php echo htmlspecialchars($success); ?></div>
+                    <?php endif; ?>
+
+                    <?php if (count($pets) === 0): ?>
+                        <div class="notice">
+                            You need to add at least one dog before booking a service.<br><br>
+                            <a href="add-pet.php">Add your first pet profile</a>
+                        </div>
+                    <?php else: ?>
+                        <form method="POST" action="">
+                            <div class="grid">
+                                <div class="field full">
+                                    <label for="pet_id">Select Dog</label>
+                                    <select id="pet_id" name="pet_id" required>
+                                        <option value="">Choose your dog</option>
+                                        <?php foreach ($pets as $pet): ?>
+                                            <option value="<?php echo htmlspecialchars((string)$pet['id']); ?>" <?php echo (($_POST['pet_id'] ?? '') == $pet['id']) ? 'selected' : ''; ?>>
+                                                <?php
+                                                $petLabel = $pet['pet_name'];
+                                                if (!empty($pet['breed'])) {
+                                                    $petLabel .= ' • ' . $pet['breed'];
+                                                }
+                                                echo htmlspecialchars($petLabel);
+                                                ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="field">
+                                    <label for="service_type">Service Type</label>
+                                    <select id="service_type" name="service_type" onchange="toggleFields()" required>
+                                        <option value="">Choose a service</option>
+                                        <option value="walk" <?php echo (($_POST['service_type'] ?? '') === 'walk') ? 'selected' : ''; ?>>Walk</option>
+                                        <option value="daycare" <?php echo (($_POST['service_type'] ?? '') === 'daycare') ? 'selected' : ''; ?>>Daycare</option>
+                                        <option value="boarding" <?php echo (($_POST['service_type'] ?? '') === 'boarding') ? 'selected' : ''; ?>>Boarding</option>
+                                        <option value="drop-in visit" <?php echo (($_POST['service_type'] ?? '') === 'drop-in visit') ? 'selected' : ''; ?>>Drop-In Visit</option>
+                                        <option value="pet taxi" <?php echo (($_POST['service_type'] ?? '') === 'pet taxi') ? 'selected' : ''; ?>>Pet Taxi</option>
+                                    </select>
+                                </div>
+
+                                <div class="field" id="duration-wrap">
+                                    <label for="duration_minutes">Walk Duration</label>
+                                    <select id="duration_minutes" name="duration_minutes">
+                                        <option value="">Choose duration</option>
+                                        <option value="15" <?php echo (($_POST['duration_minutes'] ?? '') === '15') ? 'selected' : ''; ?>>15 Minutes</option>
+                                        <option value="20" <?php echo (($_POST['duration_minutes'] ?? '') === '20') ? 'selected' : ''; ?>>20 Minutes</option>
+                                        <option value="30" <?php echo (($_POST['duration_minutes'] ?? '') === '30') ? 'selected' : ''; ?>>30 Minutes</option>
+                                        <option value="45" <?php echo (($_POST['duration_minutes'] ?? '') === '45') ? 'selected' : ''; ?>>45 Minutes</option>
+                                        <option value="60" <?php echo (($_POST['duration_minutes'] ?? '') === '60') ? 'selected' : ''; ?>>60 Minutes</option>
+                                    </select>
+                                    <div class="field-note">Walk pricing follows your current standard rate card.</div>
+                                </div>
+
+                                <div class="field" id="boarding-wrap">
+                                    <label for="dog_size">Boarding Size</label>
+                                    <select id="dog_size" name="dog_size">
+                                        <option value="">Choose size</option>
+                                        <option value="small" <?php echo (($_POST['dog_size'] ?? '') === 'small') ? 'selected' : ''; ?>>Small Dog — $80</option>
+                                        <option value="medium" <?php echo (($_POST['dog_size'] ?? '') === 'medium') ? 'selected' : ''; ?>>Medium Dog — $100</option>
+                                        <option value="large" <?php echo (($_POST['dog_size'] ?? '') === 'large') ? 'selected' : ''; ?>>Large Dog — $120</option>
+                                    </select>
+                                    <div class="field-note">Boarding is priced by dog size for a more tailored premium stay.</div>
+                                </div>
+
+                                <div class="field">
+                                    <label for="service_date">Service Date</label>
+                                    <input type="date" id="service_date" name="service_date" value="<?php echo oldValue('service_date'); ?>" required>
+                                </div>
+
+                                <div class="field">
+                                    <label for="service_time">Service Time</label>
+                                    <input type="time" id="service_time" name="service_time" value="<?php echo oldValue('service_time'); ?>" required>
+                                </div>
+
+                                <div class="field full">
+                                    <label for="access_notes">Access Notes</label>
+                                    <textarea id="access_notes" name="access_notes" placeholder="Building instructions, concierge notes, key handling, doorman details, home access, or arrival guidance."><?php echo oldValue('access_notes'); ?></textarea>
+                                </div>
+
+                                <div class="field full">
+                                    <label for="client_notes">Care Notes</label>
+                                    <textarea id="client_notes" name="client_notes" placeholder="Anything we should know to make this visit more personal, seamless, and comfortable for your dog."><?php echo oldValue('client_notes'); ?></textarea>
+                                </div>
+                            </div>
+
+                            <div class="actions">
+                                <button type="submit" class="btn btn-primary">Submit Premium Booking</button>
+                                <a href="dashboard.php" class="btn btn-secondary">Back to Dashboard</a>
+                            </div>
+                        </form>
+                    <?php endif; ?>
+                </div>
+
+                <div class="info-stack">
+                    <div class="card-dark">
+                        <h2>Service Pricing</h2>
+                        <p class="card-subtext">A cleaner, more premium rate presentation for your booking experience.</p>
+
+                        <div class="price-box">
+                            <h3>Walks</h3>
+                            <p>15 min — $18<br>20 min — $22<br>30 min — $27<br>45 min — $36<br>60 min — $45</p>
+                        </div>
+
+                        <div class="price-box" style="margin-top:14px;">
+                            <h3>Boarding</h3>
+                            <p>Small dog — $80<br>Medium dog — $100<br>Large dog — $120</p>
+                        </div>
+
+                        <div class="price-box" style="margin-top:14px;">
+                            <h3>Additional Services</h3>
+                            <p>Daycare — $45<br>Drop-In Visit — $30<br>Pet Taxi — $35</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,634 +1,495 @@
 <?php
-require_once __DIR__ . '/includes/member_config.php';
+session_start();
+require_once __DIR__ . '/data/config/db.php';
 
-$member = currentMember($pdo);
-
-if (!$member) {
-    $member = [
-        'id' => 0,
-        'username' => 'Preview Member',
-        'email' => 'member@example.com',
-        'phone' => '(631) 555-1234',
-        'preferred_login' => 'email',
-        'email_verified' => 1
-    ];
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit;
 }
 
-$displayName = $member['username'] ?: $member['email'];
+$userId = $_SESSION['user_id'];
+$fullName = $_SESSION['full_name'] ?? 'Member';
 
-$dogs = [];
-$dogCount = 0;
-$walkCount = 0;
-$planCount = 0;
-$latestWalkId = 0;
+$petCount = 0;
+$bookingCount = 0;
+$recentPets = [];
+$recentBookings = [];
 
-if ((int)$member['id'] > 0) {
-    $stmt = $pdo->prepare("
-        SELECT *
-        FROM dogs
-        WHERE member_id = :member_id
+try {
+    $petCountStmt = $pdo->prepare("SELECT COUNT(*) FROM pets WHERE user_id = ?");
+    $petCountStmt->execute([$userId]);
+    $petCount = (int)$petCountStmt->fetchColumn();
+
+    $bookingCountStmt = $pdo->prepare("SELECT COUNT(*) FROM bookings WHERE user_id = ?");
+    $bookingCountStmt->execute([$userId]);
+    $bookingCount = (int)$bookingCountStmt->fetchColumn();
+
+    $petsStmt = $pdo->prepare("
+        SELECT id, pet_name, breed, age, weight, gender, birthday, status, created_at
+        FROM pets
+        WHERE user_id = ?
         ORDER BY created_at DESC
-        LIMIT 3
     ");
-    $stmt->execute([':member_id' => $member['id']]);
-    $dogs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $petsStmt->execute([$userId]);
+    $recentPets = $petsStmt->fetchAll();
 
-    $countStmt = $pdo->prepare("SELECT COUNT(*) as total FROM dogs WHERE member_id = :member_id");
-    $countStmt->execute([':member_id' => $member['id']]);
-    $dogCount = (int)$countStmt->fetch(PDO::FETCH_ASSOC)['total'];
-
-    $walkCountStmt = $pdo->prepare("SELECT COUNT(*) as total FROM walks WHERE member_id = :member_id");
-    $walkCountStmt->execute([':member_id' => $member['id']]);
-    $walkCount = (int)$walkCountStmt->fetch(PDO::FETCH_ASSOC)['total'];
-
-    $planCountStmt = $pdo->prepare("SELECT COUNT(*) as total FROM custom_plans WHERE member_id = :member_id");
-    $planCountStmt->execute([':member_id' => $member['id']]);
-    $planCount = (int)$planCountStmt->fetch(PDO::FETCH_ASSOC)['total'];
-
-    $latestWalkStmt = $pdo->prepare("
-        SELECT id
-        FROM walks
-        WHERE member_id = :member_id
-        ORDER BY walk_date DESC, walk_time DESC
-        LIMIT 1
+    $bookingsStmt = $pdo->prepare("
+        SELECT id, service_type, service_date, service_time, duration_minutes, status, price, created_at
+        FROM bookings
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 5
     ");
-    $latestWalkStmt->execute([':member_id' => $member['id']]);
-    $latestWalk = $latestWalkStmt->fetch(PDO::FETCH_ASSOC);
-    $latestWalkId = $latestWalk ? (int)$latestWalk['id'] : 0;
-} else {
-    $dogs = [
-        [
-            'dog_name' => 'Bentley',
-            'breed' => 'French Bulldog',
-            'age' => '3 years',
-            'weight' => '24 lbs',
-            'temperament' => 'Friendly and energetic'
-        ]
-    ];
-    $dogCount = 1;
-    $walkCount = 2;
-    $planCount = 1;
-    $latestWalkId = 1;
+    $bookingsStmt->execute([$userId]);
+    $recentBookings = $bookingsStmt->fetchAll();
+} catch (PDOException $e) {
+    die('Dashboard error: ' . $e->getMessage());
+}
+
+function formatPetMeta(array $pet): string
+{
+    $parts = [];
+
+    if (!empty($pet['breed'])) {
+        $parts[] = $pet['breed'];
+    }
+
+    if ($pet['age'] !== null && $pet['age'] !== '') {
+        $parts[] = $pet['age'] . ' yr' . ((int)$pet['age'] === 1 ? '' : 's');
+    }
+
+    if (!empty($pet['weight'])) {
+        $parts[] = $pet['weight'];
+    }
+
+    if (!empty($pet['gender'])) {
+        $parts[] = $pet['gender'];
+    }
+
+    return implode(' • ', $parts);
+}
+
+function formatServiceName(string $service): string
+{
+    return ucwords(str_replace('-', ' ', $service));
 }
 ?>
-<?php include 'includes/header.php'; ?>
-<?php include 'includes/nav.php'; ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | Doggie Dorian's</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
 
-<style>
-.dashboard-app {
-  background: #f4f1ea;
-  min-height: calc(100vh - 120px);
-  padding: 30px 20px 50px;
-}
-.dashboard-shell {
-  max-width: 1400px;
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 24px;
-}
-.dashboard-sidebar {
-  background: #111111;
-  color: #ffffff;
-  border-radius: 28px;
-  padding: 28px 22px;
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.12);
-  height: fit-content;
-  position: sticky;
-  top: 24px;
-}
-.dashboard-brand {
-  margin-bottom: 28px;
-}
-.dashboard-brand h2 {
-  margin: 0 0 8px;
-  font-size: 24px;
-}
-.dashboard-brand p {
-  margin: 0;
-  color: rgba(255,255,255,0.72);
-  font-size: 14px;
-}
-.member-chip {
-  display: inline-block;
-  margin-top: 14px;
-  padding: 10px 14px;
-  border-radius: 999px;
-  background: rgba(212, 175, 55, 0.16);
-  color: #d4af37;
-  font-weight: 700;
-  font-size: 13px;
-}
-.sidebar-section-title {
-  margin: 26px 0 12px;
-  font-size: 12px;
-  letter-spacing: 1.3px;
-  text-transform: uppercase;
-  color: rgba(255,255,255,0.55);
-}
-.sidebar-nav {
-  display: grid;
-  gap: 10px;
-}
-.sidebar-link {
-  display: block;
-  padding: 13px 15px;
-  border-radius: 16px;
-  color: #ffffff;
-  background: rgba(255,255,255,0.04);
-  font-weight: 600;
-  transition: 0.2s ease;
-}
-.sidebar-link.active {
-  background: #d4af37;
-  color: #111111;
-}
-.sidebar-link:hover {
-  background: rgba(255,255,255,0.12);
-}
-.sidebar-link.active:hover {
-  background: #d4af37;
-}
-.sidebar-footer {
-  margin-top: 28px;
-  padding-top: 22px;
-  border-top: 1px solid rgba(255,255,255,0.1);
-}
-.sidebar-footer a {
-  display: inline-block;
-  width: 100%;
-  text-align: center;
-  background: #ffffff;
-  color: #111111;
-  padding: 13px 16px;
-  border-radius: 999px;
-  font-weight: 700;
-}
-.dashboard-main {
-  display: grid;
-  gap: 24px;
-}
-.dashboard-hero {
-  background: linear-gradient(135deg, #111111 0%, #2b2414 100%);
-  color: #ffffff;
-  border-radius: 30px;
-  padding: 34px;
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.12);
-}
-.dashboard-hero h1 {
-  margin: 0 0 10px;
-  font-size: 38px;
-  line-height: 1.1;
-}
-.dashboard-hero p {
-  margin: 0;
-  max-width: 760px;
-  color: rgba(255,255,255,0.8);
-}
-.hero-badges {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 24px;
-}
-.hero-badge {
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.08);
-  color: #ffffff;
-  padding: 11px 14px;
-  border-radius: 999px;
-  font-size: 14px;
-  font-weight: 600;
-}
-.hero-badge.gold {
-  background: rgba(212, 175, 55, 0.16);
-  color: #f2d471;
-  border-color: rgba(212,175,55,0.2);
-}
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: 1.3fr 0.9fr;
-  gap: 24px;
-}
-.dashboard-column {
-  display: grid;
-  gap: 24px;
-}
-.dashboard-card {
-  background: #ffffff;
-  border-radius: 26px;
-  padding: 28px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.07);
-}
-.dashboard-card h2,
-.dashboard-card h3 {
-  margin-top: 0;
-}
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
-}
-.card-header h2,
-.card-header h3 {
-  margin-bottom: 0;
-}
-.card-link {
-  color: #111111;
-  font-weight: 700;
-}
-.status-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 18px;
-}
-.status-box {
-  background: #f7f4ee;
-  border-radius: 20px;
-  padding: 18px;
-}
-.status-label {
-  margin: 0 0 8px;
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #777777;
-}
-.status-value {
-  margin: 0;
-  font-size: 28px;
-  font-weight: 800;
-  color: #111111;
-}
-.status-note {
-  margin-top: 8px;
-  font-size: 13px;
-  color: #666666;
-}
-.quick-actions {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 14px;
-}
-.action-box {
-  background: #f7f4ee;
-  border-radius: 18px;
-  padding: 18px;
-}
-.action-box h4 {
-  margin: 0 0 8px;
-  font-size: 17px;
-}
-.action-box p {
-  margin: 0 0 12px;
-  color: #666666;
-  font-size: 14px;
-}
-.action-button {
-  display: inline-block;
-  background: #111111;
-  color: #ffffff;
-  padding: 11px 14px;
-  border-radius: 999px;
-  font-weight: 700;
-  font-size: 14px;
-}
-.action-button.gold {
-  background: #d4af37;
-  color: #111111;
-}
-.dog-preview-list {
-  display: grid;
-  gap: 14px;
-}
-.dog-preview-item {
-  background: #f7f4ee;
-  border-radius: 18px;
-  padding: 16px 18px;
-}
-.dog-preview-item h4 {
-  margin: 0 0 8px;
-  font-size: 18px;
-}
-.dog-preview-item p {
-  margin: 0;
-  color: #666666;
-  font-size: 14px;
-}
-.empty-card {
-  background: #f7f4ee;
-  border-radius: 18px;
-  padding: 18px;
-  color: #666666;
-}
-.account-list {
-  display: grid;
-  gap: 12px;
-}
-.account-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 0;
-  border-bottom: 1px solid #efefef;
-}
-.account-row:last-child {
-  border-bottom: 0;
-}
-.account-label {
-  color: #666666;
-}
-.account-value {
-  font-weight: 700;
-  color: #111111;
-  text-align: right;
-}
-.map-preview {
-  background: linear-gradient(135deg, #ece4d0 0%, #f7f4ee 100%);
-  border-radius: 22px;
-  padding: 22px;
-  min-height: 260px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-.map-box {
-  height: 160px;
-  border-radius: 18px;
-  background:
-    linear-gradient(90deg, rgba(17,17,17,0.04) 1px, transparent 1px),
-    linear-gradient(rgba(17,17,17,0.04) 1px, transparent 1px),
-    #ffffff;
-  background-size: 24px 24px;
-  position: relative;
-  overflow: hidden;
-}
-.route-line {
-  position: absolute;
-  width: 70%;
-  height: 6px;
-  background: #d4af37;
-  top: 52%;
-  left: 15%;
-  border-radius: 999px;
-  transform: rotate(-12deg);
-}
-.route-dot {
-  position: absolute;
-  width: 18px;
-  height: 18px;
-  background: #111111;
-  border-radius: 50%;
-  top: calc(52% - 6px);
-  left: 67%;
-  box-shadow: 0 0 0 6px rgba(212,175,55,0.18);
-}
-@media (max-width: 1150px) {
-  .dashboard-shell {
-    grid-template-columns: 1fr;
-  }
-  .dashboard-sidebar {
-    position: static;
-  }
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
-}
-@media (max-width: 800px) {
-  .status-grid,
-  .quick-actions {
-    grid-template-columns: 1fr;
-  }
-  .dashboard-hero h1 {
-    font-size: 30px;
-  }
-}
-</style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f7f8fb;
+            color: #111;
+        }
 
-<main class="dashboard-app">
-  <div class="dashboard-shell">
+        .page {
+            min-height: 100vh;
+            padding: 32px 20px 60px;
+        }
 
-    <aside class="dashboard-sidebar">
-      <div class="dashboard-brand">
-        <h2>Member Portal</h2>
-        <p>Luxury care, organized in one place.</p>
-        <span class="member-chip">Premium Member</span>
-      </div>
+        .wrap {
+            max-width: 1180px;
+            margin: 0 auto;
+        }
 
-      <div class="sidebar-section-title">Dashboard</div>
-      <nav class="sidebar-nav">
-        <a href="dashboard.php" class="sidebar-link active">Overview</a>
-        <a href="my-dogs.php" class="sidebar-link">My Dogs</a>
-        <a href="my-walks.php" class="sidebar-link">My Walks</a>
-        <a href="book-walk.php" class="sidebar-link">Book a Walk</a>
-        <a href="<?= $latestWalkId > 0 ? 'live-tracking.php?walk_id=' . $latestWalkId : 'live-tracking.php' ?>" class="sidebar-link">Live Tracking</a>
-      </nav>
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 28px;
+        }
 
-      <div class="sidebar-section-title">Membership</div>
-      <nav class="sidebar-nav">
-        <a href="customize-plan.php" class="sidebar-link">Customize Plan</a>
-        <a href="#" class="sidebar-link">Billing</a>
-        <a href="#" class="sidebar-link">Priority Booking</a>
-      </nav>
+        .brand {
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
 
-      <div class="sidebar-section-title">Support</div>
-      <nav class="sidebar-nav">
-        <a href="walker-login.php" class="sidebar-link">Walker Portal</a>
-        <a href="admin-walks.php" class="sidebar-link">Walker Admin</a>
-        <a href="admin-tracking.php" class="sidebar-link">Tracking Admin</a>
-        <a href="#" class="sidebar-link">Contact Support</a>
-      </nav>
+        .topnav {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
 
-      <div class="sidebar-footer">
-        <a href="logout.php">Log Out</a>
-      </div>
-    </aside>
+        .topnav a {
+            text-decoration: none;
+            color: #111;
+            background: #fff;
+            padding: 11px 15px;
+            border-radius: 12px;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
+            font-weight: 700;
+        }
 
-    <section class="dashboard-main">
+        .hero {
+            background: linear-gradient(135deg, #111 0%, #2a2a2a 100%);
+            color: #fff;
+            border-radius: 24px;
+            padding: 34px;
+            margin-bottom: 24px;
+        }
 
-      <div class="dashboard-hero">
-        <h1>Welcome back, <?= e($displayName) ?></h1>
-        <p>
-          Manage your dogs, review walks, build custom plans, and follow live service updates from one premium dashboard.
-        </p>
+        .hero h1 {
+            margin: 0 0 10px;
+            font-size: 38px;
+            line-height: 1.1;
+        }
 
-        <div class="hero-badges">
-          <span class="hero-badge gold">Membership Active</span>
-          <span class="hero-badge"><?= $dogCount ?> Dog<?= $dogCount === 1 ? '' : 's' ?> Added</span>
-          <span class="hero-badge"><?= $walkCount ?> Walk<?= $walkCount === 1 ? '' : 's' ?> Total</span>
-          <span class="hero-badge"><?= $planCount ?> Plan<?= $planCount === 1 ? '' : 's' ?> Saved</span>
-        </div>
-      </div>
+        .hero p {
+            margin: 0;
+            max-width: 720px;
+            color: rgba(255, 255, 255, 0.86);
+            line-height: 1.6;
+            font-size: 16px;
+        }
 
-      <div class="dashboard-grid">
+        .hero-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 24px;
+        }
 
-        <div class="dashboard-column">
+        .hero-actions a {
+            text-decoration: none;
+            padding: 14px 18px;
+            border-radius: 12px;
+            font-weight: 700;
+            display: inline-block;
+        }
 
-          <div class="dashboard-card">
-            <div class="card-header">
-              <h2>Membership Snapshot</h2>
-              <a href="customize-plan.php" class="card-link">Manage Plan</a>
+        .btn-primary {
+            background: #fff;
+            color: #111;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.12);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 18px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: #fff;
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.06);
+        }
+
+        .stat-label {
+            margin: 0 0 10px;
+            color: #666;
+            font-size: 14px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        .stat-value {
+            margin: 0;
+            font-size: 34px;
+            font-weight: 700;
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 22px;
+        }
+
+        .card {
+            background: #fff;
+            border-radius: 22px;
+            padding: 28px;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.06);
+        }
+
+        .card h2 {
+            margin: 0 0 8px;
+            font-size: 26px;
+        }
+
+        .card-subtext {
+            margin: 0 0 22px;
+            color: #666;
+            line-height: 1.6;
+        }
+
+        .pets-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }
+
+        .pet-card {
+            border: 1px solid #ececec;
+            border-radius: 18px;
+            padding: 18px;
+            background: #fcfcfc;
+        }
+
+        .pet-name {
+            margin: 0 0 8px;
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        .pet-meta {
+            margin: 0 0 10px;
+            color: #555;
+            line-height: 1.5;
+        }
+
+        .pet-status {
+            display: inline-block;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: #e8f8ea;
+            color: #146c2e;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .booking-list {
+            display: grid;
+            gap: 14px;
+        }
+
+        .booking-item {
+            border: 1px solid #ececec;
+            border-radius: 16px;
+            padding: 16px;
+            background: #fcfcfc;
+        }
+
+        .booking-title {
+            margin: 0 0 8px;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .booking-meta {
+            margin: 0;
+            color: #555;
+            line-height: 1.6;
+        }
+
+        .status-badge {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: #efefef;
+            color: #111;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .empty-state {
+            border: 1px dashed #d7d7d7;
+            border-radius: 18px;
+            padding: 24px;
+            text-align: center;
+            color: #666;
+            background: #fafafa;
+        }
+
+        .quick-links {
+            display: grid;
+            gap: 14px;
+        }
+
+        .quick-links a {
+            text-decoration: none;
+            color: #111;
+            background: #f8f8f8;
+            border: 1px solid #ececec;
+            border-radius: 16px;
+            padding: 16px 18px;
+            font-weight: 700;
+        }
+
+        .section-spacer {
+            margin-top: 22px;
+        }
+
+        @media (max-width: 980px) {
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stats {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 720px) {
+            .hero {
+                padding: 26px;
+            }
+
+            .hero h1 {
+                font-size: 30px;
+            }
+
+            .pets-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .card {
+                padding: 22px;
+            }
+
+            .brand {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="wrap">
+            <div class="topbar">
+                <div class="brand">Doggie Dorian’s</div>
+                <div class="topnav">
+                    <a href="add-pet.php">Add Pet</a>
+                    <a href="book-walk.php">Book Walk</a>
+                    <a href="profile.php">Profile</a>
+                    <a href="logout.php">Logout</a>
+                </div>
             </div>
 
-            <div class="status-grid">
-              <div class="status-box">
-                <p class="status-label">Current Tier</p>
-                <p class="status-value">VIP</p>
-                <p class="status-note">Priority support enabled</p>
-              </div>
-
-              <div class="status-box">
-                <p class="status-label">Dog Profiles</p>
-                <p class="status-value"><?= $dogCount ?></p>
-                <p class="status-note">Saved in your account</p>
-              </div>
-
-              <div class="status-box">
-                <p class="status-label">Walks</p>
-                <p class="status-value"><?= $walkCount ?></p>
-                <p class="status-note">Requested and scheduled</p>
-              </div>
-
-              <div class="status-box">
-                <p class="status-label">Plans</p>
-                <p class="status-value"><?= $planCount ?></p>
-                <p class="status-note">Customized and saved</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="dashboard-card">
-            <div class="card-header">
-              <h2>My Dogs</h2>
-              <a href="my-dogs.php" class="card-link">Open My Dogs</a>
-            </div>
-
-            <?php if (!$dogs): ?>
-              <div class="empty-card">
-                No dogs added yet. Create your first dog profile to start booking walks.
-              </div>
-            <?php else: ?>
-              <div class="dog-preview-list">
-                <?php foreach ($dogs as $dog): ?>
-                  <div class="dog-preview-item">
-                    <h4><?= e($dog['dog_name']) ?></h4>
-                    <p>
-                      <?= e($dog['breed'] ?: 'Breed not added') ?>
-                      <?php if (!empty($dog['age'])): ?>
-                        · <?= e($dog['age']) ?>
-                      <?php endif; ?>
-                      <?php if (!empty($dog['weight'])): ?>
-                        · <?= e($dog['weight']) ?>
-                      <?php endif; ?>
-                    </p>
-                    <p style="margin-top:8px;">
-                      <?= e($dog['temperament'] ?: 'Temperament not added yet') ?>
-                    </p>
-                  </div>
-                <?php endforeach; ?>
-              </div>
-            <?php endif; ?>
-          </div>
-
-          <div class="dashboard-card">
-            <div class="card-header">
-              <h2>Quick Actions</h2>
-              <a href="walker-login.php" class="card-link">Walker Portal</a>
-            </div>
-
-            <div class="quick-actions">
-              <div class="action-box">
-                <h4>Add a Dog</h4>
-                <p>Create a dog profile for walks, bookings, and future tracking.</p>
-                <a href="my-dogs.php" class="action-button gold">Add Dog</a>
-              </div>
-
-              <div class="action-box">
-                <h4>Book a Walk</h4>
-                <p>Submit a walk request with your preferred date, time, and duration.</p>
-                <a href="book-walk.php" class="action-button">Book Now</a>
-              </div>
-
-              <div class="action-box">
-                <h4>View Walks</h4>
-                <p>See requested, assigned, in-progress, and completed walks.</p>
-                <a href="my-walks.php" class="action-button">Open Walks</a>
-              </div>
-
-              <div class="action-box">
-                <h4>Live Tracking</h4>
-                <p>Open your active walk tracking view and watch updates in real time.</p>
-                <a href="<?= $latestWalkId > 0 ? 'live-tracking.php?walk_id=' . $latestWalkId : 'live-tracking.php' ?>" class="action-button">Open Tracker</a>
-              </div>
-            </div>
-          </div>
-
-        </div>
-
-        <div class="dashboard-column">
-
-          <div class="dashboard-card">
-            <div class="card-header">
-              <h3>Live Walk Tracking</h3>
-              <a href="<?= $latestWalkId > 0 ? 'live-tracking.php?walk_id=' . $latestWalkId : 'live-tracking.php' ?>" class="card-link">Open Tracker</a>
-            </div>
-
-            <div class="map-preview">
-              <div class="map-box">
-                <div class="route-line"></div>
-                <div class="route-dot"></div>
-              </div>
-              <div>
-                <strong>Tracking Preview</strong>
-                <p style="margin:8px 0 0; color:#555555;">
-                  Your live walk map, route details, ETA, and walker updates now connect directly to the walker portal.
+            <section class="hero">
+                <h1>Welcome back, <?php echo htmlspecialchars($fullName); ?></h1>
+                <p>
+                    Manage your dogs, review your recent bookings, and enjoy a premium pet care experience
+                    built for convenience, trust, and elevated service.
                 </p>
-              </div>
-            </div>
-          </div>
+                <div class="hero-actions">
+                    <a class="btn-primary" href="add-pet.php">Add a Dog</a>
+                    <a class="btn-secondary" href="book-walk.php">Book a Service</a>
+                </div>
+            </section>
 
-          <div class="dashboard-card">
-            <div class="card-header">
-              <h3>Account Summary</h3>
-              <a href="#" class="card-link">Edit</a>
-            </div>
+            <section class="stats">
+                <div class="stat-card">
+                    <p class="stat-label">Your Dogs</p>
+                    <p class="stat-value"><?php echo $petCount; ?></p>
+                </div>
 
-            <div class="account-list">
-              <div class="account-row">
-                <span class="account-label">Email</span>
-                <span class="account-value"><?= e($member['email']) ?></span>
-              </div>
+                <div class="stat-card">
+                    <p class="stat-label">Total Bookings</p>
+                    <p class="stat-value"><?php echo $bookingCount; ?></p>
+                </div>
 
-              <div class="account-row">
-                <span class="account-label">Phone</span>
-                <span class="account-value"><?= e($member['phone'] ?: 'Not added') ?></span>
-              </div>
+                <div class="stat-card">
+                    <p class="stat-label">Account Type</p>
+                    <p class="stat-value"><?php echo htmlspecialchars(ucfirst($_SESSION['role'] ?? 'member')); ?></p>
+                </div>
+            </section>
 
-              <div class="account-row">
-                <span class="account-label">Username</span>
-                <span class="account-value"><?= e($member['username'] ?: 'Not added') ?></span>
-              </div>
+            <section class="content-grid">
+                <div class="card">
+                    <h2>Your Dogs</h2>
+                    <p class="card-subtext">Every pet profile helps us deliver a more personal, safe, and luxury-level experience.</p>
 
-              <div class="account-row">
-                <span class="account-label">Preferred Login</span>
-                <span class="account-value"><?= e(ucfirst($member['preferred_login'])) ?></span>
-              </div>
+                    <?php if (count($recentPets) > 0): ?>
+                        <div class="pets-grid">
+                            <?php foreach ($recentPets as $pet): ?>
+                                <div class="pet-card">
+                                    <h3 class="pet-name"><?php echo htmlspecialchars($pet['pet_name']); ?></h3>
 
-              <div class="account-row">
-                <span class="account-label">Verification</span>
-                <span class="account-value"><?= (int)$member['email_verified'] === 1 ? 'Verified' : 'Pending' ?></span>
-              </div>
-            </div>
-          </div>
+                                    <?php $meta = formatPetMeta($pet); ?>
+                                    <?php if ($meta !== ''): ?>
+                                        <p class="pet-meta"><?php echo htmlspecialchars($meta); ?></p>
+                                    <?php else: ?>
+                                        <p class="pet-meta">Profile started. Add more details anytime.</p>
+                                    <?php endif; ?>
 
+                                    <?php if (!empty($pet['birthday'])): ?>
+                                        <p class="pet-meta">Birthday: <?php echo htmlspecialchars($pet['birthday']); ?></p>
+                                    <?php endif; ?>
+
+                                    <span class="pet-status"><?php echo htmlspecialchars($pet['status']); ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <div class="empty-state">
+                            <p>You haven’t added a dog yet.</p>
+                            <p><a href="add-pet.php">Create your first pet profile</a></p>
+                        </div>
+                    <?php endif; ?>
+                </div>
+
+                <div>
+                    <div class="card">
+                        <h2>Recent Bookings</h2>
+                        <p class="card-subtext">Your most recent service activity appears here.</p>
+
+                        <?php if (count($recentBookings) > 0): ?>
+                            <div class="booking-list">
+                                <?php foreach ($recentBookings as $booking): ?>
+                                    <div class="booking-item">
+                                        <h3 class="booking-title">
+                                            <?php echo htmlspecialchars(formatServiceName($booking['service_type'])); ?>
+                                        </h3>
+                                        <p class="booking-meta">
+                                            Date: <?php echo htmlspecialchars($booking['service_date']); ?><br>
+                                            Time: <?php echo htmlspecialchars($booking['service_time']); ?><br>
+                                            Duration:
+                                            <?php echo $booking['duration_minutes'] !== null ? htmlspecialchars((string)$booking['duration_minutes']) . ' mins' : 'N/A'; ?><br>
+                                            Price: $<?php echo number_format((float)$booking['price'], 2); ?>
+                                        </p>
+                                        <span class="status-badge"><?php echo htmlspecialchars($booking['status']); ?></span>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php else: ?>
+                            <div class="empty-state">
+                                <p>No bookings yet.</p>
+                                <p><a href="book-walk.php">Book your first service</a></p>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="card section-spacer">
+                        <h2>Quick Actions</h2>
+                        <p class="card-subtext">Keep your account moving with the next best steps.</p>
+
+                        <div class="quick-links">
+                            <a href="add-pet.php">Add another dog</a>
+                            <a href="book-walk.php">Book a walk or service</a>
+                            <a href="profile.php">Update your client profile</a>
+                            <a href="logout.php">Log out of your account</a>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </div>
-
-      </div>
-    </section>
-  </div>
-</main>
-
-<?php include 'includes/footer.php'; ?>
+    </div>
+</body>
+</html>

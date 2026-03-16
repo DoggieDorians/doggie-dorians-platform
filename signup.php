@@ -1,237 +1,214 @@
 <?php
-require_once __DIR__ . '/includes/member_config.php';
+session_start();
+require_once __DIR__ . '/data/config/db.php';
 
-$errors = [];
 $success = '';
-$username = '';
-$email = '';
-$phone = '';
-$preferredLogin = 'email';
+$error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = trim($_POST['username'] ?? '');
+    $fullName = trim($_POST['full_name'] ?? '');
     $email = trim($_POST['email'] ?? '');
     $phone = trim($_POST['phone'] ?? '');
-    $preferredLogin = trim($_POST['preferred_login'] ?? 'email');
     $password = $_POST['password'] ?? '';
     $confirmPassword = $_POST['confirm_password'] ?? '';
 
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $errors[] = 'Please enter a valid email address.';
-    }
+    if ($fullName === '' || $email === '' || $password === '' || $confirmPassword === '') {
+        $error = 'Please fill in all required fields.';
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $error = 'Please enter a valid email address.';
+    } elseif ($password !== $confirmPassword) {
+        $error = 'Passwords do not match.';
+    } elseif (strlen($password) < 6) {
+        $error = 'Password must be at least 6 characters.';
+    } else {
+        try {
+            $checkStmt = $pdo->prepare("SELECT id FROM users WHERE email = ? LIMIT 1");
+            $checkStmt->execute([$email]);
+            $existingUser = $checkStmt->fetch();
 
-    if ($preferredLogin === 'username' && $username === '') {
-        $errors[] = 'Please enter a username if you want to log in with a username.';
-    }
+            if ($existingUser) {
+                $error = 'An account with that email already exists.';
+            } else {
+                $passwordHash = password_hash($password, PASSWORD_DEFAULT);
 
-    if ($preferredLogin === 'phone' && $phone === '') {
-        $errors[] = 'Please enter a phone number if you want to log in with a phone number.';
-    }
+                $pdo->beginTransaction();
 
-    if (!in_array($preferredLogin, ['username', 'email', 'phone'], true)) {
-        $errors[] = 'Please choose a valid login method.';
-    }
+                $userStmt = $pdo->prepare("
+                    INSERT INTO users (full_name, email, phone, password_hash)
+                    VALUES (?, ?, ?, ?)
+                ");
+                $userStmt->execute([$fullName, $email, $phone, $passwordHash]);
 
-    if (strlen($password) < 8) {
-        $errors[] = 'Password must be at least 8 characters.';
-    }
+                $userId = $pdo->lastInsertId();
 
-    if ($password !== $confirmPassword) {
-        $errors[] = 'Passwords do not match.';
-    }
+                $profileStmt = $pdo->prepare("
+                    INSERT INTO client_profiles (user_id)
+                    VALUES (?)
+                ");
+                $profileStmt->execute([$userId]);
 
-    if ($phone !== '' && !preg_match('/^[0-9\-\+\(\)\s]{7,20}$/', $phone)) {
-        $errors[] = 'Please enter a valid phone number.';
-    }
+                $pdo->commit();
 
-    if (!$errors) {
-        $check = $pdo->prepare("
-            SELECT id FROM members
-            WHERE email = :email
-               OR (:username <> '' AND username = :username)
-               OR (:phone <> '' AND phone = :phone)
-            LIMIT 1
-        ");
-        $check->execute([
-            ':email' => $email,
-            ':username' => $username,
-            ':phone' => $phone
-        ]);
-
-        if ($check->fetch()) {
-            $errors[] = 'An account with that email, username, or phone already exists.';
+                $success = 'Account created successfully. You can now log in.';
+            }
+        } catch (PDOException $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $error = 'Something went wrong: ' . $e->getMessage();
         }
-    }
-
-    if (!$errors) {
-        $passwordHash = password_hash($password, PASSWORD_DEFAULT);
-
-        $insert = $pdo->prepare("
-            INSERT INTO members (username, email, phone, preferred_login, password_hash, email_verified, verification_token)
-            VALUES (:username, :email, :phone, :preferred_login, :password_hash, 1, NULL)
-        ");
-
-        $insert->execute([
-            ':username' => $username !== '' ? $username : null,
-            ':email' => $email,
-            ':phone' => $phone !== '' ? $phone : null,
-            ':preferred_login' => $preferredLogin,
-            ':password_hash' => $passwordHash
-        ]);
-
-        $success = "Account created successfully. Your account is automatically verified in local development, so you can log in right away.";
-        $username = '';
-        $email = '';
-        $phone = '';
-        $preferredLogin = 'email';
     }
 }
 ?>
-<?php include 'includes/header.php'; ?>
-<?php include 'includes/nav.php'; ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up | Doggie Dorian's</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f7f8fb;
+            color: #111;
+        }
 
-<style>
-.member-auth-wrap{
-  max-width: 720px;
-  margin: 60px auto;
-  padding: 0 20px;
-}
-.member-auth-card{
-  background:#fff;
-  border-radius:24px;
-  padding:36px;
-  box-shadow:0 12px 30px rgba(0,0,0,0.08);
-}
-.member-auth-card h1{
-  margin-top:0;
-  font-size:36px;
-}
-.member-auth-card p.lead{
-  color:#666;
-  margin-bottom:24px;
-}
-.form-grid{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:18px;
-}
-.form-group{
-  display:flex;
-  flex-direction:column;
-}
-.form-group.full{
-  grid-column:1 / -1;
-}
-label{
-  font-weight:600;
-  margin-bottom:8px;
-}
-input, select{
-  padding:14px 16px;
-  border:1px solid #ddd;
-  border-radius:14px;
-  font-size:15px;
-}
-.auth-button{
-  display:inline-block;
-  background:#d4af37;
-  color:#111;
-  border:none;
-  border-radius:999px;
-  padding:14px 24px;
-  font-weight:700;
-  cursor:pointer;
-}
-.auth-links{
-  margin-top:18px;
-}
-.auth-links a{
-  color:#111;
-  font-weight:600;
-}
-.message{
-  border-radius:14px;
-  padding:14px 16px;
-  margin-bottom:18px;
-}
-.message.error{
-  background:#fff3f3;
-  color:#9b1c1c;
-}
-.message.success{
-  background:#f4fbf2;
-  color:#256029;
-}
-@media (max-width:700px){
-  .form-grid{
-    grid-template-columns:1fr;
-  }
-}
-</style>
+        .page {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px 20px;
+        }
 
-<main class="member-auth-wrap">
-  <div class="member-auth-card">
-    <h1>Create Your Member Account</h1>
-    <p class="lead">Sign up for your Doggie Dorian's member account.</p>
+        .card {
+            width: 100%;
+            max-width: 520px;
+            background: #ffffff;
+            border-radius: 18px;
+            padding: 32px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            box-sizing: border-box;
+        }
 
-    <?php if ($errors): ?>
-      <div class="message error">
-        <?php foreach ($errors as $error): ?>
-          <div><?= e($error) ?></div>
-        <?php endforeach; ?>
-      </div>
-    <?php endif; ?>
+        h1 {
+            margin: 0 0 8px;
+            font-size: 32px;
+            text-align: center;
+        }
 
-    <?php if ($success): ?>
-      <div class="message success"><?= e($success) ?></div>
-    <?php endif; ?>
+        .subtext {
+            margin: 0 0 24px;
+            text-align: center;
+            color: #666;
+            line-height: 1.5;
+        }
 
-    <form method="post" action="">
-      <div class="form-grid">
-        <div class="form-group">
-          <label for="username">Username</label>
-          <input id="username" name="username" type="text" value="<?= e($username) ?>" placeholder="Choose a username">
+        label {
+            display: block;
+            margin: 14px 0 6px;
+            font-weight: 700;
+        }
+
+        input {
+            width: 100%;
+            padding: 13px 14px;
+            border: 1px solid #d9d9d9;
+            border-radius: 12px;
+            box-sizing: border-box;
+            font-size: 15px;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #111;
+        }
+
+        button {
+            width: 100%;
+            margin-top: 20px;
+            padding: 14px;
+            background: #111;
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        button:hover {
+            opacity: 0.95;
+        }
+
+        .message {
+            margin-bottom: 16px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+        }
+
+        .error {
+            background: #ffe7e7;
+            color: #9b1111;
+        }
+
+        .success {
+            background: #e8f8ea;
+            color: #146c2e;
+        }
+
+        .footer-link {
+            margin-top: 18px;
+            text-align: center;
+            color: #666;
+        }
+
+        .footer-link a {
+            color: #111;
+            text-decoration: none;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Create Your Account</h1>
+            <p class="subtext">Join Doggie Dorian’s and start building your luxury pet care profile.</p>
+
+            <?php if ($error !== ''): ?>
+                <div class="message error"><?php echo htmlspecialchars($error); ?></div>
+            <?php endif; ?>
+
+            <?php if ($success !== ''): ?>
+                <div class="message success"><?php echo htmlspecialchars($success); ?></div>
+            <?php endif; ?>
+
+            <form method="POST" action="">
+                <label for="full_name">Full Name</label>
+                <input type="text" id="full_name" name="full_name" required>
+
+                <label for="email">Email Address</label>
+                <input type="email" id="email" name="email" required>
+
+                <label for="phone">Phone Number</label>
+                <input type="text" id="phone" name="phone">
+
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required>
+
+                <label for="confirm_password">Confirm Password</label>
+                <input type="password" id="confirm_password" name="confirm_password" required>
+
+                <button type="submit">Create Account</button>
+            </form>
+
+            <div class="footer-link">
+                Already have an account? <a href="login.php">Log in</a>
+            </div>
         </div>
-
-        <div class="form-group">
-          <label for="email">Email Address</label>
-          <input id="email" name="email" type="email" value="<?= e($email) ?>" required placeholder="you@example.com">
-        </div>
-
-        <div class="form-group">
-          <label for="phone">Phone Number</label>
-          <input id="phone" name="phone" type="text" value="<?= e($phone) ?>" placeholder="(631) 555-1234">
-        </div>
-
-        <div class="form-group">
-          <label for="preferred_login">Preferred Login Method</label>
-          <select id="preferred_login" name="preferred_login" required>
-            <option value="email" <?= $preferredLogin === 'email' ? 'selected' : '' ?>>Email</option>
-            <option value="username" <?= $preferredLogin === 'username' ? 'selected' : '' ?>>Username</option>
-            <option value="phone" <?= $preferredLogin === 'phone' ? 'selected' : '' ?>>Phone Number</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label for="password">Password</label>
-          <input id="password" name="password" type="password" required placeholder="At least 8 characters">
-        </div>
-
-        <div class="form-group">
-          <label for="confirm_password">Confirm Password</label>
-          <input id="confirm_password" name="confirm_password" type="password" required placeholder="Enter it again">
-        </div>
-
-        <div class="form-group full">
-          <button class="auth-button" type="submit">Create Account</button>
-        </div>
-      </div>
-    </form>
-
-    <div class="auth-links">
-      Already have an account? <a href="login.php">Log in here</a>
     </div>
-  </div>
-</main>
-
-<?php include 'includes/footer.php'; ?>
+</body>
+</html>
