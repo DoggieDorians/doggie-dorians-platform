@@ -7,12 +7,44 @@ if (!isset($_SESSION['user_id'])) {
     exit;
 }
 
-$userId = $_SESSION['user_id'];
+$userId = (int)$_SESSION['user_id'];
 $fullName = $_SESSION['full_name'] ?? 'Member';
 
 $success = '';
 $error = '';
 $pets = [];
+
+function tableExists(PDO $pdo, string $table): bool
+{
+    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1");
+    $stmt->execute([$table]);
+    return (bool)$stmt->fetchColumn();
+}
+
+function getColumns(PDO $pdo, string $table): array
+{
+    $stmt = $pdo->query("PRAGMA table_info($table)");
+    $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+    $columns = [];
+
+    foreach ($rows as $row) {
+        if (!empty($row['name'])) {
+            $columns[] = $row['name'];
+        }
+    }
+
+    return $columns;
+}
+
+function columnExists(PDO $pdo, string $table, string $column): bool
+{
+    return in_array($column, getColumns($pdo, $table), true);
+}
+
+function oldValue(string $key): string
+{
+    return htmlspecialchars($_POST[$key] ?? '', ENT_QUOTES, 'UTF-8');
+}
 
 try {
     $petsStmt = $pdo->prepare("
@@ -22,7 +54,7 @@ try {
         ORDER BY pet_name ASC
     ");
     $petsStmt->execute([$userId]);
-    $pets = $petsStmt->fetchAll();
+    $pets = $petsStmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (PDOException $e) {
     die('Could not load pets: ' . $e->getMessage());
 }
@@ -58,12 +90,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 LIMIT 1
             ");
             $petCheckStmt->execute([$petId, $userId]);
-            $pet = $petCheckStmt->fetch();
+            $pet = $petCheckStmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$pet) {
                 $error = 'That pet could not be found on your account.';
             } else {
-                $price = 0;
+                $price = 0.0;
+                $durationValue = null;
 
                 if ($serviceType === 'walk') {
                     $walkPricing = [
@@ -73,24 +106,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         '45' => 36.00,
                         '60' => 45.00
                     ];
-                    $price = $walkPricing[$durationMinutes] ?? 0;
+                    $price = (float)($walkPricing[$durationMinutes] ?? 0);
+                    $durationValue = (int)$durationMinutes;
                 } elseif ($serviceType === 'boarding') {
                     $boardingPricing = [
                         'small' => 80.00,
                         'medium' => 100.00,
                         'large' => 120.00
                     ];
-                    $price = $boardingPricing[$dogSize] ?? 0;
-                    $durationMinutes = null;
+                    $price = (float)($boardingPricing[$dogSize] ?? 0);
                 } elseif ($serviceType === 'daycare') {
                     $price = 45.00;
-                    $durationMinutes = null;
                 } elseif ($serviceType === 'drop-in visit') {
                     $price = 30.00;
-                    $durationMinutes = null;
                 } elseif ($serviceType === 'pet taxi') {
                     $price = 35.00;
-                    $durationMinutes = null;
                 }
 
                 $extraNotes = $clientNotes;
@@ -98,6 +128,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $sizeLabel = ucfirst($dogSize) . ' dog';
                     $extraNotes = "Boarding size: {$sizeLabel}" . ($clientNotes !== '' ? "\n\n" . $clientNotes : '');
                 }
+
+                $combinedNotes = trim(
+                    ($accessNotes !== '' ? "Access Notes:\n" . $accessNotes : '') .
+                    ($accessNotes !== '' && $extraNotes !== '' ? "\n\n" : '') .
+                    ($extraNotes !== '' ? "Client Notes:\n" . $extraNotes : '')
+                );
+
+                $pdo->beginTransaction();
 
                 $insertStmt = $pdo->prepare("
                     INSERT INTO bookings (
@@ -113,33 +151,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         client_notes,
                         price,
                         is_instant_booking
-                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'pending', ?, ?, ?, 0)
+                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'Pending', ?, ?, ?, 0)
                 ");
 
                 $insertStmt->execute([
                     $userId,
-                    $petId,
+                    (int)$petId,
                     $serviceType,
                     $serviceDate,
                     $serviceTime,
-                    $durationMinutes !== null && $durationMinutes !== '' ? (int)$durationMinutes : null,
+                    $durationValue,
                     $accessNotes !== '' ? $accessNotes : null,
                     $extraNotes !== '' ? $extraNotes : null,
                     $price
                 ]);
 
-                $success = 'Your booking request has been submitted successfully.';
+                $walkSyncMessage = '';
+
+                if ($serviceType === 'walk' && tableExists($pdo, 'walks')) {
+                    $walkColumns = getColumns($pdo, 'walks');
+                    $insertColumns = [];
+                    $placeholders = [];
+                    $values = [];
+
+                    $columnMap = [
+                        'member_id' => $userId,
+                        'dog_id' => (int)$petId,
+                        'walk_date' => $serviceDate,
+                        'walk_time' => $serviceTime,
+                        'duration_minutes' => $durationValue,
+                        'notes' => $combinedNotes !== '' ? $combinedNotes : null,
+                        'status' => 'Requested',
+                        'walker_id' => null,
+                        'walker_name' => null,
+                        'walker_phone' => null,
+                        'walker_notes' => null,
+                        'created_at' => date('Y-m-d H:i:s'),
+                        'price' => $price
+                    ];
+
+                    foreach ($columnMap as $column => $value) {
+                        if (in_array($column, $walkColumns, true)) {
+                            $insertColumns[] = $column;
+                            $placeholders[] = '?';
+                            $values[] = $value;
+                        }
+                    }
+
+                    if (!empty($insertColumns)) {
+                        $walkSql = "
+                            INSERT INTO walks (" . implode(', ', $insertColumns) . ")
+                            VALUES (" . implode(', ', $placeholders) . ")
+                        ";
+
+                        try {
+                            $walkStmt = $pdo->prepare($walkSql);
+                            $walkStmt->execute($values);
+                        } catch (PDOException $walkException) {
+                            $walkSyncMessage = ' Your booking was saved, but the admin walk sync needs review.';
+                        }
+                    }
+                }
+
+                $pdo->commit();
+
+                $success = 'Your booking request has been submitted successfully.' . $walkSyncMessage;
                 $_POST = [];
             }
         } catch (PDOException $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             $error = 'Could not create booking: ' . $e->getMessage();
         }
     }
-}
-
-function oldValue(string $key): string
-{
-    return htmlspecialchars($_POST[$key] ?? '');
 }
 ?>
 <!DOCTYPE html>
@@ -451,7 +536,8 @@ function oldValue(string $key): string
             flex-wrap: wrap;
         }
 
-        .btn {
+        .btn-primary,
+        .btn-secondary {
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -593,7 +679,7 @@ function oldValue(string $key): string
                         <span class="eyebrow">Luxury Booking Experience</span>
                         <h1>Book elevated care with confidence, detail, and discretion.</h1>
                         <p>
-                            Welcome, <?php echo htmlspecialchars($fullName); ?>. Submit your request for a polished,
+                            Welcome, <?php echo htmlspecialchars($fullName, ENT_QUOTES, 'UTF-8'); ?>. Submit your request for a polished,
                             concierge-level service experience designed around convenience, trust, and premium care.
                         </p>
 
@@ -629,11 +715,11 @@ function oldValue(string $key): string
                     </div>
 
                     <?php if ($error !== ''): ?>
-                        <div class="message error"><?php echo htmlspecialchars($error); ?></div>
+                        <div class="message error"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
                     <?php endif; ?>
 
                     <?php if ($success !== ''): ?>
-                        <div class="message success"><?php echo htmlspecialchars($success); ?></div>
+                        <div class="message success"><?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?></div>
                     <?php endif; ?>
 
                     <?php if (count($pets) === 0): ?>
@@ -649,13 +735,13 @@ function oldValue(string $key): string
                                     <select id="pet_id" name="pet_id" required>
                                         <option value="">Choose your dog</option>
                                         <?php foreach ($pets as $pet): ?>
-                                            <option value="<?php echo htmlspecialchars((string)$pet['id']); ?>" <?php echo (($_POST['pet_id'] ?? '') == $pet['id']) ? 'selected' : ''; ?>>
+                                            <option value="<?php echo htmlspecialchars((string)$pet['id'], ENT_QUOTES, 'UTF-8'); ?>" <?php echo (($_POST['pet_id'] ?? '') == $pet['id']) ? 'selected' : ''; ?>>
                                                 <?php
                                                 $petLabel = $pet['pet_name'];
                                                 if (!empty($pet['breed'])) {
                                                     $petLabel .= ' • ' . $pet['breed'];
                                                 }
-                                                echo htmlspecialchars($petLabel);
+                                                echo htmlspecialchars($petLabel, ENT_QUOTES, 'UTF-8');
                                                 ?>
                                             </option>
                                         <?php endforeach; ?>
@@ -720,8 +806,8 @@ function oldValue(string $key): string
                             </div>
 
                             <div class="actions">
-                                <button type="submit" class="btn btn-primary">Submit Premium Booking</button>
-                                <a href="dashboard.php" class="btn btn-secondary">Back to Dashboard</a>
+                                <button type="submit" class="btn-primary">Submit Premium Booking</button>
+                                <a href="dashboard.php" class="btn-secondary">Back to Dashboard</a>
                             </div>
                         </form>
                     <?php endif; ?>

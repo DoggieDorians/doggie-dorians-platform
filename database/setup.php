@@ -1,115 +1,154 @@
 <?php
+declare(strict_types=1);
 
-require_once __DIR__ . '/../data/config/db.php';
+$dbFile = __DIR__ . '/data/members.sqlite';
+$dbDir = dirname($dbFile);
 
-$queries = [];
-
-$queries[] = "PRAGMA foreign_keys = OFF;";
-
-/*
-|--------------------------------------------------------------------------
-| Drop ALL old tables so the database is truly rebuilt clean
-|--------------------------------------------------------------------------
-*/
-$queries[] = "DROP TABLE IF EXISTS bookings;";
-$queries[] = "DROP TABLE IF EXISTS pets;";
-$queries[] = "DROP TABLE IF EXISTS client_profiles;";
-$queries[] = "DROP TABLE IF EXISTS users;";
-$queries[] = "DROP TABLE IF EXISTS custom_plans;";
-$queries[] = "DROP TABLE IF EXISTS dogs;";
-$queries[] = "DROP TABLE IF EXISTS members;";
-$queries[] = "DROP TABLE IF EXISTS walk_sessions;";
-$queries[] = "DROP TABLE IF EXISTS walkers;";
-$queries[] = "DROP TABLE IF EXISTS walks;";
-
-/*
-|--------------------------------------------------------------------------
-| Create fresh core tables
-|--------------------------------------------------------------------------
-*/
-$queries[] = "
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    full_name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    phone TEXT,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'member',
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-";
-
-$queries[] = "
-CREATE TABLE client_profiles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL UNIQUE,
-    address_line1 TEXT,
-    address_line2 TEXT,
-    city TEXT,
-    state TEXT,
-    zip_code TEXT,
-    emergency_contact_name TEXT,
-    emergency_contact_phone TEXT,
-    building_access_notes TEXT,
-    preferred_contact_method TEXT,
-    service_notes TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-";
-
-$queries[] = "
-CREATE TABLE pets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    pet_name TEXT NOT NULL,
-    breed TEXT,
-    age INTEGER,
-    weight TEXT,
-    birthday TEXT,
-    gender TEXT,
-    spayed_neutered INTEGER DEFAULT 0,
-    photo_path TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-";
-
-$queries[] = "
-CREATE TABLE bookings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    pet_id INTEGER NOT NULL,
-    assigned_walker_id INTEGER,
-    service_type TEXT NOT NULL,
-    service_date TEXT NOT NULL,
-    service_time TEXT NOT NULL,
-    duration_minutes INTEGER,
-    status TEXT NOT NULL DEFAULT 'pending',
-    access_notes TEXT,
-    client_notes TEXT,
-    price REAL NOT NULL DEFAULT 0,
-    is_instant_booking INTEGER NOT NULL DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
-);
-";
-
-$queries[] = "PRAGMA foreign_keys = ON;";
+if (!is_dir($dbDir)) {
+    mkdir($dbDir, 0777, true);
+}
 
 try {
+    $pdo = new PDO('sqlite:' . $dbFile);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+    $queries = [
+
+        "CREATE TABLE IF NOT EXISTS members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            phone TEXT,
+            password_hash TEXT NOT NULL,
+            membership_plan TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+
+        "CREATE TABLE IF NOT EXISTS dogs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER NOT NULL,
+            dog_name TEXT NOT NULL,
+            breed TEXT,
+            age TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
+        )",
+
+        "CREATE TABLE IF NOT EXISTS walkers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            phone TEXT,
+            password_hash TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+
+        "CREATE TABLE IF NOT EXISTS walks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER NOT NULL,
+            dog_id INTEGER NOT NULL,
+            walk_date TEXT NOT NULL,
+            walk_time TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            notes TEXT,
+            status TEXT NOT NULL DEFAULT 'Requested',
+            walker_id INTEGER,
+            walker_name TEXT,
+            walker_phone TEXT,
+            walker_notes TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
+            FOREIGN KEY (dog_id) REFERENCES dogs(id) ON DELETE CASCADE
+        )",
+
+        "CREATE TABLE IF NOT EXISTS membership_signups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            phone TEXT,
+            email TEXT NOT NULL,
+            selected_membership TEXT NOT NULL,
+            dog_name TEXT,
+            preferred_contact TEXT,
+            notes TEXT,
+            status TEXT NOT NULL DEFAULT 'New',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+
+        "CREATE TABLE IF NOT EXISTS non_member_bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            phone TEXT,
+            email TEXT NOT NULL,
+            service_type TEXT NOT NULL,
+            dog_name TEXT NOT NULL,
+            dog_size TEXT,
+            walk_duration INTEGER,
+            preferred_walk_time TEXT,
+            date_start TEXT NOT NULL,
+            date_end TEXT,
+            feeding_schedule TEXT,
+            preferred_contact TEXT,
+            notes TEXT,
+            estimated_price REAL,
+            status TEXT NOT NULL DEFAULT 'New',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"
+    ];
+
     foreach ($queries as $query) {
         $pdo->exec($query);
     }
 
-    echo "Fresh database setup completed successfully.";
-} catch (PDOException $e) {
-    die("Setup failed: " . $e->getMessage());
+    echo "<!DOCTYPE html>
+    <html lang='en'>
+    <head>
+      <meta charset='UTF-8'>
+      <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+      <title>Setup Complete</title>
+      <style>
+        body {
+          background:#0a0a0d;
+          color:#fff;
+          font-family:Arial, sans-serif;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          min-height:100vh;
+          margin:0;
+          padding:24px;
+        }
+        .card {
+          max-width:700px;
+          width:100%;
+          background:rgba(255,255,255,0.04);
+          border:1px solid rgba(255,255,255,0.08);
+          border-radius:24px;
+          padding:32px;
+        }
+        h1 {
+          margin:0 0 12px;
+          font-family:Georgia, serif;
+        }
+        p {
+          color:rgba(255,255,255,0.78);
+          line-height:1.6;
+        }
+        a {
+          color:#f0d77a;
+          text-decoration:none;
+        }
+      </style>
+    </head>
+    <body>
+      <div class='card'>
+        <h1>Database setup complete</h1>
+        <p>Your database tables were created successfully, including the new <strong>non_member_bookings</strong> table.</p>
+        <p><a href='non-member-booking.php'>Go to non-member booking page</a></p>
+      </div>
+    </body>
+    </html>";
+} catch (Throwable $e) {
+    echo '<pre>Setup failed:' . "\n" . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . '</pre>';
 }
