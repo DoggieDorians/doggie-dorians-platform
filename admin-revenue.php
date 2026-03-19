@@ -1,22 +1,8 @@
 <?php
 declare(strict_types=1);
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-if (empty($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
-    header('Location: admin-login.php');
-    exit;
-}
-
-function getDB(): PDO
-{
-    $pdo = new PDO('sqlite:' . __DIR__ . '/data/members.sqlite');
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    return $pdo;
-}
+require_once __DIR__ . '/admin-auth.php';
+require_once __DIR__ . '/db.php';
 
 function tableExists(PDO $pdo, string $table): bool
 {
@@ -27,20 +13,26 @@ function tableExists(PDO $pdo, string $table): bool
 
 function getColumns(PDO $pdo, string $table): array
 {
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    $rows = $stmt ? $stmt->fetchAll() : [];
-    $columns = [];
-    foreach ($rows as $row) {
-        if (!empty($row['name'])) {
-            $columns[] = $row['name'];
+    try {
+        $stmt = $pdo->query("PRAGMA table_info(" . $table . ")");
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        $columns = [];
+
+        foreach ($rows as $row) {
+            if (!empty($row['name'])) {
+                $columns[] = (string) $row['name'];
+            }
         }
+
+        return $columns;
+    } catch (Throwable $e) {
+        return [];
     }
-    return $columns;
 }
 
 function h(?string $value): string
 {
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
 function money(float $amount): string
@@ -61,17 +53,21 @@ function pickExistingColumn(array $columns, array $choices): ?string
 function maxValue(array $rows, string $key): float
 {
     $max = 0.0;
+
     foreach ($rows as $row) {
-        $value = (float)($row[$key] ?? 0);
+        $value = (float) ($row[$key] ?? 0);
         if ($value > $max) {
             $max = $value;
         }
     }
+
     return $max;
 }
 
+$fatalError = '';
+
 try {
-    $pdo = getDB();
+    $pdo = getDatabaseConnection();
 
     $today = date('Y-m-d');
     $weekStart = date('Y-m-d', strtotime('monday this week'));
@@ -87,6 +83,7 @@ try {
     $sources = [
         'non_member' => 0.0,
         'member_bookings' => 0.0,
+        'public_requests' => 0.0,
     ];
 
     $counts = [
@@ -112,7 +109,199 @@ try {
 
     /*
     |--------------------------------------------------------------------------
-    | NON-MEMBER BOOKINGS REVENUE
+    | PUBLIC BOOKING REQUESTS REVENUE
+    |--------------------------------------------------------------------------
+    */
+    if (tableExists($pdo, 'public_booking_requests')) {
+        $cols = getColumns($pdo, 'public_booking_requests');
+
+        $priceCol = pickExistingColumn($cols, ['estimated_price', 'price', 'total_price', 'amount']);
+        $dateCol = pickExistingColumn($cols, ['preferred_date', 'booking_date', 'created_at']);
+        $serviceCol = pickExistingColumn($cols, ['service_type', 'service', 'booking_type']);
+        $statusCol = pickExistingColumn($cols, ['status']);
+        $nameCol = pickExistingColumn($cols, ['full_name', 'client_name', 'name']);
+        $dogCol = pickExistingColumn($cols, ['pet_name', 'dog_name', 'dog']);
+
+        if ($priceCol !== null && $dateCol !== null) {
+            $statusExclusion = '';
+            if ($statusCol !== null) {
+                $statusExclusion = " AND LOWER(COALESCE($statusCol, '')) NOT IN ('cancelled', 'canceled')";
+            }
+
+            $stmt = $pdo->prepare("
+                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                AND date($dateCol) = date(:today)
+                $statusExclusion
+            ");
+            $stmt->execute(['today' => $today]);
+            $totals['today'] += (float) ($stmt->fetchColumn() ?: 0);
+
+            $stmt = $pdo->prepare("
+                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                AND date($dateCol) >= date(:week_start)
+                AND date($dateCol) <= date(:today)
+                $statusExclusion
+            ");
+            $stmt->execute([
+                'week_start' => $weekStart,
+                'today' => $today,
+            ]);
+            $totals['week'] += (float) ($stmt->fetchColumn() ?: 0);
+
+            $stmt = $pdo->prepare("
+                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                AND date($dateCol) >= date(:month_start)
+                AND date($dateCol) <= date(:today)
+                $statusExclusion
+            ");
+            $stmt->execute([
+                'month_start' => $monthStart,
+                'today' => $today,
+            ]);
+            $totals['month'] += (float) ($stmt->fetchColumn() ?: 0);
+
+            $stmt = $pdo->query("
+                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                $statusExclusion
+            ");
+            $publicAllTime = (float) ($stmt->fetchColumn() ?: 0);
+            $totals['all_time'] += $publicAllTime;
+            $sources['public_requests'] = $publicAllTime;
+
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                AND date($dateCol) = date(:today)
+                $statusExclusion
+            ");
+            $stmt->execute(['today' => $today]);
+            $counts['today'] += (int) ($stmt->fetchColumn() ?: 0);
+
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                AND date($dateCol) >= date(:week_start)
+                AND date($dateCol) <= date(:today)
+                $statusExclusion
+            ");
+            $stmt->execute([
+                'week_start' => $weekStart,
+                'today' => $today,
+            ]);
+            $counts['week'] += (int) ($stmt->fetchColumn() ?: 0);
+
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                AND date($dateCol) >= date(:month_start)
+                AND date($dateCol) <= date(:today)
+                $statusExclusion
+            ");
+            $stmt->execute([
+                'month_start' => $monthStart,
+                'today' => $today,
+            ]);
+            $counts['month'] += (int) ($stmt->fetchColumn() ?: 0);
+
+            $stmt = $pdo->query("
+                SELECT COUNT(*)
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                $statusExclusion
+            ");
+            $counts['all_time'] += (int) ($stmt->fetchColumn() ?: 0);
+
+            if ($serviceCol !== null) {
+                $stmt = $pdo->query("
+                    SELECT
+                        COALESCE($serviceCol, 'Service') AS service_name,
+                        COUNT(*) AS booking_count,
+                        COALESCE(SUM(CAST($priceCol AS REAL)), 0) AS total_revenue
+                    FROM public_booking_requests
+                    WHERE $priceCol IS NOT NULL
+                    $statusExclusion
+                    GROUP BY $serviceCol
+                ");
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $serviceName = (string) ($row['service_name'] ?? 'Service');
+
+                    if (!isset($combinedServiceMap[$serviceName])) {
+                        $combinedServiceMap[$serviceName] = [
+                            'service_name' => $serviceName,
+                            'booking_count' => 0,
+                            'total_revenue' => 0.0,
+                        ];
+                    }
+
+                    $combinedServiceMap[$serviceName]['booking_count'] += (int) ($row['booking_count'] ?? 0);
+                    $combinedServiceMap[$serviceName]['total_revenue'] += (float) ($row['total_revenue'] ?? 0);
+                }
+            }
+
+            $stmt = $pdo->query("
+                SELECT
+                    date($dateCol) AS revenue_day,
+                    COUNT(*) AS booking_count,
+                    COALESCE(SUM(CAST($priceCol AS REAL)), 0) AS total_revenue
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                $statusExclusion
+                GROUP BY date($dateCol)
+            ");
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $day = (string) ($row['revenue_day'] ?? '');
+
+                if (!isset($combinedDayMap[$day])) {
+                    $combinedDayMap[$day] = [
+                        'revenue_day' => $day,
+                        'booking_count' => 0,
+                        'total_revenue' => 0.0,
+                    ];
+                }
+
+                $combinedDayMap[$day]['booking_count'] += (int) ($row['booking_count'] ?? 0);
+                $combinedDayMap[$day]['total_revenue'] += (float) ($row['total_revenue'] ?? 0);
+            }
+
+            $selectName = $nameCol !== null ? $nameCol : "'Client'";
+            $selectDog = $dogCol !== null ? $dogCol : "''";
+            $selectService = $serviceCol !== null ? $serviceCol : "'Service'";
+            $selectStatus = $statusCol !== null ? $statusCol : "'Requested'";
+
+            $stmt = $pdo->query("
+                SELECT
+                    id,
+                    'public_request' AS source_type,
+                    $selectName AS client_name,
+                    $selectDog AS dog_name,
+                    $selectService AS service_name,
+                    CAST($priceCol AS REAL) AS revenue_amount,
+                    $dateCol AS revenue_date,
+                    $selectStatus AS status_name
+                FROM public_booking_requests
+                WHERE $priceCol IS NOT NULL
+                $statusExclusion
+            ");
+            $combinedRecent = array_merge($combinedRecent, $stmt->fetchAll(PDO::FETCH_ASSOC));
+        } else {
+            $revenueNotes[] = 'The public_booking_requests table is missing a price or date field needed for full revenue reporting.';
+        }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | LEGACY NON-MEMBER BOOKINGS REVENUE
     |--------------------------------------------------------------------------
     */
     if (tableExists($pdo, 'non_member_bookings')) {
@@ -128,102 +317,17 @@ try {
         if ($priceCol !== null && $dateCol !== null) {
             $statusExclusion = '';
             if ($statusCol !== null) {
-                $statusExclusion = " AND COALESCE($statusCol, '') NOT IN ('Cancelled')";
+                $statusExclusion = " AND LOWER(COALESCE($statusCol, '')) NOT IN ('cancelled', 'canceled')";
             }
 
-            $stmt = $pdo->prepare("
-                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                AND date($dateCol) = date(:today)
-                $statusExclusion
-            ");
-            $stmt->execute(['today' => $today]);
-            $totals['today'] += (float)($stmt->fetchColumn() ?: 0);
-
-            $stmt = $pdo->prepare("
-                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                AND date($dateCol) >= date(:week_start)
-                AND date($dateCol) <= date(:today)
-                $statusExclusion
-            ");
-            $stmt->execute([
-                'week_start' => $weekStart,
-                'today' => $today
-            ]);
-            $totals['week'] += (float)($stmt->fetchColumn() ?: 0);
-
-            $stmt = $pdo->prepare("
-                SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                AND date($dateCol) >= date(:month_start)
-                AND date($dateCol) <= date(:today)
-                $statusExclusion
-            ");
-            $stmt->execute([
-                'month_start' => $monthStart,
-                'today' => $today
-            ]);
-            $totals['month'] += (float)($stmt->fetchColumn() ?: 0);
-
             $stmt = $pdo->query("
                 SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
                 FROM non_member_bookings
                 WHERE $priceCol IS NOT NULL
                 $statusExclusion
             ");
-            $nonMemberAllTime = (float)($stmt->fetchColumn() ?: 0);
-            $totals['all_time'] += $nonMemberAllTime;
+            $nonMemberAllTime = (float) ($stmt->fetchColumn() ?: 0);
             $sources['non_member'] = $nonMemberAllTime;
-
-            $stmt = $pdo->prepare("
-                SELECT COUNT(*)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                AND date($dateCol) = date(:today)
-                $statusExclusion
-            ");
-            $stmt->execute(['today' => $today]);
-            $counts['today'] += (int)($stmt->fetchColumn() ?: 0);
-
-            $stmt = $pdo->prepare("
-                SELECT COUNT(*)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                AND date($dateCol) >= date(:week_start)
-                AND date($dateCol) <= date(:today)
-                $statusExclusion
-            ");
-            $stmt->execute([
-                'week_start' => $weekStart,
-                'today' => $today
-            ]);
-            $counts['week'] += (int)($stmt->fetchColumn() ?: 0);
-
-            $stmt = $pdo->prepare("
-                SELECT COUNT(*)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                AND date($dateCol) >= date(:month_start)
-                AND date($dateCol) <= date(:today)
-                $statusExclusion
-            ");
-            $stmt->execute([
-                'month_start' => $monthStart,
-                'today' => $today
-            ]);
-            $counts['month'] += (int)($stmt->fetchColumn() ?: 0);
-
-            $stmt = $pdo->query("
-                SELECT COUNT(*)
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                $statusExclusion
-            ");
-            $counts['all_time'] += (int)($stmt->fetchColumn() ?: 0);
 
             if ($serviceCol !== null) {
                 $stmt = $pdo->query("
@@ -236,8 +340,9 @@ try {
                     $statusExclusion
                     GROUP BY $serviceCol
                 ");
-                foreach ($stmt->fetchAll() as $row) {
-                    $serviceName = (string)($row['service_name'] ?? 'Service');
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $serviceName = (string) ($row['service_name'] ?? 'Service');
+
                     if (!isset($combinedServiceMap[$serviceName])) {
                         $combinedServiceMap[$serviceName] = [
                             'service_name' => $serviceName,
@@ -245,32 +350,10 @@ try {
                             'total_revenue' => 0.0,
                         ];
                     }
-                    $combinedServiceMap[$serviceName]['booking_count'] += (int)$row['booking_count'];
-                    $combinedServiceMap[$serviceName]['total_revenue'] += (float)$row['total_revenue'];
-                }
-            }
 
-            $stmt = $pdo->query("
-                SELECT
-                    date($dateCol) AS revenue_day,
-                    COUNT(*) AS booking_count,
-                    COALESCE(SUM(CAST($priceCol AS REAL)), 0) AS total_revenue
-                FROM non_member_bookings
-                WHERE $priceCol IS NOT NULL
-                $statusExclusion
-                GROUP BY date($dateCol)
-            ");
-            foreach ($stmt->fetchAll() as $row) {
-                $day = (string)$row['revenue_day'];
-                if (!isset($combinedDayMap[$day])) {
-                    $combinedDayMap[$day] = [
-                        'revenue_day' => $day,
-                        'booking_count' => 0,
-                        'total_revenue' => 0.0,
-                    ];
+                    $combinedServiceMap[$serviceName]['booking_count'] += (int) ($row['booking_count'] ?? 0);
+                    $combinedServiceMap[$serviceName]['total_revenue'] += (float) ($row['total_revenue'] ?? 0);
                 }
-                $combinedDayMap[$day]['booking_count'] += (int)$row['booking_count'];
-                $combinedDayMap[$day]['total_revenue'] += (float)$row['total_revenue'];
             }
 
             $selectName = $nameCol !== null ? $nameCol : "'Client'";
@@ -292,9 +375,7 @@ try {
                 WHERE $priceCol IS NOT NULL
                 $statusExclusion
             ");
-            $combinedRecent = array_merge($combinedRecent, $stmt->fetchAll());
-        } else {
-            $revenueNotes[] = 'The non_member_bookings table is missing a price or date field needed for full revenue reporting.';
+            $combinedRecent = array_merge($combinedRecent, $stmt->fetchAll(PDO::FETCH_ASSOC));
         }
     }
 
@@ -311,12 +392,11 @@ try {
         $serviceCol = pickExistingColumn($cols, ['service_type']);
         $statusCol = pickExistingColumn($cols, ['status']);
         $durationCol = pickExistingColumn($cols, ['duration_minutes']);
-        $clientNotesCol = pickExistingColumn($cols, ['client_notes']);
 
         if ($priceCol !== null && $dateCol !== null) {
             $statusExclusion = '';
             if ($statusCol !== null) {
-                $statusExclusion = " AND LOWER(COALESCE($statusCol, '')) NOT IN ('cancelled')";
+                $statusExclusion = " AND LOWER(COALESCE($statusCol, '')) NOT IN ('cancelled', 'canceled')";
             }
 
             $stmt = $pdo->prepare("
@@ -327,7 +407,7 @@ try {
                 $statusExclusion
             ");
             $stmt->execute(['today' => $today]);
-            $totals['today'] += (float)($stmt->fetchColumn() ?: 0);
+            $totals['today'] += (float) ($stmt->fetchColumn() ?: 0);
 
             $stmt = $pdo->prepare("
                 SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
@@ -339,9 +419,9 @@ try {
             ");
             $stmt->execute([
                 'week_start' => $weekStart,
-                'today' => $today
+                'today' => $today,
             ]);
-            $totals['week'] += (float)($stmt->fetchColumn() ?: 0);
+            $totals['week'] += (float) ($stmt->fetchColumn() ?: 0);
 
             $stmt = $pdo->prepare("
                 SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
@@ -353,9 +433,9 @@ try {
             ");
             $stmt->execute([
                 'month_start' => $monthStart,
-                'today' => $today
+                'today' => $today,
             ]);
-            $totals['month'] += (float)($stmt->fetchColumn() ?: 0);
+            $totals['month'] += (float) ($stmt->fetchColumn() ?: 0);
 
             $stmt = $pdo->query("
                 SELECT COALESCE(SUM(CAST($priceCol AS REAL)), 0)
@@ -363,7 +443,7 @@ try {
                 WHERE $priceCol IS NOT NULL
                 $statusExclusion
             ");
-            $memberAllTime = (float)($stmt->fetchColumn() ?: 0);
+            $memberAllTime = (float) ($stmt->fetchColumn() ?: 0);
             $totals['all_time'] += $memberAllTime;
             $sources['member_bookings'] = $memberAllTime;
 
@@ -375,7 +455,7 @@ try {
                 $statusExclusion
             ");
             $stmt->execute(['today' => $today]);
-            $counts['today'] += (int)($stmt->fetchColumn() ?: 0);
+            $counts['today'] += (int) ($stmt->fetchColumn() ?: 0);
 
             $stmt = $pdo->prepare("
                 SELECT COUNT(*)
@@ -387,9 +467,9 @@ try {
             ");
             $stmt->execute([
                 'week_start' => $weekStart,
-                'today' => $today
+                'today' => $today,
             ]);
-            $counts['week'] += (int)($stmt->fetchColumn() ?: 0);
+            $counts['week'] += (int) ($stmt->fetchColumn() ?: 0);
 
             $stmt = $pdo->prepare("
                 SELECT COUNT(*)
@@ -401,9 +481,9 @@ try {
             ");
             $stmt->execute([
                 'month_start' => $monthStart,
-                'today' => $today
+                'today' => $today,
             ]);
-            $counts['month'] += (int)($stmt->fetchColumn() ?: 0);
+            $counts['month'] += (int) ($stmt->fetchColumn() ?: 0);
 
             $stmt = $pdo->query("
                 SELECT COUNT(*)
@@ -411,18 +491,20 @@ try {
                 WHERE $priceCol IS NOT NULL
                 $statusExclusion
             ");
-            $counts['all_time'] += (int)($stmt->fetchColumn() ?: 0);
+            $counts['all_time'] += (int) ($stmt->fetchColumn() ?: 0);
 
-            $serviceExpr = "
-                CASE
-                    WHEN $serviceCol = 'walk' AND $durationCol IS NOT NULL THEN CAST($durationCol AS TEXT) || ' Min Walk'
-                    WHEN $serviceCol = 'daycare' THEN 'Daycare'
-                    WHEN $serviceCol = 'boarding' THEN 'Boarding'
-                    WHEN $serviceCol = 'drop-in visit' THEN 'Drop-In Visit'
-                    WHEN $serviceCol = 'pet taxi' THEN 'Pet Taxi'
-                    ELSE 'Booking'
-                END
-            ";
+            $serviceExpr = $serviceCol !== null
+                ? "
+                    CASE
+                        WHEN $serviceCol = 'walk' AND " . ($durationCol !== null ? "$durationCol IS NOT NULL" : "0") . " THEN CAST($durationCol AS TEXT) || ' Min Walk'
+                        WHEN $serviceCol = 'daycare' THEN 'Daycare'
+                        WHEN $serviceCol = 'boarding' THEN 'Boarding'
+                        WHEN $serviceCol = 'drop-in visit' THEN 'Drop-In Visit'
+                        WHEN $serviceCol = 'pet taxi' THEN 'Pet Taxi'
+                        ELSE COALESCE($serviceCol, 'Booking')
+                    END
+                "
+                : "'Booking'";
 
             $stmt = $pdo->query("
                 SELECT
@@ -434,8 +516,9 @@ try {
                 $statusExclusion
                 GROUP BY $serviceExpr
             ");
-            foreach ($stmt->fetchAll() as $row) {
-                $serviceName = (string)($row['service_name'] ?? 'Booking');
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $serviceName = (string) ($row['service_name'] ?? 'Booking');
+
                 if (!isset($combinedServiceMap[$serviceName])) {
                     $combinedServiceMap[$serviceName] = [
                         'service_name' => $serviceName,
@@ -443,8 +526,9 @@ try {
                         'total_revenue' => 0.0,
                     ];
                 }
-                $combinedServiceMap[$serviceName]['booking_count'] += (int)$row['booking_count'];
-                $combinedServiceMap[$serviceName]['total_revenue'] += (float)$row['total_revenue'];
+
+                $combinedServiceMap[$serviceName]['booking_count'] += (int) ($row['booking_count'] ?? 0);
+                $combinedServiceMap[$serviceName]['total_revenue'] += (float) ($row['total_revenue'] ?? 0);
             }
 
             $stmt = $pdo->query("
@@ -457,8 +541,9 @@ try {
                 $statusExclusion
                 GROUP BY date($dateCol)
             ");
-            foreach ($stmt->fetchAll() as $row) {
-                $day = (string)$row['revenue_day'];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $day = (string) ($row['revenue_day'] ?? '');
+
                 if (!isset($combinedDayMap[$day])) {
                     $combinedDayMap[$day] = [
                         'revenue_day' => $day,
@@ -466,8 +551,9 @@ try {
                         'total_revenue' => 0.0,
                     ];
                 }
-                $combinedDayMap[$day]['booking_count'] += (int)$row['booking_count'];
-                $combinedDayMap[$day]['total_revenue'] += (float)$row['total_revenue'];
+
+                $combinedDayMap[$day]['booking_count'] += (int) ($row['booking_count'] ?? 0);
+                $combinedDayMap[$day]['total_revenue'] += (float) ($row['total_revenue'] ?? 0);
             }
 
             $statusExpr = $statusCol !== null ? $statusCol : "'pending'";
@@ -486,7 +572,7 @@ try {
                 WHERE $priceCol IS NOT NULL
                 $statusExclusion
             ");
-            $combinedRecent = array_merge($combinedRecent, $stmt->fetchAll());
+            $combinedRecent = array_merge($combinedRecent, $stmt->fetchAll(PDO::FETCH_ASSOC));
         } else {
             $revenueNotes[] = 'The bookings table is missing a price or date field needed for member revenue reporting.';
         }
@@ -500,37 +586,38 @@ try {
 
     $serviceBreakdown = array_values($combinedServiceMap);
     usort($serviceBreakdown, function (array $a, array $b): int {
-        $revCompare = (float)$b['total_revenue'] <=> (float)$a['total_revenue'];
+        $revCompare = (float) ($b['total_revenue'] ?? 0) <=> (float) ($a['total_revenue'] ?? 0);
         if ($revCompare !== 0) {
             return $revCompare;
         }
-        return (int)$b['booking_count'] <=> (int)$a['booking_count'];
+        return (int) ($b['booking_count'] ?? 0) <=> (int) ($a['booking_count'] ?? 0);
     });
 
     if (!empty($serviceBreakdown)) {
-        $topService = (string)($serviceBreakdown[0]['service_name'] ?? '—');
-        $topServiceRevenue = (float)($serviceBreakdown[0]['total_revenue'] ?? 0);
+        $topService = (string) ($serviceBreakdown[0]['service_name'] ?? '—');
+        $topServiceRevenue = (float) ($serviceBreakdown[0]['total_revenue'] ?? 0);
     }
 
-    $dailyRevenue = array_values($combinedDayMap);
-    usort($dailyRevenue, function (array $a, array $b): int {
-        return strcmp((string)$b['revenue_day'], (string)$a['revenue_day']);
+    $allDailyRevenue = array_values($combinedDayMap);
+    usort($allDailyRevenue, function (array $a, array $b): int {
+        return strcmp((string) ($b['revenue_day'] ?? ''), (string) ($a['revenue_day'] ?? ''));
     });
-    $dailyRevenue = array_slice($dailyRevenue, 0, 10);
 
-    foreach ($dailyRevenue as $row) {
-        if ((float)$row['total_revenue'] > $bestDayRevenue) {
-            $bestDayRevenue = (float)$row['total_revenue'];
-            $bestDay = (string)$row['revenue_day'];
+    foreach ($allDailyRevenue as $row) {
+        if ((float) ($row['total_revenue'] ?? 0) > $bestDayRevenue) {
+            $bestDayRevenue = (float) ($row['total_revenue'] ?? 0);
+            $bestDay = (string) ($row['revenue_day'] ?? '—');
         }
     }
 
+    $dailyRevenue = array_slice($allDailyRevenue, 0, 10);
+
     usort($combinedRecent, function (array $a, array $b): int {
-        $dateCompare = strcmp((string)$b['revenue_date'], (string)$a['revenue_date']);
+        $dateCompare = strcmp((string) ($b['revenue_date'] ?? ''), (string) ($a['revenue_date'] ?? ''));
         if ($dateCompare !== 0) {
             return $dateCompare;
         }
-        return (int)$b['id'] <=> (int)$a['id'];
+        return (int) ($b['id'] ?? 0) <=> (int) ($a['id'] ?? 0);
     });
     $recentRevenue = array_slice($combinedRecent, 0, 10);
 
@@ -840,6 +927,8 @@ try {
             padding:16px 18px;
             border-radius:16px;
             color:#ffd1d1;
+            white-space:pre-wrap;
+            word-break:break-word;
         }
 
         @media (max-width: 1200px){
@@ -879,8 +968,8 @@ try {
             <a href="admin-dashboard.php">Dashboard</a>
             <a href="admin-bookings.php">Booking Management</a>
             <a href="admin-revenue.php" class="active">Revenue Dashboard</a>
-            <a href="memberships.php">Memberships</a>
-            <a href="non-member-booking.php">New Non-Member Booking</a>
+            <a href="admin-members.php">Members</a>
+            <a href="book-walk.php">Preview Public Booking Form</a>
             <a href="admin-logout.php">Logout</a>
         </nav>
     </aside>
@@ -912,7 +1001,7 @@ try {
                 <div class="card">
                     <div class="stat-label">Revenue Today</div>
                     <div class="stat-value"><?php echo money($totals['today']); ?></div>
-                    <div class="stat-sub">Member + non-member bookings</div>
+                    <div class="stat-sub">Tracked booked revenue</div>
                 </div>
 
                 <div class="card">
@@ -930,7 +1019,7 @@ try {
                 <div class="card">
                     <div class="stat-label">All-Time Revenue</div>
                     <div class="stat-value"><?php echo money($totals['all_time']); ?></div>
-                    <div class="stat-sub">Combined booked revenue</div>
+                    <div class="stat-sub">Combined tracked revenue</div>
                 </div>
             </section>
 
@@ -938,7 +1027,7 @@ try {
                 <div class="card">
                     <div class="stat-label">Bookings Today</div>
                     <div class="stat-value"><?php echo number_format($counts['today']); ?></div>
-                    <div class="stat-sub">Revenue-generating bookings</div>
+                    <div class="stat-sub">Revenue-generating records</div>
                 </div>
 
                 <div class="card">
@@ -963,7 +1052,7 @@ try {
             <section class="grid">
                 <div class="card">
                     <h2 class="section-title">Revenue by Service</h2>
-                    <div class="section-sub">Non-member and member booking services combined.</div>
+                    <div class="section-sub">Combined tracked service revenue.</div>
 
                     <?php if (empty($serviceBreakdown)): ?>
                         <div class="empty">No service revenue data is available yet.</div>
@@ -972,13 +1061,13 @@ try {
                         <div class="service-list">
                             <?php foreach ($serviceBreakdown as $row): ?>
                                 <?php
-                                $serviceRevenue = (float)($row['total_revenue'] ?? 0);
-                                $serviceBookings = (int)($row['booking_count'] ?? 0);
+                                $serviceRevenue = (float) ($row['total_revenue'] ?? 0);
+                                $serviceBookings = (int) ($row['booking_count'] ?? 0);
                                 $barWidth = $maxServiceRevenue > 0 ? ($serviceRevenue / $maxServiceRevenue) * 100 : 0;
                                 ?>
                                 <div class="metric-row">
                                     <div class="metric-head">
-                                        <div class="metric-title"><?php echo h((string)($row['service_name'] ?? 'Service')); ?></div>
+                                        <div class="metric-title"><?php echo h((string) ($row['service_name'] ?? 'Service')); ?></div>
                                         <div class="metric-title"><?php echo money($serviceRevenue); ?></div>
                                     </div>
                                     <div class="metric-meta"><?php echo number_format($serviceBookings); ?> bookings</div>
@@ -993,7 +1082,7 @@ try {
 
                 <div class="card">
                     <h2 class="section-title">Daily Revenue Trend</h2>
-                    <div class="section-sub">Most recent booked revenue days across all tracked sources.</div>
+                    <div class="section-sub">Most recent tracked revenue days.</div>
 
                     <?php if (empty($dailyRevenue)): ?>
                         <div class="empty">No daily revenue data is available yet.</div>
@@ -1002,13 +1091,13 @@ try {
                         <div class="daily-list">
                             <?php foreach ($dailyRevenue as $row): ?>
                                 <?php
-                                $dayRevenue = (float)($row['total_revenue'] ?? 0);
-                                $dayBookings = (int)($row['booking_count'] ?? 0);
+                                $dayRevenue = (float) ($row['total_revenue'] ?? 0);
+                                $dayBookings = (int) ($row['booking_count'] ?? 0);
                                 $barWidth = $maxDayRevenue > 0 ? ($dayRevenue / $maxDayRevenue) * 100 : 0;
                                 ?>
                                 <div class="metric-row">
                                     <div class="metric-head">
-                                        <div class="metric-title"><?php echo h((string)($row['revenue_day'] ?? '—')); ?></div>
+                                        <div class="metric-title"><?php echo h((string) ($row['revenue_day'] ?? '—')); ?></div>
                                         <div class="metric-title"><?php echo money($dayRevenue); ?></div>
                                     </div>
                                     <div class="metric-meta"><?php echo number_format($dayBookings); ?> bookings</div>
@@ -1033,7 +1122,12 @@ try {
                                 <td><?php echo money($bestDayRevenue); ?></td>
                             </tr>
                             <tr>
-                                <th>Non-Member Revenue</th>
+                                <th>Public Booking Revenue</th>
+                                <td>Tracked Source</td>
+                                <td><?php echo money($sources['public_requests']); ?></td>
+                            </tr>
+                            <tr>
+                                <th>Legacy Non-Member Revenue</th>
                                 <td>Tracked Source</td>
                                 <td><?php echo money($sources['non_member']); ?></td>
                             </tr>
@@ -1069,16 +1163,16 @@ try {
                                 <?php foreach ($recentRevenue as $row): ?>
                                     <tr>
                                         <td>
-                                            <?php echo h((string)($row['client_name'] ?? 'Client')); ?><br>
-                                            <span class="muted"><?php echo h((string)($row['dog_name'] ?? '')); ?></span>
+                                            <?php echo h((string) ($row['client_name'] ?? 'Client')); ?><br>
+                                            <span class="muted"><?php echo h((string) ($row['dog_name'] ?? '')); ?></span>
                                         </td>
                                         <td>
-                                            <?php echo h((string)($row['service_name'] ?? 'Service')); ?><br>
-                                            <span class="muted"><?php echo h((string)($row['revenue_date'] ?? '')); ?></span>
+                                            <?php echo h((string) ($row['service_name'] ?? 'Service')); ?><br>
+                                            <span class="muted"><?php echo h((string) ($row['revenue_date'] ?? '')); ?></span>
                                         </td>
                                         <td>
-                                            <?php echo money((float)($row['revenue_amount'] ?? 0)); ?><br>
-                                            <span class="pill"><?php echo h((string)($row['status_name'] ?? 'pending')); ?></span>
+                                            <?php echo money((float) ($row['revenue_amount'] ?? 0)); ?><br>
+                                            <span class="pill"><?php echo h((string) ($row['status_name'] ?? 'pending')); ?></span>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>

@@ -1,35 +1,8 @@
 <?php
 declare(strict_types=1);
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-if (empty($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
-    header('Location: admin-login.php');
-    exit;
-}
-
-function getDatabaseConnection(): PDO
-{
-    $possiblePaths = [
-        __DIR__ . '/data/members.sqlite',
-        __DIR__ . '/data/database.sqlite',
-        __DIR__ . '/database.sqlite',
-        __DIR__ . '/data/site.sqlite',
-    ];
-
-    foreach ($possiblePaths as $path) {
-        if (file_exists($path)) {
-            $pdo = new PDO('sqlite:' . $path);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-            return $pdo;
-        }
-    }
-
-    throw new RuntimeException('Could not find SQLite database file.');
-}
+require_once __DIR__ . '/admin-auth.php';
+require_once __DIR__ . '/db.php';
 
 function tableExists(PDO $pdo, string $table): bool
 {
@@ -38,18 +11,32 @@ function tableExists(PDO $pdo, string $table): bool
     return (bool) $stmt->fetchColumn();
 }
 
+function columnExists(PDO $pdo, string $table, string $column): bool
+{
+    $stmt = $pdo->query("PRAGMA table_info(" . $table . ")");
+    $columns = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($columns as $col) {
+        if (($col['name'] ?? '') === $column) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function scalar(PDO $pdo, string $sql, array $params = []): int
 {
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
-    return (int)($stmt->fetchColumn() ?: 0);
+    return (int) ($stmt->fetchColumn() ?: 0);
 }
 
 function floatScalar(PDO $pdo, string $sql, array $params = []): float
 {
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
-    return (float)($stmt->fetchColumn() ?: 0);
+    return (float) ($stmt->fetchColumn() ?: 0);
 }
 
 function getTodayDate(): string
@@ -62,20 +49,21 @@ function money(float $amount): string
     return '$' . number_format($amount, 2);
 }
 
+$fatalError = '';
+$stats = [
+    'members' => 0,
+    'walks_total' => 0,
+    'walks_pending' => 0,
+    'walks_today' => 0,
+    'public_total' => 0,
+    'public_pending' => 0,
+    'public_today' => 0,
+    'walkers' => 0,
+    'revenue_month' => 0.0,
+];
+
 try {
     $pdo = getDatabaseConnection();
-
-    $stats = [
-        'members' => 0,
-        'walks_total' => 0,
-        'walks_pending' => 0,
-        'walks_today' => 0,
-        'public_total' => 0,
-        'public_pending' => 0,
-        'public_today' => 0,
-        'walkers' => 0,
-        'revenue_month' => 0.0,
-    ];
 
     if (tableExists($pdo, 'members')) {
         $stats['members'] = scalar($pdo, "SELECT COUNT(*) FROM members");
@@ -97,39 +85,74 @@ try {
     if (tableExists($pdo, 'public_booking_requests')) {
         $stats['public_total'] = scalar($pdo, "SELECT COUNT(*) FROM public_booking_requests");
 
-        $stats['public_pending'] = scalar(
-            $pdo,
-            "SELECT COUNT(*) FROM public_booking_requests WHERE status IN ('New', 'Requested', 'Pending', 'Scheduled')"
-        );
+        if (columnExists($pdo, 'public_booking_requests', 'status')) {
+            $stats['public_pending'] = scalar(
+                $pdo,
+                "SELECT COUNT(*) FROM public_booking_requests WHERE status IN ('New', 'Requested', 'Pending', 'Scheduled')"
+            );
+        } else {
+            $stats['public_pending'] = $stats['public_total'];
+        }
 
         $today = getTodayDate();
-
-        $stats['public_today'] = scalar(
-            $pdo,
-            "SELECT COUNT(*)
-             FROM public_booking_requests
-             WHERE preferred_date = :today
-                OR checkin_date = :today",
-            ['today' => $today]
-        );
-
         $monthStart = date('Y-m-01');
 
-        $stats['revenue_month'] = floatScalar(
-            $pdo,
-            "SELECT COALESCE(SUM(CAST(estimated_price AS REAL)), 0)
-             FROM public_booking_requests
-             WHERE status != 'Cancelled'
-               AND (
-                    (preferred_date IS NOT NULL AND date(preferred_date) >= date(:month_start) AND date(preferred_date) <= date(:today))
-                    OR
-                    (checkin_date IS NOT NULL AND date(checkin_date) >= date(:month_start) AND date(checkin_date) <= date(:today))
-               )",
-            [
-                'month_start' => $monthStart,
-                'today' => $today,
-            ]
-        );
+        $hasPreferredDate = columnExists($pdo, 'public_booking_requests', 'preferred_date');
+        $hasCheckinDate = columnExists($pdo, 'public_booking_requests', 'checkin_date');
+        $hasEstimatedPrice = columnExists($pdo, 'public_booking_requests', 'estimated_price');
+        $hasStatus = columnExists($pdo, 'public_booking_requests', 'status');
+
+        $todayConditions = [];
+        $todayParams = ['today' => $today];
+
+        if ($hasPreferredDate) {
+            $todayConditions[] = "preferred_date = :today";
+        }
+
+        if ($hasCheckinDate) {
+            $todayConditions[] = "checkin_date = :today";
+        }
+
+        if (!empty($todayConditions)) {
+            $stats['public_today'] = scalar(
+                $pdo,
+                "SELECT COUNT(*) FROM public_booking_requests WHERE " . implode(' OR ', $todayConditions),
+                $todayParams
+            );
+        }
+
+        if ($hasEstimatedPrice && ($hasPreferredDate || $hasCheckinDate)) {
+            $dateConditions = [];
+
+            if ($hasPreferredDate) {
+                $dateConditions[] = "(preferred_date IS NOT NULL AND date(preferred_date) >= date(:month_start) AND date(preferred_date) <= date(:today))";
+            }
+
+            if ($hasCheckinDate) {
+                $dateConditions[] = "(checkin_date IS NOT NULL AND date(checkin_date) >= date(:month_start) AND date(checkin_date) <= date(:today))";
+            }
+
+            $whereParts = [];
+
+            if ($hasStatus) {
+                $whereParts[] = "status != 'Cancelled'";
+            }
+
+            if (!empty($dateConditions)) {
+                $whereParts[] = '(' . implode(' OR ', $dateConditions) . ')';
+            }
+
+            $stats['revenue_month'] = floatScalar(
+                $pdo,
+                "SELECT COALESCE(SUM(CAST(estimated_price AS REAL)), 0)
+                 FROM public_booking_requests
+                 WHERE " . implode(' AND ', $whereParts),
+                [
+                    'month_start' => $monthStart,
+                    'today' => $today,
+                ]
+            );
+        }
     }
 
     if (tableExists($pdo, 'walkers')) {
@@ -139,7 +162,6 @@ try {
             $stats['walkers'] = scalar($pdo, "SELECT COUNT(*) FROM walkers");
         }
     }
-
 } catch (Throwable $e) {
     $fatalError = $e->getMessage();
 }
@@ -231,7 +253,7 @@ try {
         }
         .error-box{
             border:1px solid rgba(255,0,0,0.25);background:rgba(255,0,0,0.08);padding:16px 18px;
-            border-radius:16px;color:#ffd1d1;
+            border-radius:16px;color:#ffd1d1;white-space:pre-wrap;word-break:break-word;
         }
         @media (max-width: 1180px){
             .stats{grid-template-columns:repeat(2, minmax(0,1fr))}
@@ -253,22 +275,22 @@ try {
     <div class="admin-shell">
         <aside class="sidebar">
             <div class="brand">Doggie <span>Dorian’s</span></div>
-            <div class="tag">Premium admin control panel for bookings, revenue, memberships, walkers, and client management.</div>
+            <div class="tag">Premium admin control panel for bookings, revenue, walkers, and client operations.</div>
 
             <nav class="nav">
                 <a href="admin-dashboard.php" class="active">Dashboard</a>
                 <a href="admin-bookings.php">Booking Management</a>
                 <a href="admin-revenue.php">Revenue Dashboard</a>
-                <a href="memberships.php">Memberships</a>
-                <a href="book-walk.php">Public Booking Page</a>
+                <a href="admin-members.php">Members</a>
+                <a href="book-walk.php">Preview Public Booking Form</a>
                 <a href="admin-logout.php">Logout</a>
             </nav>
         </aside>
 
         <main class="main">
-            <?php if (!empty($fatalError)): ?>
+            <?php if ($fatalError !== ''): ?>
                 <div class="error-box">
-                    <strong>Database connection error:</strong><br>
+                    <strong>Dashboard error:</strong><br>
                     <?php echo htmlspecialchars($fatalError, ENT_QUOTES, 'UTF-8'); ?>
                 </div>
             <?php else: ?>
@@ -310,8 +332,8 @@ try {
 
                     <div class="card">
                         <div class="stat-label">Revenue This Month</div>
-                        <div class="stat-value"><?php echo money((float)$stats['revenue_month']); ?></div>
-                        <div class="stat-sub">Estimated from public booking requests</div>
+                        <div class="stat-value"><?php echo money((float) $stats['revenue_month']); ?></div>
+                        <div class="stat-sub">Estimated booking revenue</div>
                     </div>
                 </section>
 
@@ -322,7 +344,7 @@ try {
                             <div class="list-item">
                                 <div>
                                     <strong>Member walks scheduled today</strong>
-                                    <span>All walks with today’s date in the walks table</span>
+                                    <span>All member walks dated for today</span>
                                 </div>
                                 <div class="pill"><?php echo number_format($stats['walks_today']); ?></div>
                             </div>
@@ -330,7 +352,7 @@ try {
                             <div class="list-item">
                                 <div>
                                     <strong>Public bookings scheduled today</strong>
-                                    <span>Walk/daycare preferred dates and boarding check-ins for today</span>
+                                    <span>Calculated only from date columns that exist in your table</span>
                                 </div>
                                 <div class="pill"><?php echo number_format($stats['public_today']); ?></div>
                             </div>
@@ -338,7 +360,7 @@ try {
                             <div class="list-item">
                                 <div>
                                     <strong>Total bookings awaiting review</strong>
-                                    <span>Combined view across member walks and public booking requests</span>
+                                    <span>Combined member and public booking requests</span>
                                 </div>
                                 <div class="pill"><?php echo number_format($stats['walks_pending'] + $stats['public_pending']); ?></div>
                             </div>
@@ -350,8 +372,8 @@ try {
                         <div class="list">
                             <div class="list-item">
                                 <div>
-                                    <strong>Manage all public bookings</strong>
-                                    <span>Review walk, daycare, and boarding requests in one place</span>
+                                    <strong>Manage public bookings</strong>
+                                    <span>Review walk, daycare, and boarding requests</span>
                                 </div>
                                 <a class="btn secondary" href="admin-bookings.php">Open</a>
                             </div>
@@ -359,15 +381,15 @@ try {
                             <div class="list-item">
                                 <div>
                                     <strong>View revenue dashboard</strong>
-                                    <span>Track revenue, services, and recent sales</span>
+                                    <span>Track sales and estimated booking revenue</span>
                                 </div>
                                 <a class="btn secondary" href="admin-revenue.php">View</a>
                             </div>
 
                             <div class="list-item">
                                 <div>
-                                    <strong>Open public booking page</strong>
-                                    <span>Use the live request form exactly as clients see it</span>
+                                    <strong>Preview public booking form</strong>
+                                    <span>Open the live client request form</span>
                                 </div>
                                 <a class="btn secondary" href="book-walk.php">Open</a>
                             </div>

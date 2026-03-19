@@ -5,43 +5,69 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-$error = '';
-$success = '';
+require_once __DIR__ . '/admin-config.php';
 
-/*
-|--------------------------------------------------------------------------
-| CHANGE THESE FOR YOUR ADMIN ACCESS
-|--------------------------------------------------------------------------
-*/
-$masterAdminEmail = 'admin@doggiedorians.com';
-$masterAdminPassword = 'ChangeThisNow123!';
+$error = '';
 
 if (!empty($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
     header('Location: admin-dashboard.php');
     exit;
 }
 
+if (!isset($_SESSION['admin_login_attempts'])) {
+    $_SESSION['admin_login_attempts'] = 0;
+}
+
+if (!isset($_SESSION['admin_login_locked_until'])) {
+    $_SESSION['admin_login_locked_until'] = 0;
+}
+
+$now = time();
+$lockedUntil = (int) $_SESSION['admin_login_locked_until'];
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = trim((string) ($_POST['email'] ?? ''));
-    $password = (string) ($_POST['password'] ?? '');
-
-    if ($email === '' || $password === '') {
-        $error = 'Please enter both email and password.';
-    } elseif (
-        hash_equals(strtolower($masterAdminEmail), strtolower($email)) &&
-        hash_equals($masterAdminPassword, $password)
-    ) {
-        $_SESSION['admin_logged_in'] = true;
-        $_SESSION['user_role'] = 'admin';
-        $_SESSION['admin_email'] = $email;
-        $_SESSION['admin_name'] = 'Master Admin';
-
-        header('Location: admin-dashboard.php');
-        exit;
+    if ($lockedUntil > $now) {
+        $remaining = $lockedUntil - $now;
+        $error = 'Too many failed login attempts. Please wait ' . $remaining . ' seconds and try again.';
     } else {
-        $error = 'Invalid admin login credentials.';
+        $email = trim((string) ($_POST['email'] ?? ''));
+        $password = (string) ($_POST['password'] ?? '');
+
+        if ($email === '' || $password === '') {
+            $error = 'Please enter both email and password.';
+        } else {
+            $emailMatches = hash_equals(strtolower($masterAdminEmail), strtolower($email));
+            $passwordMatches = password_verify($password, $masterAdminPasswordHash);
+
+            if ($emailMatches && $passwordMatches) {
+                session_regenerate_id(true);
+
+                $_SESSION['admin_logged_in'] = true;
+                $_SESSION['user_role'] = 'admin';
+                $_SESSION['admin_email'] = $masterAdminEmail;
+                $_SESSION['admin_name'] = $masterAdminDisplayName;
+                $_SESSION['admin_login_attempts'] = 0;
+                $_SESSION['admin_login_locked_until'] = 0;
+
+                header('Location: admin-dashboard.php');
+                exit;
+            } else {
+                $_SESSION['admin_login_attempts']++;
+
+                if ($_SESSION['admin_login_attempts'] >= 5) {
+                    $_SESSION['admin_login_locked_until'] = time() + 300;
+                    $_SESSION['admin_login_attempts'] = 0;
+                    $error = 'Too many failed login attempts. Please wait 5 minutes and try again.';
+                } else {
+                    $remainingAttempts = 5 - (int) $_SESSION['admin_login_attempts'];
+                    $error = 'Invalid admin login credentials. ' . $remainingAttempts . ' attempt(s) remaining.';
+                }
+            }
+        }
     }
 }
+
+$prefillEmail = htmlspecialchars((string) ($_POST['email'] ?? ''), ENT_QUOTES, 'UTF-8');
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -59,7 +85,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             --gold-soft:#f0de9e;
             --text:#f8f5ee;
             --muted:#b9b3a6;
-            --danger:#ff8a8a;
             --shadow:0 20px 60px rgba(0,0,0,0.35);
         }
 
@@ -95,8 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .left{
             padding:52px 42px;
-            background:
-                linear-gradient(180deg, rgba(212,175,55,0.10), rgba(255,255,255,0.01));
+            background:linear-gradient(180deg, rgba(212,175,55,0.10), rgba(255,255,255,0.01));
             border-right:1px solid var(--border);
         }
 
@@ -211,9 +235,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding:14px 16px;
             border-radius:16px;
             font-weight:700;
-        }
-
-        .message.error{
             background:rgba(255,100,100,0.10);
             border:1px solid rgba(255,100,100,0.25);
             color:#ffd5d5;
@@ -227,14 +248,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         @media (max-width: 920px){
-            .wrap{ grid-template-columns:1fr; }
-            .left{ border-right:none; border-bottom:1px solid var(--border); }
+            .wrap{grid-template-columns:1fr;}
+            .left{border-right:none;border-bottom:1px solid var(--border);}
         }
 
         @media (max-width: 640px){
-            .left,.right{ padding:32px 22px; }
-            h1{ font-size:36px; }
-            .card-title{ font-size:26px; }
+            .left,.right{padding:32px 22px;}
+            h1{font-size:36px;}
+            .card-title{font-size:26px;}
         }
     </style>
 </head>
@@ -245,49 +266,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h1>Luxury control for a premium pet brand.</h1>
             <p>
                 This login is for administrative access only. Use it to manage bookings,
-                review operations, update booking statuses, and oversee the high-end client experience.
+                operations, statuses, and the full premium client experience.
             </p>
 
             <div class="feature-list">
                 <div class="feature">
                     <strong>Unified booking management</strong>
-                    Member walks and non-member bookings in one premium admin view.
+                    View and manage bookings in one premium control center.
                 </div>
                 <div class="feature">
                     <strong>Operational control</strong>
-                    Review statuses, assign walker details, and keep the business organized.
+                    Review requests, update statuses, and keep the business organized.
                 </div>
                 <div class="feature">
                     <strong>Separate from client access</strong>
-                    Keeps your customer dashboard and admin system cleanly divided.
+                    Keeps your customer-facing dashboard and admin system fully separated.
                 </div>
             </div>
         </section>
 
         <section class="right">
             <h2 class="card-title">Admin Login</h2>
-            <div class="card-sub">Enter your master admin credentials to continue.</div>
+            <div class="card-sub">Enter your secure admin credentials to continue.</div>
 
             <?php if ($error !== ''): ?>
-                <div class="message error"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
+                <div class="message"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
             <?php endif; ?>
 
             <form method="post" action="admin-login.php" novalidate>
                 <div class="field">
                     <label for="email">Admin Email</label>
-                    <input type="email" id="email" name="email" placeholder="admin@doggiedorians.com" required>
+                    <input
+                        type="email"
+                        id="email"
+                        name="email"
+                        placeholder="admin@doggiedorians.com"
+                        value="<?php echo $prefillEmail; ?>"
+                        required
+                        autocomplete="username"
+                    >
                 </div>
 
                 <div class="field">
                     <label for="password">Admin Password</label>
-                    <input type="password" id="password" name="password" placeholder="Enter your password" required>
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        placeholder="Enter your password"
+                        required
+                        autocomplete="current-password"
+                    >
                 </div>
 
                 <button class="btn" type="submit">Enter Admin Dashboard</button>
             </form>
 
             <div class="helper">
-                After testing, change the hard-coded email and password at the top of this file to your real master admin credentials.
+                This page uses a hashed admin password stored in <strong>admin-config.php</strong>.
             </div>
         </section>
     </div>
