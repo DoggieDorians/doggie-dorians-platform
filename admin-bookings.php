@@ -1,831 +1,864 @@
 <?php
 session_start();
-require_once __DIR__ . '/data/config/db.php';
 
-if (!isset($_SESSION['admin_logged_in'])) {
-    header('Location: admin-login.php');
+$isLoggedIn = isset($_SESSION['member_id']);
+
+if (!$isLoggedIn) {
+    header('Location: login.php');
     exit;
 }
 
-/* =========================
-   HELPERS
-========================= */
-function h($value): string
-{
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+$dbPath = __DIR__ . '/data/members.sqlite';
+$successMessage = '';
+$errorMessage = '';
+
+function e(string $value): string {
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
-function statusBadge(string $status): string
-{
-    $statusKey = strtolower(trim($status));
-
-    $map = [
-        'requested' => ['bg' => 'rgba(212,175,55,0.16)', 'text' => '#f1d67a', 'border' => 'rgba(212,175,55,0.28)'],
-        'pending'   => ['bg' => 'rgba(212,175,55,0.16)', 'text' => '#f1d67a', 'border' => 'rgba(212,175,55,0.28)'],
-        'scheduled' => ['bg' => 'rgba(84,189,122,0.16)', 'text' => '#9be0b1', 'border' => 'rgba(84,189,122,0.28)'],
-        'completed' => ['bg' => 'rgba(74,144,226,0.16)', 'text' => '#9fc8ff', 'border' => 'rgba(74,144,226,0.28)'],
-        'cancelled' => ['bg' => 'rgba(229,57,53,0.16)', 'text' => '#ff9e9b', 'border' => 'rgba(229,57,53,0.28)'],
-        'new'       => ['bg' => 'rgba(255,255,255,0.10)', 'text' => '#d9d9d9', 'border' => 'rgba(255,255,255,0.18)'],
-    ];
-
-    $style = $map[$statusKey] ?? $map['new'];
-
-    return '<span style="
-        display:inline-flex;
-        align-items:center;
-        justify-content:center;
-        padding:8px 12px;
-        border-radius:999px;
-        font-size:12px;
-        font-weight:800;
-        letter-spacing:1px;
-        text-transform:uppercase;
-        background:' . $style['bg'] . ';
-        color:' . $style['text'] . ';
-        border:1px solid ' . $style['border'] . ';
-    ">' . h($status) . '</span>';
+function format_service_label(string $serviceType): string {
+    return match ($serviceType) {
+        'walk' => 'Walk',
+        'daycare' => 'Daycare',
+        'boarding' => 'Boarding',
+        default => 'Unknown'
+    };
 }
 
-function tableExists(PDO $pdo, string $table): bool
-{
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1");
-    $stmt->execute([$table]);
-    return (bool)$stmt->fetchColumn();
+function format_status_label(string $status): string {
+    return match ($status) {
+        'New' => 'New',
+        'Confirmed' => 'Confirmed',
+        'Completed' => 'Completed',
+        'Cancelled' => 'Cancelled',
+        default => $status
+    };
 }
 
-function columnExists(PDO $pdo, string $table, string $column): bool
-{
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    $columns = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-
-    foreach ($columns as $col) {
-        if (($col['name'] ?? '') === $column) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/* =========================
-   HANDLE STATUS UPDATES
-========================= */
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $type = trim($_POST['type'] ?? '');
-    $id = (int)($_POST['id'] ?? 0);
-    $status = trim($_POST['status'] ?? '');
-
-    $allowedStatuses = ['Requested', 'Pending', 'Scheduled', 'Completed', 'Cancelled'];
-
-    if ($id <= 0 || !in_array($status, $allowedStatuses, true)) {
-        $_SESSION['flash'] = [
-            'type' => 'error',
-            'message' => 'Invalid update request.'
-        ];
-        header('Location: admin-bookings.php');
-        exit;
-    }
-
-    try {
-        if ($type === 'walk') {
-            $stmt = $pdo->prepare("UPDATE walks SET status = ? WHERE id = ?");
-            $stmt->execute([$status, $id]);
-
-            $_SESSION['flash'] = [
-                'type' => 'success',
-                'message' => 'Member walk updated successfully.'
-            ];
-        } elseif ($type === 'non_member') {
-            if (!columnExists($pdo, 'non_member_bookings', 'status')) {
-                throw new PDOException('The non_member_bookings table does not have a status column.');
-            }
-
-            $stmt = $pdo->prepare("UPDATE non_member_bookings SET status = ? WHERE id = ?");
-            $stmt->execute([$status, $id]);
-
-            $_SESSION['flash'] = [
-                'type' => 'success',
-                'message' => 'Non-member booking updated successfully.'
-            ];
-        } else {
-            $_SESSION['flash'] = [
-                'type' => 'error',
-                'message' => 'Unknown booking type.'
-            ];
-        }
-    } catch (PDOException $e) {
-        $_SESSION['flash'] = [
-            'type' => 'error',
-            'message' => 'Update failed: ' . $e->getMessage()
-        ];
-    }
-
-    header('Location: admin-bookings.php');
-    exit;
-}
-
-/* =========================
-   FETCH DATA
-========================= */
-$flash = $_SESSION['flash'] ?? null;
-unset($_SESSION['flash']);
-
-$walks = [];
-$nonMembers = [];
-$fatalError = '';
+$bookings = [];
 
 try {
-    if (tableExists($pdo, 'walks')) {
-        $walks = $pdo->query("SELECT * FROM walks ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+    $db = new SQLite3($dbPath);
+    $db->busyTimeout(5000);
+
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS public_booking_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            service_type TEXT NOT NULL,
+            walk_duration INTEGER,
+            pet_name TEXT NOT NULL,
+            pet_size TEXT NOT NULL,
+            preferred_date TEXT,
+            preferred_time TEXT,
+            dropoff_time TEXT,
+            pickup_time TEXT,
+            checkin_date TEXT,
+            checkout_date TEXT,
+            checkin_time TEXT,
+            checkout_time TEXT,
+            feeding_schedule TEXT,
+            notes TEXT,
+            estimated_price REAL,
+            source TEXT NOT NULL DEFAULT 'public_booking_page',
+            status TEXT NOT NULL DEFAULT 'New',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+
+    $existingColumns = [];
+    $columnsResult = $db->query("PRAGMA table_info(public_booking_requests)");
+    while ($column = $columnsResult->fetchArray(SQLITE3_ASSOC)) {
+        $existingColumns[] = $column['name'];
     }
 
-    if (tableExists($pdo, 'non_member_bookings')) {
-        $nonMembers = $pdo->query("SELECT * FROM non_member_bookings ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+    $columnsToAdd = [
+        'dropoff_time' => 'ALTER TABLE public_booking_requests ADD COLUMN dropoff_time TEXT',
+        'pickup_time' => 'ALTER TABLE public_booking_requests ADD COLUMN pickup_time TEXT',
+        'checkin_date' => 'ALTER TABLE public_booking_requests ADD COLUMN checkin_date TEXT',
+        'checkout_date' => 'ALTER TABLE public_booking_requests ADD COLUMN checkout_date TEXT',
+        'checkin_time' => 'ALTER TABLE public_booking_requests ADD COLUMN checkin_time TEXT',
+        'checkout_time' => 'ALTER TABLE public_booking_requests ADD COLUMN checkout_time TEXT',
+        'estimated_price' => 'ALTER TABLE public_booking_requests ADD COLUMN estimated_price REAL',
+    ];
+
+    foreach ($columnsToAdd as $columnName => $sql) {
+        if (!in_array($columnName, $existingColumns, true)) {
+            $db->exec($sql);
+        }
     }
-} catch (PDOException $e) {
-    $fatalError = $e->getMessage();
-}
 
-/* =========================
-   SUMMARY COUNTS
-========================= */
-$memberWalkCount = count($walks);
-$nonMemberCount = count($nonMembers);
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $action = $_POST['action'] ?? '';
+        $bookingId = (int)($_POST['booking_id'] ?? 0);
 
-$requestedCount = 0;
-$scheduledCount = 0;
-$completedCount = 0;
-$cancelledCount = 0;
+        if ($action === 'update_status' && $bookingId > 0) {
+            $newStatus = trim($_POST['status'] ?? '');
+            $allowedStatuses = ['New', 'Confirmed', 'Completed', 'Cancelled'];
 
-foreach ($walks as $row) {
-    $status = strtolower($row['status'] ?? '');
-    if ($status === 'requested' || $status === 'pending') $requestedCount++;
-    if ($status === 'scheduled') $scheduledCount++;
-    if ($status === 'completed') $completedCount++;
-    if ($status === 'cancelled') $cancelledCount++;
-}
+            if (!in_array($newStatus, $allowedStatuses, true)) {
+                $errorMessage = 'Invalid status selected.';
+            } else {
+                $stmt = $db->prepare("
+                    UPDATE public_booking_requests
+                    SET status = :status
+                    WHERE id = :id
+                ");
+                $stmt->bindValue(':status', $newStatus, SQLITE3_TEXT);
+                $stmt->bindValue(':id', $bookingId, SQLITE3_INTEGER);
+                $result = $stmt->execute();
 
-foreach ($nonMembers as $row) {
-    $status = strtolower($row['status'] ?? '');
-    if ($status === 'requested' || $status === 'pending' || $status === 'new') $requestedCount++;
-    if ($status === 'scheduled') $scheduledCount++;
-    if ($status === 'completed') $completedCount++;
-    if ($status === 'cancelled') $cancelledCount++;
+                if ($result) {
+                    $successMessage = 'Booking status updated successfully.';
+                } else {
+                    $errorMessage = 'Unable to update booking status.';
+                }
+            }
+        }
+
+        if ($action === 'delete_booking' && $bookingId > 0) {
+            $stmt = $db->prepare("
+                DELETE FROM public_booking_requests
+                WHERE id = :id
+            ");
+            $stmt->bindValue(':id', $bookingId, SQLITE3_INTEGER);
+            $result = $stmt->execute();
+
+            if ($result) {
+                $successMessage = 'Booking deleted successfully.';
+            } else {
+                $errorMessage = 'Unable to delete booking.';
+            }
+        }
+    }
+
+    $result = $db->query("
+        SELECT *
+        FROM public_booking_requests
+        ORDER BY datetime(created_at) DESC, id DESC
+    ");
+
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $bookings[] = $row;
+    }
+
+    $db->close();
+} catch (Throwable $e) {
+    $errorMessage = 'Something went wrong while loading booking requests.';
 }
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Bookings | Doggie Dorian's</title>
-    <style>
-        * { box-sizing: border-box; }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Bookings | Doggie Dorian's</title>
+  <meta name="description" content="Manage public booking requests for Doggie Dorian's.">
 
-        :root{
-            --bg:#0a0a0f;
-            --bg-soft:#111119;
-            --panel:rgba(255,255,255,0.06);
-            --panel-2:rgba(255,255,255,0.04);
-            --border:rgba(212,175,55,0.20);
-            --gold:#d4af37;
-            --gold-soft:#f3df9b;
-            --text:#f8f5ee;
-            --muted:#b8b1a3;
-            --shadow:0 24px 60px rgba(0,0,0,0.35);
-            --success-bg:rgba(84,189,122,0.14);
-            --success-border:rgba(84,189,122,0.28);
-            --success-text:#ccefd7;
-            --error-bg:rgba(229,57,53,0.14);
-            --error-border:rgba(229,57,53,0.28);
-            --error-text:#ffd4d2;
-        }
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-        body{
-            margin:0;
-            font-family:Inter, Arial, Helvetica, sans-serif;
-            color:var(--text);
-            background:
-                radial-gradient(circle at top left, rgba(212,175,55,0.14), transparent 28%),
-                radial-gradient(circle at top right, rgba(255,255,255,0.05), transparent 24%),
-                linear-gradient(180deg, #08080c 0%, #111119 100%);
-        }
+    :root {
+      --bg: #07080b;
+      --bg-soft: #0d1016;
+      --panel: rgba(255,255,255,0.04);
+      --panel-strong: rgba(255,255,255,0.06);
+      --line: rgba(255,255,255,0.10);
+      --text: #f6f1e8;
+      --muted: #c9c0af;
+      --soft: #9d968a;
+      --gold: #d7b26a;
+      --gold-light: #f0d59f;
+      --white: #ffffff;
+      --danger: #ff9d9d;
+      --success: #9fe0b1;
+      --blue: #9fc8ff;
+      --shadow: 0 22px 65px rgba(0,0,0,0.34);
+      --max: 1380px;
+      --sidebar: 280px;
+    }
 
-        .shell{
-            display:grid;
-            grid-template-columns:280px 1fr;
-            min-height:100vh;
-        }
+    body {
+      font-family: "Georgia", "Times New Roman", serif;
+      background:
+        radial-gradient(circle at top, rgba(215,178,106,0.08), transparent 24%),
+        linear-gradient(180deg, #06070a 0%, #0b0d12 45%, #06070a 100%);
+      color: var(--text);
+      line-height: 1.6;
+    }
 
-        .sidebar{
-            border-right:1px solid var(--border);
-            background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));
-            padding:28px 20px;
-            position:sticky;
-            top:0;
-            height:100vh;
-            backdrop-filter:blur(10px);
-        }
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
 
-        .brand{
-            font-size:28px;
-            font-weight:800;
-            line-height:1.1;
-            margin-bottom:10px;
-            letter-spacing:-0.5px;
-        }
+    .layout {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: var(--sidebar) 1fr;
+    }
 
-        .brand span{ color:var(--gold); }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 28px 22px;
+      border-right: 1px solid rgba(255,255,255,0.06);
+      background: rgba(7,8,11,0.92);
+      backdrop-filter: blur(14px);
+    }
 
-        .tag{
-            color:var(--muted);
-            font-size:13px;
-            line-height:1.6;
-            margin-bottom:26px;
-        }
+    .brand {
+      display: block;
+      font-size: 1.12rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--white);
+      font-weight: 700;
+      margin-bottom: 28px;
+    }
 
-        .nav a{
-            display:block;
-            text-decoration:none;
-            color:var(--text);
-            padding:14px 16px;
-            margin-bottom:10px;
-            border-radius:16px;
-            background:rgba(255,255,255,0.03);
-            border:1px solid transparent;
-            font-weight:600;
-            transition:.2s ease;
-        }
+    .side-label {
+      color: var(--soft);
+      font-size: 0.78rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
 
-        .nav a:hover,
-        .nav a.active{
-            border-color:var(--border);
-            background:linear-gradient(180deg, rgba(212,175,55,0.12), rgba(255,255,255,0.03));
-            transform:translateY(-1px);
-        }
+    .side-nav {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
 
-        .main{
-            padding:34px;
-        }
+    .side-nav a {
+      display: block;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: var(--muted);
+      transition: 0.2s ease;
+    }
 
-        .hero{
-            display:flex;
-            justify-content:space-between;
-            align-items:flex-end;
-            gap:20px;
-            flex-wrap:wrap;
-            margin-bottom:24px;
-        }
+    .side-nav a:hover,
+    .side-nav a.active {
+      color: var(--gold);
+      border-color: rgba(215,178,106,0.22);
+      background: rgba(215,178,106,0.08);
+    }
 
-        .hero h1{
-            margin:0 0 10px;
-            font-size:40px;
-            line-height:1;
-            letter-spacing:-1px;
-        }
+    .sidebar-note {
+      margin-top: 18px;
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(215,178,106,0.08);
+      border: 1px solid rgba(215,178,106,0.16);
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
 
-        .hero p{
-            margin:0;
-            color:var(--muted);
-            font-size:15px;
-            max-width:720px;
-        }
+    .main {
+      padding: 28px;
+    }
 
-        .hero-actions{
-            display:flex;
-            gap:12px;
-            flex-wrap:wrap;
-        }
+    .container {
+      width: min(var(--max), 100%);
+      margin: 0 auto;
+    }
 
-        .btn{
-            display:inline-flex;
-            align-items:center;
-            justify-content:center;
-            text-decoration:none;
-            border:none;
-            cursor:pointer;
-            color:#111;
-            background:linear-gradient(180deg, #f0d77a, var(--gold));
-            padding:14px 18px;
-            border-radius:14px;
-            font-weight:800;
-            box-shadow:var(--shadow);
-        }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
 
-        .btn.secondary{
-            color:var(--text);
-            background:rgba(255,255,255,0.05);
-            border:1px solid var(--border);
-            box-shadow:none;
-        }
+    .page-title h1 {
+      font-size: clamp(2rem, 4vw, 3.3rem);
+      line-height: 1;
+      color: var(--white);
+      margin-bottom: 8px;
+    }
 
-        .flash{
-            margin-bottom:20px;
-            padding:14px 16px;
-            border-radius:16px;
-            font-weight:700;
-            line-height:1.5;
-        }
+    .page-title p {
+      color: var(--muted);
+      max-width: 760px;
+    }
 
-        .flash.success{
-            background:var(--success-bg);
-            border:1px solid var(--success-border);
-            color:var(--success-text);
-        }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 12px 20px;
+      font-size: 0.94rem;
+      font-weight: 700;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: 0.2s ease;
+      min-height: 46px;
+    }
 
-        .flash.error{
-            background:var(--error-bg);
-            border:1px solid var(--error-border);
-            color:var(--error-text);
-        }
+    .btn:hover {
+      transform: translateY(-1px);
+    }
 
-        .stats{
-            display:grid;
-            grid-template-columns:repeat(4, minmax(0,1fr));
-            gap:18px;
-            margin-bottom:28px;
-        }
+    .btn-gold {
+      background: linear-gradient(135deg, var(--gold) 0%, var(--gold-light) 100%);
+      color: #17120d;
+      box-shadow: 0 16px 38px rgba(215,178,106,0.22);
+    }
 
-        .stat-card,
-        .section-card,
-        .booking-card{
-            background:var(--panel);
-            border:1px solid var(--border);
-            border-radius:24px;
-            box-shadow:var(--shadow);
-            backdrop-filter:blur(10px);
-        }
+    .btn-soft {
+      background: rgba(255,255,255,0.03);
+      border-color: rgba(255,255,255,0.08);
+      color: var(--white);
+    }
 
-        .stat-card{
-            padding:22px;
-        }
+    .btn-danger {
+      background: rgba(255,157,157,0.10);
+      border-color: rgba(255,157,157,0.25);
+      color: #ffd3d3;
+    }
 
-        .stat-label{
-            color:var(--muted);
-            font-size:12px;
-            text-transform:uppercase;
-            letter-spacing:1.2px;
-            margin-bottom:10px;
-            font-weight:700;
-        }
+    .status-message {
+      border-radius: 18px;
+      padding: 15px 16px;
+      margin-bottom: 18px;
+      font-size: 0.96rem;
+    }
 
-        .stat-value{
-            font-size:34px;
-            font-weight:800;
-            letter-spacing:-1px;
-            margin-bottom:8px;
-        }
+    .status-message.success {
+      background: rgba(159,224,177,0.10);
+      border: 1px solid rgba(159,224,177,0.30);
+      color: var(--success);
+    }
 
-        .stat-sub{
-            color:var(--gold-soft);
-            font-size:13px;
-        }
+    .status-message.error {
+      background: rgba(255,157,157,0.10);
+      border: 1px solid rgba(255,157,157,0.30);
+      color: var(--danger);
+    }
 
-        .section-card{
-            padding:24px;
-            margin-bottom:24px;
-        }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      margin-bottom: 26px;
+    }
 
-        .section-head{
-            display:flex;
-            justify-content:space-between;
-            align-items:center;
-            gap:16px;
-            flex-wrap:wrap;
-            margin-bottom:18px;
-        }
+    .stat-card {
+      border-radius: 22px;
+      padding: 22px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: var(--shadow);
+    }
 
-        .section-head h2{
-            margin:0;
-            font-size:26px;
-            letter-spacing:-0.4px;
-        }
+    .stat-card strong {
+      display: block;
+      color: #f5ddaf;
+      font-size: 1.8rem;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
 
-        .section-head p{
-            margin:4px 0 0;
-            color:var(--muted);
-            font-size:14px;
-        }
+    .stat-card span {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
 
-        .count-pill{
-            display:inline-flex;
-            align-items:center;
-            justify-content:center;
-            min-width:48px;
-            padding:10px 14px;
-            border-radius:999px;
-            background:rgba(212,175,55,0.10);
-            border:1px solid var(--border);
-            color:var(--gold-soft);
-            font-size:13px;
-            font-weight:800;
-            letter-spacing:1px;
-            text-transform:uppercase;
-        }
+    .bookings-grid {
+      display: grid;
+      gap: 20px;
+    }
 
-        .booking-grid{
-            display:grid;
-            gap:18px;
-        }
+    .booking-card {
+      border-radius: 28px;
+      padding: 24px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: var(--shadow);
+    }
 
-        .booking-card{
-            overflow:hidden;
-        }
+    .booking-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
 
-        .booking-top{
-            display:flex;
-            justify-content:space-between;
-            align-items:flex-start;
-            gap:18px;
-            padding:22px 22px 16px;
-            border-bottom:1px solid rgba(255,255,255,0.06);
-            flex-wrap:wrap;
-        }
+    .booking-head-left h2 {
+      color: var(--white);
+      font-size: 1.35rem;
+      margin-bottom: 6px;
+    }
 
-        .booking-title{
-            margin:0 0 8px;
-            font-size:22px;
-            letter-spacing:-0.3px;
-        }
+    .booking-head-left p {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
 
-        .booking-sub{
-            color:var(--muted);
-            font-size:14px;
-            line-height:1.6;
-        }
+    .badge-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
 
-        .booking-body{
-            padding:22px;
-            display:grid;
-            grid-template-columns:1.2fr .8fr;
-            gap:18px;
-        }
+    .badge {
+      display: inline-block;
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 0.84rem;
+      font-weight: 700;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: var(--white);
+    }
 
-        .detail-grid{
-            display:grid;
-            grid-template-columns:repeat(2, minmax(0,1fr));
-            gap:14px;
-        }
+    .badge.service {
+      border-color: rgba(215,178,106,0.24);
+      background: rgba(215,178,106,0.10);
+      color: #f2d9a8;
+    }
 
-        .detail{
-            padding:14px;
-            border-radius:18px;
-            background:var(--panel-2);
-            border:1px solid rgba(255,255,255,0.06);
-        }
+    .badge.status-new {
+      border-color: rgba(159,200,255,0.20);
+      background: rgba(159,200,255,0.10);
+      color: var(--blue);
+    }
 
-        .detail-label{
-            color:var(--muted);
-            font-size:11px;
-            text-transform:uppercase;
-            letter-spacing:1px;
-            font-weight:700;
-            margin-bottom:8px;
-        }
+    .badge.status-confirmed {
+      border-color: rgba(159,224,177,0.24);
+      background: rgba(159,224,177,0.10);
+      color: var(--success);
+    }
 
-        .detail-value{
-            font-size:15px;
-            line-height:1.5;
-            word-break:break-word;
-        }
+    .badge.status-completed {
+      border-color: rgba(215,178,106,0.24);
+      background: rgba(215,178,106,0.10);
+      color: #f2d9a8;
+    }
 
-        .update-box{
-            padding:18px;
-            border-radius:20px;
-            background:var(--panel-2);
-            border:1px solid rgba(255,255,255,0.06);
-            height:fit-content;
-        }
+    .badge.status-cancelled {
+      border-color: rgba(255,157,157,0.24);
+      background: rgba(255,157,157,0.10);
+      color: #ffd3d3;
+    }
 
-        .update-box h3{
-            margin:0 0 14px;
-            font-size:18px;
-        }
+    .booking-content {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 0.9fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
 
-        .update-box form{
-            display:grid;
-            gap:12px;
-        }
+    .detail-box {
+      border-radius: 18px;
+      padding: 18px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
 
-        .update-box select{
-            width:100%;
-            padding:14px 14px;
-            border-radius:14px;
-            border:1px solid rgba(255,255,255,0.10);
-            background:rgba(255,255,255,0.05);
-            color:var(--text);
-            outline:none;
-        }
+    .detail-box h3 {
+      color: var(--white);
+      font-size: 1rem;
+      margin-bottom: 12px;
+    }
 
-        .empty{
-            padding:20px;
-            border-radius:18px;
-            background:var(--panel-2);
-            border:1px solid rgba(255,255,255,0.06);
-            color:var(--muted);
-            text-align:center;
-        }
+    .detail-list {
+      display: grid;
+      gap: 10px;
+    }
 
-        .error-box{
-            border:1px solid rgba(255,0,0,0.25);
-            background:rgba(255,0,0,0.08);
-            padding:16px 18px;
-            border-radius:16px;
-            color:#ffd1d1;
-        }
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      padding-bottom: 10px;
+    }
 
-        @media (max-width: 1180px){
-            .stats{
-                grid-template-columns:repeat(2, minmax(0,1fr));
-            }
-            .booking-body{
-                grid-template-columns:1fr;
-            }
-        }
+    .detail-row:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
 
-        @media (max-width: 900px){
-            .shell{
-                grid-template-columns:1fr;
-            }
-            .sidebar{
-                position:relative;
-                height:auto;
-                border-right:none;
-                border-bottom:1px solid var(--border);
-            }
-            .main{
-                padding:20px;
-            }
-        }
+    .detail-label {
+      color: var(--soft);
+      font-size: 0.88rem;
+      min-width: 120px;
+    }
 
-        @media (max-width: 700px){
-            .stats{
-                grid-template-columns:1fr;
-            }
-            .detail-grid{
-                grid-template-columns:1fr;
-            }
-            .hero h1{
-                font-size:32px;
-            }
-        }
-    </style>
+    .detail-value {
+      color: var(--text);
+      font-size: 0.93rem;
+      text-align: right;
+      word-break: break-word;
+    }
+
+    .notes-box {
+      white-space: pre-wrap;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .booking-actions {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .action-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    select {
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font: inherit;
+      min-height: 46px;
+      outline: none;
+    }
+
+    .empty-state {
+      border-radius: 28px;
+      padding: 34px;
+      text-align: center;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: var(--shadow);
+    }
+
+    .empty-state h2 {
+      color: var(--white);
+      margin-bottom: 10px;
+    }
+
+    .empty-state p {
+      color: var(--muted);
+    }
+
+    @media (max-width: 1200px) {
+      .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .booking-content {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: static;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }
+    }
+
+    @media (max-width: 640px) {
+      .main {
+        padding: 18px;
+      }
+
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .booking-card {
+        padding: 18px;
+      }
+
+      .booking-actions,
+      .action-group {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .btn,
+      select {
+        width: 100%;
+      }
+
+      .detail-row {
+        flex-direction: column;
+      }
+
+      .detail-value {
+        text-align: left;
+      }
+    }
+  </style>
 </head>
 <body>
-<div class="shell">
-    <aside class="sidebar">
-        <div class="brand">Doggie <span>Dorian’s</span></div>
-        <div class="tag">Luxury booking command center for member walks and non-member services.</div>
 
-        <nav class="nav">
-            <a href="admin-dashboard.php">Dashboard</a>
-            <a href="admin-bookings.php" class="active">Booking Management</a>
-            <a href="admin-revenue.php">Revenue Dashboard</a>
-            <a href="memberships.php">Memberships</a>
-            <a href="non-member-booking.php">New Non-Member Booking</a>
-            <a href="admin-logout.php">Logout</a>
-        </nav>
-    </aside>
+<div class="layout">
+  <aside class="sidebar">
+    <a href="dashboard.php" class="brand">Doggie Dorian's</a>
 
-    <main class="main">
-        <section class="hero">
-            <div>
-                <h1>Booking Management</h1>
-                <p>Review, organize, and update all active service requests through one elevated admin experience.</p>
-            </div>
+    <div class="side-label">Admin Navigation</div>
+    <nav class="side-nav">
+      <a href="dashboard.php">Dashboard</a>
+      <a href="admin-walks.php">Walks</a>
+      <a href="admin-bookings.php" class="active">Public Bookings</a>
+      <a href="memberships.php">Memberships</a>
+      <a href="index.php">View Website</a>
+    </nav>
 
-            <div class="hero-actions">
-                <a class="btn secondary" href="admin-dashboard.php">Back to Dashboard</a>
-                <a class="btn" href="non-member-booking.php">Create Booking</a>
-            </div>
+    <div class="sidebar-note">
+      This page shows public walk, daycare, and boarding requests from your booking form in one place.
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="container">
+      <div class="topbar">
+        <div class="page-title">
+          <h1>Public Booking Requests</h1>
+          <p>Review incoming walk, daycare, and boarding requests, update their status, and keep your booking pipeline organized.</p>
+        </div>
+
+        <div class="action-group">
+          <a href="book-walk.php" class="btn btn-soft">Open Booking Page</a>
+          <a href="dashboard.php" class="btn btn-gold">Back to Dashboard</a>
+        </div>
+      </div>
+
+      <?php if ($successMessage !== ''): ?>
+        <div class="status-message success"><?php echo e($successMessage); ?></div>
+      <?php endif; ?>
+
+      <?php if ($errorMessage !== ''): ?>
+        <div class="status-message error"><?php echo e($errorMessage); ?></div>
+      <?php endif; ?>
+
+      <?php
+        $totalCount = count($bookings);
+        $newCount = count(array_filter($bookings, fn($b) => ($b['status'] ?? '') === 'New'));
+        $confirmedCount = count(array_filter($bookings, fn($b) => ($b['status'] ?? '') === 'Confirmed'));
+        $completedCount = count(array_filter($bookings, fn($b) => ($b['status'] ?? '') === 'Completed'));
+      ?>
+
+      <section class="stats-grid">
+        <div class="stat-card">
+          <strong><?php echo $totalCount; ?></strong>
+          <span>Total booking requests</span>
+        </div>
+        <div class="stat-card">
+          <strong><?php echo $newCount; ?></strong>
+          <span>New requests</span>
+        </div>
+        <div class="stat-card">
+          <strong><?php echo $confirmedCount; ?></strong>
+          <span>Confirmed requests</span>
+        </div>
+        <div class="stat-card">
+          <strong><?php echo $completedCount; ?></strong>
+          <span>Completed requests</span>
+        </div>
+      </section>
+
+      <?php if (empty($bookings)): ?>
+        <div class="empty-state">
+          <h2>No booking requests yet</h2>
+          <p>Once someone submits the public booking form, their request will appear here.</p>
+        </div>
+      <?php else: ?>
+        <section class="bookings-grid">
+          <?php foreach ($bookings as $booking): ?>
+            <?php
+              $serviceType = $booking['service_type'] ?? '';
+              $status = $booking['status'] ?? 'New';
+
+              $statusClass = match ($status) {
+                  'Confirmed' => 'status-confirmed',
+                  'Completed' => 'status-completed',
+                  'Cancelled' => 'status-cancelled',
+                  default => 'status-new'
+              };
+
+              $estimatedPrice = isset($booking['estimated_price']) && $booking['estimated_price'] !== null
+                  ? '$' . number_format((float)$booking['estimated_price'], 2)
+                  : 'N/A';
+
+              if ($serviceType === 'boarding' && $estimatedPrice !== 'N/A') {
+                  $estimatedPrice .= ' / night';
+              }
+            ?>
+            <article class="booking-card">
+              <div class="booking-head">
+                <div class="booking-head-left">
+                  <h2>#<?php echo (int)$booking['id']; ?> — <?php echo e($booking['full_name'] ?? 'Unknown Client'); ?></h2>
+                  <p>Submitted on <?php echo e($booking['created_at'] ?? 'Unknown date'); ?></p>
+
+                  <div class="badge-row">
+                    <span class="badge service"><?php echo e(format_service_label($serviceType)); ?></span>
+                    <span class="badge <?php echo e($statusClass); ?>"><?php echo e(format_status_label($status)); ?></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="booking-content">
+                <div class="detail-box">
+                  <h3>Client & Dog Details</h3>
+                  <div class="detail-list">
+                    <div class="detail-row">
+                      <span class="detail-label">Client</span>
+                      <span class="detail-value"><?php echo e($booking['full_name'] ?? ''); ?></span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Email</span>
+                      <span class="detail-value"><?php echo e($booking['email'] ?? ''); ?></span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Phone</span>
+                      <span class="detail-value"><?php echo e($booking['phone'] ?? ''); ?></span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Dog Name</span>
+                      <span class="detail-value"><?php echo e($booking['pet_name'] ?? ''); ?></span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Dog Size</span>
+                      <span class="detail-value"><?php echo e(ucfirst($booking['pet_size'] ?? '')); ?></span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">Estimate</span>
+                      <span class="detail-value"><?php echo e($estimatedPrice); ?></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="detail-box">
+                  <h3>Service Details</h3>
+                  <div class="detail-list">
+                    <div class="detail-row">
+                      <span class="detail-label">Service</span>
+                      <span class="detail-value"><?php echo e(format_service_label($serviceType)); ?></span>
+                    </div>
+
+                    <?php if ($serviceType === 'walk'): ?>
+                      <div class="detail-row">
+                        <span class="detail-label">Duration</span>
+                        <span class="detail-value">
+                          <?php echo !empty($booking['walk_duration']) ? (int)$booking['walk_duration'] . ' minutes' : 'N/A'; ?>
+                        </span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Date</span>
+                        <span class="detail-value"><?php echo e($booking['preferred_date'] ?? 'N/A'); ?></span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Time</span>
+                        <span class="detail-value"><?php echo e($booking['preferred_time'] ?: 'Not provided'); ?></span>
+                      </div>
+                    <?php endif; ?>
+
+                    <?php if ($serviceType === 'daycare'): ?>
+                      <div class="detail-row">
+                        <span class="detail-label">Date</span>
+                        <span class="detail-value"><?php echo e($booking['preferred_date'] ?? 'N/A'); ?></span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Drop-Off</span>
+                        <span class="detail-value"><?php echo e($booking['dropoff_time'] ?: 'Not provided'); ?></span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Pick-Up</span>
+                        <span class="detail-value"><?php echo e($booking['pickup_time'] ?: 'Not provided'); ?></span>
+                      </div>
+                    <?php endif; ?>
+
+                    <?php if ($serviceType === 'boarding'): ?>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-In Date</span>
+                        <span class="detail-value"><?php echo e($booking['checkin_date'] ?: 'N/A'); ?></span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-Out Date</span>
+                        <span class="detail-value"><?php echo e($booking['checkout_date'] ?: 'N/A'); ?></span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-In Time</span>
+                        <span class="detail-value"><?php echo e($booking['checkin_time'] ?: 'Not provided'); ?></span>
+                      </div>
+                      <div class="detail-row">
+                        <span class="detail-label">Check-Out Time</span>
+                        <span class="detail-value"><?php echo e($booking['checkout_time'] ?: 'Not provided'); ?></span>
+                      </div>
+                    <?php endif; ?>
+
+                    <div class="detail-row">
+                      <span class="detail-label">Feeding</span>
+                      <span class="detail-value"><?php echo e($booking['feeding_schedule'] ?: 'Not provided'); ?></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="detail-box">
+                  <h3>Notes</h3>
+                  <div class="notes-box"><?php echo e($booking['notes'] ?: 'No additional notes provided.'); ?></div>
+                </div>
+              </div>
+
+              <div class="booking-actions">
+                <form method="post" class="action-group">
+                  <input type="hidden" name="action" value="update_status">
+                  <input type="hidden" name="booking_id" value="<?php echo (int)$booking['id']; ?>">
+
+                  <select name="status">
+                    <option value="New" <?php echo $status === 'New' ? 'selected' : ''; ?>>New</option>
+                    <option value="Confirmed" <?php echo $status === 'Confirmed' ? 'selected' : ''; ?>>Confirmed</option>
+                    <option value="Completed" <?php echo $status === 'Completed' ? 'selected' : ''; ?>>Completed</option>
+                    <option value="Cancelled" <?php echo $status === 'Cancelled' ? 'selected' : ''; ?>>Cancelled</option>
+                  </select>
+
+                  <button type="submit" class="btn btn-gold">Update Status</button>
+                </form>
+
+                <form method="post" class="action-group" onsubmit="return confirm('Are you sure you want to delete this booking?');">
+                  <input type="hidden" name="action" value="delete_booking">
+                  <input type="hidden" name="booking_id" value="<?php echo (int)$booking['id']; ?>">
+                  <button type="submit" class="btn btn-danger">Delete Booking</button>
+                </form>
+              </div>
+            </article>
+          <?php endforeach; ?>
         </section>
-
-        <?php if ($flash): ?>
-            <div class="flash <?php echo h($flash['type'] ?? 'success'); ?>">
-                <?php echo h($flash['message'] ?? 'Update complete.'); ?>
-            </div>
-        <?php endif; ?>
-
-        <?php if ($fatalError !== ''): ?>
-            <div class="error-box"><?php echo h($fatalError); ?></div>
-        <?php else: ?>
-
-            <section class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">Member Walks</div>
-                    <div class="stat-value"><?php echo number_format($memberWalkCount); ?></div>
-                    <div class="stat-sub">Operational walk records</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Non-Member Bookings</div>
-                    <div class="stat-value"><?php echo number_format($nonMemberCount); ?></div>
-                    <div class="stat-sub">Standalone customer bookings</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Awaiting Review</div>
-                    <div class="stat-value"><?php echo number_format($requestedCount); ?></div>
-                    <div class="stat-sub">Requested, pending, or new</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Scheduled / Completed</div>
-                    <div class="stat-value"><?php echo number_format($scheduledCount + $completedCount); ?></div>
-                    <div class="stat-sub">Active and fulfilled services</div>
-                </div>
-            </section>
-
-            <section class="section-card">
-                <div class="section-head">
-                    <div>
-                        <h2>Member Walks</h2>
-                        <p>Walk requests synced into the admin operating system.</p>
-                    </div>
-                    <div class="count-pill"><?php echo number_format($memberWalkCount); ?></div>
-                </div>
-
-                <?php if (empty($walks)): ?>
-                    <div class="empty">No member walks found yet.</div>
-                <?php else: ?>
-                    <div class="booking-grid">
-                        <?php foreach ($walks as $w): ?>
-                            <article class="booking-card">
-                                <div class="booking-top">
-                                    <div>
-                                        <h3 class="booking-title">Member Walk #<?php echo (int)$w['id']; ?></h3>
-                                        <div class="booking-sub">
-                                            Premium member walk request ready for operational handling.
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <?php echo statusBadge((string)($w['status'] ?? 'Requested')); ?>
-                                    </div>
-                                </div>
-
-                                <div class="booking-body">
-                                    <div class="detail-grid">
-                                        <div class="detail">
-                                            <div class="detail-label">Walk Date</div>
-                                            <div class="detail-value"><?php echo h($w['walk_date'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Walk Time</div>
-                                            <div class="detail-value"><?php echo h($w['walk_time'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Duration</div>
-                                            <div class="detail-value"><?php echo h((string)($w['duration_minutes'] ?? '—')); ?> min</div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Price</div>
-                                            <div class="detail-value">$<?php echo number_format((float)($w['price'] ?? 0), 2); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Member ID</div>
-                                            <div class="detail-value"><?php echo h((string)($w['member_id'] ?? '—')); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Dog ID</div>
-                                            <div class="detail-value"><?php echo h((string)($w['dog_id'] ?? '—')); ?></div>
-                                        </div>
-
-                                        <div class="detail" style="grid-column:1 / -1;">
-                                            <div class="detail-label">Notes</div>
-                                            <div class="detail-value"><?php echo nl2br(h($w['notes'] ?? '—')); ?></div>
-                                        </div>
-                                    </div>
-
-                                    <div class="update-box">
-                                        <h3>Update Status</h3>
-                                        <form method="POST" action="">
-                                            <input type="hidden" name="type" value="walk">
-                                            <input type="hidden" name="id" value="<?php echo (int)$w['id']; ?>">
-
-                                            <select name="status">
-                                                <?php foreach (['Requested','Pending','Scheduled','Completed','Cancelled'] as $s): ?>
-                                                    <option value="<?php echo h($s); ?>" <?php echo (($w['status'] ?? '') === $s) ? 'selected' : ''; ?>>
-                                                        <?php echo h($s); ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-
-                                            <button class="btn" type="submit">Save Update</button>
-                                        </form>
-                                    </div>
-                                </div>
-                            </article>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-            </section>
-
-            <section class="section-card">
-                <div class="section-head">
-                    <div>
-                        <h2>Non-Member Bookings</h2>
-                        <p>Standalone service requests from clients outside the member system.</p>
-                    </div>
-                    <div class="count-pill"><?php echo number_format($nonMemberCount); ?></div>
-                </div>
-
-                <?php if (empty($nonMembers)): ?>
-                    <div class="empty">No non-member bookings found yet.</div>
-                <?php else: ?>
-                    <div class="booking-grid">
-                        <?php foreach ($nonMembers as $n): ?>
-                            <article class="booking-card">
-                                <div class="booking-top">
-                                    <div>
-                                        <h3 class="booking-title"><?php echo h($n['full_name'] ?? 'Client'); ?></h3>
-                                        <div class="booking-sub">
-                                            Non-member booking #<?php echo (int)($n['id'] ?? 0); ?>
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <?php echo statusBadge((string)($n['status'] ?? 'New')); ?>
-                                    </div>
-                                </div>
-
-                                <div class="booking-body">
-                                    <div class="detail-grid">
-                                        <div class="detail">
-                                            <div class="detail-label">Service</div>
-                                            <div class="detail-value"><?php echo h($n['service_type'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Dog Name</div>
-                                            <div class="detail-value"><?php echo h($n['dog_name'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Dog Size</div>
-                                            <div class="detail-value"><?php echo h($n['dog_size'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Price</div>
-                                            <div class="detail-value">$<?php echo number_format((float)($n['estimated_price'] ?? 0), 2); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Date Start</div>
-                                            <div class="detail-value"><?php echo h($n['date_start'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Preferred Time</div>
-                                            <div class="detail-value"><?php echo h($n['preferred_walk_time'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Email</div>
-                                            <div class="detail-value"><?php echo h($n['email'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail">
-                                            <div class="detail-label">Phone</div>
-                                            <div class="detail-value"><?php echo h($n['phone'] ?? '—'); ?></div>
-                                        </div>
-
-                                        <div class="detail" style="grid-column:1 / -1;">
-                                            <div class="detail-label">Notes</div>
-                                            <div class="detail-value"><?php echo nl2br(h($n['notes'] ?? '—')); ?></div>
-                                        </div>
-                                    </div>
-
-                                    <div class="update-box">
-                                        <h3>Update Status</h3>
-                                        <form method="POST" action="">
-                                            <input type="hidden" name="type" value="non_member">
-                                            <input type="hidden" name="id" value="<?php echo (int)$n['id']; ?>">
-
-                                            <select name="status">
-                                                <?php foreach (['Requested','Pending','Scheduled','Completed','Cancelled'] as $s): ?>
-                                                    <option value="<?php echo h($s); ?>" <?php echo (($n['status'] ?? '') === $s) ? 'selected' : ''; ?>>
-                                                        <?php echo h($s); ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-
-                                            <button class="btn" type="submit">Save Update</button>
-                                        </form>
-                                    </div>
-                                </div>
-                            </article>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-            </section>
-
-        <?php endif; ?>
-    </main>
+      <?php endif; ?>
+    </div>
+  </main>
 </div>
+
 </body>
 </html>

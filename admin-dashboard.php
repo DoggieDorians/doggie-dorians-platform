@@ -70,9 +70,9 @@ try {
         'walks_total' => 0,
         'walks_pending' => 0,
         'walks_today' => 0,
-        'non_member_total' => 0,
-        'non_member_pending' => 0,
-        'non_member_today' => 0,
+        'public_total' => 0,
+        'public_pending' => 0,
+        'public_today' => 0,
         'walkers' => 0,
         'revenue_month' => 0.0,
     ];
@@ -94,58 +94,42 @@ try {
         );
     }
 
-    if (tableExists($pdo, 'non_member_bookings')) {
-        $stats['non_member_total'] = scalar($pdo, "SELECT COUNT(*) FROM non_member_bookings");
+    if (tableExists($pdo, 'public_booking_requests')) {
+        $stats['public_total'] = scalar($pdo, "SELECT COUNT(*) FROM public_booking_requests");
 
-        try {
-            $stats['non_member_pending'] = scalar(
-                $pdo,
-                "SELECT COUNT(*) FROM non_member_bookings WHERE status IN ('Requested', 'Pending', 'Scheduled', 'New')"
-            );
-        } catch (Throwable $e) {
-            $stats['non_member_pending'] = 0;
-        }
+        $stats['public_pending'] = scalar(
+            $pdo,
+            "SELECT COUNT(*) FROM public_booking_requests WHERE status IN ('New', 'Requested', 'Pending', 'Scheduled')"
+        );
 
-        $dateCandidates = ['date_start', 'booking_date', 'service_date', 'start_date', 'date'];
-        $dateColumn = null;
+        $today = getTodayDate();
 
-        foreach ($dateCandidates as $candidate) {
-            try {
-                $stmt = $pdo->query("SELECT {$candidate} FROM non_member_bookings LIMIT 1");
-                if ($stmt !== false) {
-                    $dateColumn = $candidate;
-                    break;
-                }
-            } catch (Throwable $e) {
-                continue;
-            }
-        }
+        $stats['public_today'] = scalar(
+            $pdo,
+            "SELECT COUNT(*)
+             FROM public_booking_requests
+             WHERE preferred_date = :today
+                OR checkin_date = :today",
+            ['today' => $today]
+        );
 
-        if ($dateColumn) {
-            $stats['non_member_today'] = scalar(
-                $pdo,
-                "SELECT COUNT(*) FROM non_member_bookings WHERE {$dateColumn} = :today",
-                ['today' => getTodayDate()]
-            );
-        }
+        $monthStart = date('Y-m-01');
 
-        try {
-            $monthStart = date('Y-m-01');
-            $stats['revenue_month'] = floatScalar(
-                $pdo,
-                "SELECT COALESCE(SUM(CAST(estimated_price AS REAL)), 0)
-                 FROM non_member_bookings
-                 WHERE date(date_start) >= date(:month_start)
-                 AND date(date_start) <= date(:today)
-                 AND status != 'Cancelled'",
-                [
-                    'month_start' => $monthStart,
-                    'today' => getTodayDate(),
-                ]
-            );
-        } catch (Throwable $e) {
-            $stats['revenue_month'] = 0.0;
-        }
+        $stats['revenue_month'] = floatScalar(
+            $pdo,
+            "SELECT COALESCE(SUM(CAST(estimated_price AS REAL)), 0)
+             FROM public_booking_requests
+             WHERE status != 'Cancelled'
+               AND (
+                    (preferred_date IS NOT NULL AND date(preferred_date) >= date(:month_start) AND date(preferred_date) <= date(:today))
+                    OR
+                    (checkin_date IS NOT NULL AND date(checkin_date) >= date(:month_start) AND date(checkin_date) <= date(:today))
+               )",
+            [
+                'month_start' => $monthStart,
+                'today' => $today,
+            ]
+        );
     }
 
     if (tableExists($pdo, 'walkers')) {
@@ -276,7 +260,7 @@ try {
                 <a href="admin-bookings.php">Booking Management</a>
                 <a href="admin-revenue.php">Revenue Dashboard</a>
                 <a href="memberships.php">Memberships</a>
-                <a href="non-member-booking.php">New Non-Member Booking</a>
+                <a href="book-walk.php">Public Booking Page</a>
                 <a href="admin-logout.php">Logout</a>
             </nav>
         </aside>
@@ -313,9 +297,9 @@ try {
                     </div>
 
                     <div class="card">
-                        <div class="stat-label">Non-Member Pending</div>
-                        <div class="stat-value"><?php echo number_format($stats['non_member_pending']); ?></div>
-                        <div class="stat-sub"><?php echo number_format($stats['non_member_total']); ?> total non-member bookings</div>
+                        <div class="stat-label">Public Bookings Pending</div>
+                        <div class="stat-value"><?php echo number_format($stats['public_pending']); ?></div>
+                        <div class="stat-sub"><?php echo number_format($stats['public_total']); ?> total public booking requests</div>
                     </div>
 
                     <div class="card">
@@ -327,7 +311,7 @@ try {
                     <div class="card">
                         <div class="stat-label">Revenue This Month</div>
                         <div class="stat-value"><?php echo money((float)$stats['revenue_month']); ?></div>
-                        <div class="stat-sub">Based on non-member booked pricing</div>
+                        <div class="stat-sub">Estimated from public booking requests</div>
                     </div>
                 </section>
 
@@ -345,18 +329,18 @@ try {
 
                             <div class="list-item">
                                 <div>
-                                    <strong>Non-member bookings scheduled today</strong>
-                                    <span>All bookings in the non_member_bookings table for today</span>
+                                    <strong>Public bookings scheduled today</strong>
+                                    <span>Walk/daycare preferred dates and boarding check-ins for today</span>
                                 </div>
-                                <div class="pill"><?php echo number_format($stats['non_member_today']); ?></div>
+                                <div class="pill"><?php echo number_format($stats['public_today']); ?></div>
                             </div>
 
                             <div class="list-item">
                                 <div>
                                     <strong>Total bookings awaiting review</strong>
-                                    <span>Combined view across your two booking systems</span>
+                                    <span>Combined view across member walks and public booking requests</span>
                                 </div>
-                                <div class="pill"><?php echo number_format($stats['walks_pending'] + $stats['non_member_pending']); ?></div>
+                                <div class="pill"><?php echo number_format($stats['walks_pending'] + $stats['public_pending']); ?></div>
                             </div>
                         </div>
                     </div>
@@ -366,8 +350,8 @@ try {
                         <div class="list">
                             <div class="list-item">
                                 <div>
-                                    <strong>Manage all bookings</strong>
-                                    <span>Filter, review, and update statuses in one place</span>
+                                    <strong>Manage all public bookings</strong>
+                                    <span>Review walk, daycare, and boarding requests in one place</span>
                                 </div>
                                 <a class="btn secondary" href="admin-bookings.php">Open</a>
                             </div>
@@ -382,10 +366,10 @@ try {
 
                             <div class="list-item">
                                 <div>
-                                    <strong>Create a non-member booking</strong>
-                                    <span>Use the live booking form flow</span>
+                                    <strong>Open public booking page</strong>
+                                    <span>Use the live request form exactly as clients see it</span>
                                 </div>
-                                <a class="btn secondary" href="non-member-booking.php">Create</a>
+                                <a class="btn secondary" href="book-walk.php">Open</a>
                             </div>
                         </div>
                     </div>

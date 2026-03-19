@@ -1,34 +1,14 @@
 <?php
 session_start();
 $isLoggedIn = isset($_SESSION['member_id']);
-
-$selectedPlan = isset($_GET['plan']) ? trim($_GET['plan']) : '';
-$allowedPlans = ['Essential Membership', 'Preferred Membership', 'Signature Membership'];
-if (!in_array($selectedPlan, $allowedPlans, true)) {
-    $selectedPlan = '';
-}
-
-$flashType = $_SESSION['membership_flash_type'] ?? '';
-$flashMessage = $_SESSION['membership_flash_message'] ?? '';
-$formData = $_SESSION['membership_form_data'] ?? [];
-
-unset($_SESSION['membership_flash_type'], $_SESSION['membership_flash_message'], $_SESSION['membership_form_data']);
-
-function old_value(array $formData, string $key): string {
-    return htmlspecialchars($formData[$key] ?? '', ENT_QUOTES, 'UTF-8');
-}
-
-if (!$selectedPlan && !empty($formData['selected_membership']) && in_array($formData['selected_membership'], $allowedPlans, true)) {
-    $selectedPlan = $formData['selected_membership'];
-}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Memberships | Doggie Dorian’s</title>
-  <meta name="description" content="Explore Doggie Dorian’s luxury dog care memberships with premium recurring value, priority booking, and elevated monthly benefits.">
+  <title>Memberships | Doggie Dorian's</title>
+  <meta name="description" content="Explore Doggie Dorian's luxury memberships with preferred member pricing, a walk-only option, premium perks, complimentary gifts, and exclusive founder-level benefits.">
 
   <style>
     * {
@@ -38,468 +18,88 @@ if (!$selectedPlan && !empty($formData['selected_membership']) && in_array($form
     }
 
     :root {
-      --bg: #0a0a0d;
-      --bg-2: #111116;
-      --panel: rgba(255,255,255,0.045);
+      --bg: #07080b;
+      --bg-soft: #0d1016;
+      --panel: rgba(255,255,255,0.05);
       --panel-strong: rgba(255,255,255,0.08);
-      --border: rgba(255,255,255,0.09);
-      --gold: #d4af37;
-      --gold-soft: #f0d77a;
-      --gold-deep: #b9921f;
-      --cream: #f8f4ea;
-      --text: rgba(255,255,255,0.88);
-      --muted: rgba(255,255,255,0.70);
-      --muted-soft: rgba(255,255,255,0.56);
-      --shadow: 0 20px 60px rgba(0,0,0,0.45);
-      --shadow-lg: 0 28px 90px rgba(0,0,0,0.55);
-      --radius-xl: 32px;
-      --radius-lg: 24px;
-      --radius-md: 18px;
+      --line: rgba(255,255,255,0.10);
+      --text: #f6f1e8;
+      --muted: #c9c0af;
+      --soft: #9d968a;
+      --gold: #d7b26a;
+      --gold-light: #f0d59f;
+      --gold-soft: rgba(215,178,106,0.12);
+      --white: #ffffff;
+      --shadow: 0 22px 65px rgba(0,0,0,0.38);
       --max: 1280px;
-      --success: #1d8f5b;
-      --danger: #b84b4b;
-    }
-
-    html {
-      scroll-behavior: smooth;
     }
 
     body {
       font-family: "Georgia", "Times New Roman", serif;
-      color: var(--text);
       background:
-        radial-gradient(circle at top left, rgba(212,175,55,0.13), transparent 26%),
-        radial-gradient(circle at top right, rgba(212,175,55,0.08), transparent 22%),
-        linear-gradient(180deg, #09090b 0%, #111116 100%);
+        radial-gradient(circle at top, rgba(215,178,106,0.10), transparent 25%),
+        linear-gradient(180deg, #06070a 0%, #0b0d12 45%, #06070a 100%);
+      color: var(--text);
       line-height: 1.6;
     }
 
     a {
-      text-decoration: none;
       color: inherit;
-    }
-
-    button,
-    input,
-    select,
-    textarea {
-      font: inherit;
+      text-decoration: none;
     }
 
     .container {
-      width: min(var(--max), calc(100% - 32px));
+      width: min(var(--max), calc(100% - 34px));
       margin: 0 auto;
     }
 
-    .topbar {
+    .site-header {
       position: sticky;
       top: 0;
-      z-index: 1000;
-      backdrop-filter: blur(16px);
-      background: rgba(10,10,13,0.74);
-      border-bottom: 1px solid rgba(255,255,255,0.08);
+      z-index: 100;
+      backdrop-filter: blur(14px);
+      background: rgba(7, 8, 11, 0.78);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
     }
 
-    .nav {
-      min-height: 84px;
+    .nav-wrap {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 20px;
+      padding: 18px 0;
+      flex-wrap: wrap;
     }
 
     .brand {
-      display: flex;
-      flex-direction: column;
-      line-height: 1.05;
-    }
-
-    .brand-name {
-      font-size: 1.55rem;
-      font-weight: 700;
-      letter-spacing: 0.4px;
-      color: var(--cream);
-    }
-
-    .brand-tag {
-      margin-top: 6px;
-      font-family: Arial, sans-serif;
-      font-size: 0.74rem;
+      font-size: 1.18rem;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-      letter-spacing: 2.7px;
-      color: rgba(240,215,122,0.9);
+      color: var(--white);
+      font-weight: 700;
     }
 
     .nav-links {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 22px;
       flex-wrap: wrap;
     }
 
     .nav-links a {
-      font-family: Arial, sans-serif;
+      color: var(--muted);
       font-size: 0.95rem;
-      color: rgba(255,255,255,0.87);
-      padding: 10px 14px;
-      border-radius: 999px;
       transition: 0.22s ease;
     }
 
-    .nav-links a:hover {
-      background: rgba(255,255,255,0.06);
-      color: var(--gold-soft);
+    .nav-links a:hover,
+    .nav-links a.active {
+      color: var(--gold);
     }
 
-    .nav-cta {
-      border: 1px solid rgba(212,175,55,0.38);
-      background: linear-gradient(135deg, rgba(212,175,55,0.18), rgba(255,255,255,0.03));
-      color: var(--cream) !important;
-    }
-
-    .hero {
-      padding: 78px 0 34px;
-    }
-
-    .hero-shell {
-      border-radius: var(--radius-xl);
-      border: 1px solid rgba(255,255,255,0.08);
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
-        radial-gradient(circle at top left, rgba(212,175,55,0.14), transparent 34%);
-      box-shadow: var(--shadow-lg);
-      overflow: hidden;
-      position: relative;
-    }
-
-    .hero-grid {
-      display: grid;
-      grid-template-columns: 1.05fr 0.95fr;
-      align-items: stretch;
-    }
-
-    .hero-copy {
-      padding: 58px 48px;
-    }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      font-family: Arial, sans-serif;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 2.5px;
-      color: var(--gold-soft);
-      margin-bottom: 18px;
-    }
-
-    .eyebrow::before {
-      content: "";
-      width: 40px;
-      height: 1px;
-      background: linear-gradient(90deg, var(--gold), transparent);
-      display: inline-block;
-    }
-
-    .hero h1 {
-      font-size: clamp(2.8rem, 5vw, 5rem);
-      line-height: 0.96;
-      letter-spacing: -1.8px;
-      color: var(--cream);
-      max-width: 880px;
-      margin-bottom: 18px;
-    }
-
-    .hero h1 span {
-      color: var(--gold-soft);
-    }
-
-    .hero p {
-      font-family: Arial, sans-serif;
-      font-size: 1.05rem;
-      color: rgba(255,255,255,0.78);
-      max-width: 760px;
-      margin-bottom: 28px;
-    }
-
-    .hero-pills {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-    }
-
-    .hero-pill {
-      padding: 10px 16px;
-      border-radius: 999px;
-      font-family: Arial, sans-serif;
-      font-size: 0.9rem;
-      color: rgba(255,255,255,0.86);
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .hero-side {
-      padding: 28px;
-      border-left: 1px solid rgba(255,255,255,0.07);
-      background:
-        linear-gradient(180deg, rgba(18,18,23,0.78), rgba(12,12,16,0.92)),
-        radial-gradient(circle at center, rgba(212,175,55,0.10), transparent 46%);
+    .nav-actions {
       display: flex;
       align-items: center;
-    }
-
-    .hero-panel {
-      width: 100%;
-      border-radius: 26px;
-      padding: 28px;
-      background:
-        linear-gradient(180deg, rgba(212,175,55,0.12), rgba(255,255,255,0.03)),
-        rgba(255,255,255,0.02);
-      border: 1px solid rgba(212,175,55,0.18);
-      box-shadow: var(--shadow);
-    }
-
-    .hero-panel small {
-      display: block;
-      font-family: Arial, sans-serif;
-      font-size: 0.74rem;
-      text-transform: uppercase;
-      letter-spacing: 2.2px;
-      color: var(--gold-soft);
-      margin-bottom: 10px;
-    }
-
-    .hero-panel h3 {
-      font-size: 1.85rem;
-      line-height: 1.05;
-      color: var(--cream);
-      margin-bottom: 10px;
-    }
-
-    .hero-panel p {
-      font-family: Arial, sans-serif;
-      font-size: 0.96rem;
-      color: rgba(255,255,255,0.76);
-      margin-bottom: 18px;
-    }
-
-    .hero-panel-list {
-      display: grid;
-      gap: 10px;
-    }
-
-    .hero-panel-list div {
-      padding: 12px 14px;
-      border-radius: 16px;
-      background: rgba(255,255,255,0.045);
-      border: 1px solid rgba(255,255,255,0.08);
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.84);
-      font-size: 0.93rem;
-    }
-
-    section {
-      padding: 42px 0;
-    }
-
-    .section-intro {
-      text-align: center;
-      margin-bottom: 28px;
-    }
-
-    .section-intro .mini {
-      font-family: Arial, sans-serif;
-      color: var(--gold-soft);
-      text-transform: uppercase;
-      letter-spacing: 2.5px;
-      font-size: 0.76rem;
-      margin-bottom: 10px;
-    }
-
-    .section-intro h2 {
-      font-size: clamp(2rem, 3vw, 3.2rem);
-      line-height: 1.04;
-      color: var(--cream);
-      margin-bottom: 12px;
-      letter-spacing: -1px;
-    }
-
-    .section-intro p {
-      max-width: 760px;
-      margin: 0 auto;
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.74);
-      font-size: 1rem;
-    }
-
-    .flash {
-      margin: 0 auto 28px;
-      padding: 16px 18px;
-      border-radius: 18px;
-      font-family: Arial, sans-serif;
-      max-width: 920px;
-      border: 1px solid rgba(255,255,255,0.10);
-    }
-
-    .flash.success {
-      background: rgba(29,143,91,0.14);
-      border-color: rgba(29,143,91,0.32);
-      color: #d6ffe9;
-    }
-
-    .flash.error {
-      background: rgba(184,75,75,0.14);
-      border-color: rgba(184,75,75,0.32);
-      color: #ffe1e1;
-    }
-
-    .plans-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 24px;
-      align-items: stretch;
-    }
-
-    .plan-card {
-      position: relative;
-      overflow: hidden;
-      border-radius: 32px;
-      border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: var(--shadow-lg);
-      display: flex;
-      flex-direction: column;
-      min-height: 100%;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.02)),
-        radial-gradient(circle at top left, rgba(255,255,255,0.04), transparent 30%);
-    }
-
-    .plan-card.featured {
-      background:
-        linear-gradient(180deg, rgba(212,175,55,0.14), rgba(255,255,255,0.03)),
-        radial-gradient(circle at top left, rgba(240,215,122,0.08), transparent 34%),
-        rgba(255,255,255,0.02);
-      border-color: rgba(212,175,55,0.24);
-      transform: translateY(-4px);
-    }
-
-    .plan-top {
-      padding: 30px 30px 20px;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .plan-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-family: Arial, sans-serif;
-      font-size: 0.76rem;
-      text-transform: uppercase;
-      letter-spacing: 2.4px;
-      color: var(--gold-soft);
-      margin-bottom: 12px;
-    }
-
-    .plan-title {
-      font-size: 2rem;
-      line-height: 1.05;
-      color: var(--cream);
-      margin-bottom: 10px;
-    }
-
-    .plan-subtitle {
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.74);
-      font-size: 0.98rem;
-      margin-bottom: 18px;
-    }
-
-    .plan-price {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-
-    .plan-price strong {
-      font-size: 3rem;
-      line-height: 1;
-      color: var(--cream);
-    }
-
-    .plan-price span {
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.72);
-      font-size: 1rem;
-    }
-
-    .plan-value {
-      font-family: Arial, sans-serif;
-      color: var(--gold-soft);
-      font-size: 0.95rem;
-    }
-
-    .plan-body {
-      padding: 28px 30px 30px;
-      display: flex;
-      flex-direction: column;
-      gap: 22px;
-      flex: 1;
-    }
-
-    .plan-stats {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 12px;
-    }
-
-    .stat-box {
-      border-radius: 18px;
-      padding: 16px 12px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      text-align: center;
-    }
-
-    .stat-box strong {
-      display: block;
-      color: var(--gold-soft);
-      font-size: 1.22rem;
-      margin-bottom: 4px;
-    }
-
-    .stat-box span {
-      font-family: Arial, sans-serif;
-      font-size: 0.84rem;
-      color: rgba(255,255,255,0.68);
-    }
-
-    .feature-group h3 {
-      font-size: 1.12rem;
-      color: var(--cream);
-      margin-bottom: 12px;
-    }
-
-    .feature-list {
-      list-style: none;
-      display: grid;
-      gap: 10px;
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.84);
-      font-size: 0.96rem;
-    }
-
-    .feature-list li {
-      padding: 12px 14px;
-      border-radius: 16px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.07);
-    }
-
-    .plan-bottom {
-      margin-top: auto;
-      display: flex;
       gap: 12px;
       flex-wrap: wrap;
     }
@@ -508,366 +108,624 @@ if (!$selectedPlan && !empty($formData['selected_membership']) && in_array($form
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 54px;
-      padding: 0 22px;
       border-radius: 999px;
-      border: none;
-      cursor: pointer;
-      font-family: Arial, sans-serif;
-      font-size: 0.96rem;
+      padding: 13px 22px;
+      font-size: 0.95rem;
       font-weight: 700;
-      letter-spacing: 0.3px;
-      transition: transform 0.2s ease, opacity 0.2s ease;
+      letter-spacing: 0.02em;
+      transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease, background 0.22s ease;
+      border: 1px solid transparent;
+      cursor: pointer;
+      text-align: center;
     }
 
     .btn:hover {
       transform: translateY(-2px);
-      opacity: 0.97;
     }
 
     .btn-gold {
-      color: #18140a;
-      background: linear-gradient(135deg, #f0d77a 0%, #d4af37 46%, #b9921f 100%);
-      box-shadow: 0 14px 30px rgba(212,175,55,0.24);
+      background: linear-gradient(135deg, var(--gold) 0%, var(--gold-light) 100%);
+      color: #15120d;
+      box-shadow: 0 16px 38px rgba(215,178,106,0.22);
     }
 
-    .btn-dark {
-      color: var(--text);
-      border: 1px solid rgba(255,255,255,0.14);
-      background: rgba(255,255,255,0.04);
+    .btn-outline {
+      border-color: rgba(215,178,106,0.45);
+      background: rgba(255,255,255,0.02);
+      color: var(--gold);
     }
 
-    .compare-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 18px;
+    .btn-soft {
+      border-color: rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      color: var(--white);
     }
 
-    .compare-card {
-      border-radius: 24px;
-      padding: 26px;
-      background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02));
+    .hero {
+      padding: 82px 0 30px;
+    }
+
+    .hero-card {
+      border-radius: 36px;
       border: 1px solid rgba(255,255,255,0.08);
-      box-shadow: var(--shadow);
-    }
-
-    .compare-card h3 {
-      color: var(--cream);
-      font-size: 1.2rem;
-      margin-bottom: 10px;
-    }
-
-    .compare-card p {
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.72);
-      font-size: 0.95rem;
-    }
-
-    .signup-shell {
-      border-radius: 30px;
-      padding: 30px;
       background:
-        linear-gradient(135deg, rgba(212,175,55,0.16), rgba(255,255,255,0.04)),
-        rgba(255,255,255,0.02);
-      border: 1px solid rgba(212,175,55,0.18);
-      box-shadow: var(--shadow-lg);
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
+        linear-gradient(135deg, rgba(215,178,106,0.10), rgba(255,255,255,0.02));
+      box-shadow: var(--shadow);
+      overflow: hidden;
     }
 
-    .signup-grid {
+    .hero-grid {
       display: grid;
-      grid-template-columns: 0.92fr 1.08fr;
+      grid-template-columns: 1.15fr 0.85fr;
       gap: 24px;
-      align-items: start;
+      padding: 56px;
     }
 
-    .signup-copy h3 {
-      font-size: 2rem;
-      color: var(--cream);
-      margin-bottom: 10px;
-    }
-
-    .signup-copy p {
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.76);
+    .eyebrow {
+      display: inline-block;
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(215,178,106,0.30);
+      background: rgba(215,178,106,0.08);
+      color: #f2d9a8;
+      font-size: 0.78rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
       margin-bottom: 18px;
+    }
+
+    h1 {
+      font-size: clamp(2.6rem, 5vw, 5rem);
+      line-height: 0.98;
+      color: var(--white);
+      margin-bottom: 18px;
+    }
+
+    .hero p {
+      font-size: 1.07rem;
+      color: var(--muted);
       max-width: 720px;
     }
 
-    .signup-copy-list {
-      display: grid;
-      gap: 10px;
-    }
-
-    .signup-copy-list div {
-      padding: 13px 14px;
-      border-radius: 16px;
-      background: rgba(255,255,255,0.045);
-      border: 1px solid rgba(255,255,255,0.08);
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.84);
-      font-size: 0.94rem;
-    }
-
-    .signup-form {
-      display: grid;
-      gap: 16px;
-    }
-
-    .form-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-    }
-
-    .field-group {
-      display: grid;
-      gap: 8px;
-    }
-
-    .field-group label {
-      font-family: Arial, sans-serif;
-      font-size: 0.9rem;
-      color: rgba(255,255,255,0.86);
-      font-weight: 600;
-    }
-
-    .field-group input,
-    .field-group select,
-    .field-group textarea {
-      width: 100%;
-      border: 1px solid rgba(255,255,255,0.10);
-      border-radius: 16px;
-      background: rgba(255,255,255,0.04);
-      color: var(--text);
-      padding: 15px 16px;
-      font-family: Arial, sans-serif;
-      font-size: 0.95rem;
-      outline: none;
-      transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
-    }
-
-    .field-group input::placeholder,
-    .field-group textarea::placeholder {
-      color: rgba(255,255,255,0.42);
-    }
-
-    .field-group input:focus,
-    .field-group select:focus,
-    .field-group textarea:focus {
-      border-color: rgba(212,175,55,0.55);
-      background: rgba(255,255,255,0.06);
-      box-shadow: 0 0 0 4px rgba(212,175,55,0.08);
-    }
-
-    .field-group textarea {
-      min-height: 140px;
-      resize: vertical;
-    }
-
-    .form-note {
-      font-family: Arial, sans-serif;
-      font-size: 0.88rem;
-      color: rgba(255,255,255,0.56);
-    }
-
-    footer {
-      padding: 38px 0 52px;
-    }
-
-    .footer-wrap {
-      border-top: 1px solid rgba(255,255,255,0.08);
-      padding-top: 26px;
+    .hero-actions {
       display: flex;
-      justify-content: space-between;
-      gap: 18px;
+      gap: 14px;
       flex-wrap: wrap;
+      margin-top: 28px;
     }
 
-    .footer-brand {
-      color: var(--cream);
-      font-size: 1.15rem;
+    .hero-side {
+      display: grid;
+      gap: 14px;
+      align-content: start;
     }
 
-    .footer-text {
-      font-family: Arial, sans-serif;
-      color: rgba(255,255,255,0.58);
+    .info-card {
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      padding: 18px;
+    }
+
+    .info-card strong {
+      display: block;
+      color: var(--white);
+      margin-bottom: 6px;
+      font-size: 1rem;
+    }
+
+    .info-card span {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .value-strip {
+      padding: 22px 0 0;
+    }
+
+    .value-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+
+    .value-tile {
+      text-align: center;
+      border: 1px solid rgba(215,178,106,0.18);
+      background: rgba(215,178,106,0.08);
+      border-radius: 18px;
+      padding: 18px;
+    }
+
+    .value-tile strong {
+      display: block;
+      color: #f5ddaf;
+      font-size: 1.3rem;
+      margin-bottom: 5px;
+    }
+
+    .value-tile span {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    section {
+      padding: 48px 0;
+    }
+
+    .section-head {
+      max-width: 820px;
+      margin-bottom: 28px;
+    }
+
+    .section-head h2 {
+      font-size: clamp(1.9rem, 3vw, 3rem);
+      line-height: 1.08;
+      margin-bottom: 10px;
+      color: var(--white);
+    }
+
+    .section-head p {
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .comparison-wrap {
+      border-radius: 26px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 18px 20px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      vertical-align: top;
+    }
+
+    th {
+      background: rgba(255,255,255,0.03);
+      color: var(--white);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.90rem;
+    }
+
+    td {
+      color: var(--muted);
+      font-size: 0.97rem;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .price-badge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(215,178,106,0.22);
+      background: rgba(215,178,106,0.10);
+      color: #f2d9a8;
+      font-weight: 700;
+      font-size: 0.88rem;
+    }
+
+    .plans {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+      align-items: stretch;
+    }
+
+    .plan {
+      border-radius: 28px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.025));
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .plan.featured {
+      border-color: rgba(215,178,106,0.36);
+      transform: translateY(-4px);
+      background:
+        linear-gradient(180deg, rgba(215,178,106,0.12), rgba(255,255,255,0.03));
+    }
+
+    .plan-top {
+      padding: 26px 24px 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .plan-tag {
+      display: inline-block;
+      padding: 7px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(215,178,106,0.30);
+      background: rgba(215,178,106,0.10);
+      color: #f3d9a8;
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .plan h3 {
+      font-size: 1.55rem;
+      color: var(--white);
+      margin-bottom: 8px;
+    }
+
+    .plan-sub {
+      color: var(--muted);
+      font-size: 0.95rem;
+      min-height: 74px;
+    }
+
+    .price {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .price strong {
+      font-size: 2.85rem;
+      line-height: 1;
+      color: var(--white);
+    }
+
+    .price span {
+      color: var(--soft);
+      font-size: 0.95rem;
+      margin-bottom: 5px;
+    }
+
+    .plan-body {
+      padding: 22px 24px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      height: 100%;
+    }
+
+    .savings-box {
+      border-radius: 18px;
+      padding: 15px;
+      border: 1px solid rgba(215,178,106,0.18);
+      background: rgba(215,178,106,0.08);
+    }
+
+    .savings-box strong {
+      display: block;
+      color: #f6ddb0;
+      margin-bottom: 6px;
+      font-size: 1rem;
+    }
+
+    .savings-box span {
+      color: var(--muted);
       font-size: 0.93rem;
     }
 
+    .plan ul {
+      list-style: none;
+      display: grid;
+      gap: 11px;
+    }
+
+    .plan li {
+      position: relative;
+      padding-left: 22px;
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .plan li::before {
+      content: "✦";
+      position: absolute;
+      left: 0;
+      top: 0;
+      color: var(--gold);
+    }
+
+    .plan-actions {
+      margin-top: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .micro {
+      color: var(--soft);
+      font-size: 0.88rem;
+    }
+
+    .founders-wrap {
+      border-radius: 30px;
+      padding: 30px;
+      border: 1px solid rgba(215,178,106,0.20);
+      background:
+        linear-gradient(135deg, rgba(215,178,106,0.11), rgba(255,255,255,0.03));
+      box-shadow: var(--shadow);
+    }
+
+    .founders-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-top: 22px;
+    }
+
+    .founder-card {
+      border-radius: 24px;
+      padding: 24px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(7,9,13,0.55);
+    }
+
+    .founder-card h3 {
+      color: var(--white);
+      font-size: 1.5rem;
+      margin-bottom: 8px;
+    }
+
+    .founder-price {
+      color: #f5dcaf;
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .founder-card p {
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    .founder-card ul {
+      list-style: none;
+      display: grid;
+      gap: 11px;
+    }
+
+    .founder-card li {
+      position: relative;
+      padding-left: 22px;
+      color: var(--muted);
+    }
+
+    .founder-card li::before {
+      content: "◆";
+      position: absolute;
+      left: 0;
+      top: 5px;
+      color: var(--gold);
+      font-size: 0.78rem;
+    }
+
+    .faq-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .faq-item {
+      border-radius: 22px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      padding: 22px;
+    }
+
+    .faq-item h3 {
+      color: var(--white);
+      font-size: 1.06rem;
+      margin-bottom: 10px;
+    }
+
+    .faq-item p {
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .cta-box {
+      border-radius: 30px;
+      padding: 34px;
+      border: 1px solid rgba(215,178,106,0.22);
+      background:
+        linear-gradient(135deg, rgba(215,178,106,0.12), rgba(255,255,255,0.03));
+      box-shadow: var(--shadow);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+
+    .cta-box h2 {
+      font-size: clamp(1.85rem, 3vw, 2.8rem);
+      line-height: 1.06;
+      margin-bottom: 8px;
+      color: var(--white);
+    }
+
+    .cta-box p {
+      color: var(--muted);
+      max-width: 720px;
+    }
+
+    footer {
+      padding: 28px 0 48px;
+      text-align: center;
+      color: var(--soft);
+      font-size: 0.92rem;
+    }
+
     @media (max-width: 1180px) {
-      .plans-grid,
-      .compare-grid,
-      .signup-grid,
+      .plans {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .value-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
       .hero-grid {
         grid-template-columns: 1fr;
-      }
-
-      .plan-card.featured {
-        transform: none;
-      }
-
-      .hero-side {
-        border-left: none;
-        border-top: 1px solid rgba(255,255,255,0.07);
       }
     }
 
     @media (max-width: 860px) {
-      .nav {
+      .founders-grid,
+      .faq-grid,
+      .plans,
+      .value-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .plan.featured {
+        transform: none;
+      }
+
+      .hero-grid {
+        padding: 34px 24px;
+      }
+
+      th, td {
+        padding: 14px;
+      }
+
+      .nav-wrap {
         flex-direction: column;
         align-items: flex-start;
-        padding: 16px 0;
-      }
-
-      .nav-links {
-        width: 100%;
-      }
-
-      .hero-copy {
-        padding: 38px 24px;
-      }
-
-      .hero-side {
-        padding: 24px;
-      }
-
-      .hero h1,
-      .section-intro h2,
-      .signup-copy h3 {
-        font-size: 2rem;
-      }
-
-      .form-row,
-      .plan-stats {
-        grid-template-columns: 1fr;
       }
     }
 
-    @media (max-width: 560px) {
+    @media (max-width: 640px) {
       .container {
         width: min(var(--max), calc(100% - 20px));
       }
 
       .hero {
-        padding-top: 34px;
-      }
-
-      .brand-name {
-        font-size: 1.28rem;
-      }
-
-      .brand-tag {
-        letter-spacing: 2px;
-      }
-
-      .plan-top,
-      .plan-body,
-      .compare-card,
-      .signup-shell,
-      .hero-panel {
-        padding-left: 22px;
-        padding-right: 22px;
-      }
-
-      .plan-price strong {
-        font-size: 2.3rem;
+        padding-top: 56px;
       }
 
       .btn {
         width: 100%;
       }
+
+      .hero-actions,
+      .nav-actions {
+        width: 100%;
+      }
+
+      .nav-actions a {
+        flex: 1;
+      }
+
+      .cta-box,
+      .founders-wrap,
+      .faq-item,
+      .plan-top,
+      .plan-body,
+      .founder-card {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
     }
   </style>
-
-  <script>
-    function choosePlan(planName) {
-      const field = document.getElementById('selected_membership');
-      const section = document.getElementById('membership-signup');
-
-      if (field) {
-        field.value = planName;
-      }
-
-      if (section) {
-        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    }
-
-    window.addEventListener('DOMContentLoaded', function () {
-      const selectedPlan = <?php echo json_encode($selectedPlan); ?>;
-      if (selectedPlan) {
-        const field = document.getElementById('selected_membership');
-        if (field) {
-          field.value = selectedPlan;
-        }
-      }
-    });
-  </script>
 </head>
 <body>
 
-  <header class="topbar">
-    <div class="container nav">
-      <div class="brand">
-        <a href="index.php" class="brand-name">Doggie Dorian’s</a>
-        <div class="brand-tag">Luxury Pet Care Experience</div>
-      </div>
+  <header class="site-header">
+    <div class="container nav-wrap">
+      <a href="index.php" class="brand">Doggie Dorian's</a>
 
       <nav class="nav-links">
         <a href="index.php">Home</a>
         <a href="services.php">Services</a>
-        <a href="memberships.php">Memberships</a>
+        <a href="memberships.php" class="active">Memberships</a>
         <a href="book-walk.php">Book</a>
         <a href="contact.php">Contact</a>
-
-        <?php if ($isLoggedIn): ?>
-          <a href="dashboard.php">Dashboard</a>
-        <?php else: ?>
-          <a href="login.php">Login</a>
-        <?php endif; ?>
-
-        <a href="customize-plan.php" class="nav-cta">Build Your Plan</a>
       </nav>
+
+      <div class="nav-actions">
+        <?php if ($isLoggedIn): ?>
+          <a href="dashboard.php" class="btn btn-soft">Dashboard</a>
+        <?php else: ?>
+          <a href="login.php" class="btn btn-soft">Member Login</a>
+        <?php endif; ?>
+        <a href="book-walk.php" class="btn btn-gold">Book a Service</a>
+      </div>
     </div>
   </header>
 
   <main>
     <section class="hero">
       <div class="container">
-        <div class="hero-shell">
+        <div class="hero-card">
           <div class="hero-grid">
-            <div class="hero-copy">
-              <div class="eyebrow">Recurring Membership Care</div>
-              <h1>
-                Basic memberships with a more <span>premium</span> experience built in.
-              </h1>
+            <div>
+              <div class="eyebrow">Preferred Pricing For Members</div>
+              <h1>Luxury memberships built around preferred walk pricing.</h1>
               <p>
-                Our standard memberships are designed for clients who want consistency, convenience, better monthly value, and a more polished way to care for their dogs on a recurring basis.
+                Members receive 30-minute walks at a preferred rate of $25, while non-members book the same service at $30.
+                Our memberships are designed for clients who want recurring care, premium service access, and thoughtful perks
+                that make joining feel worthwhile.
               </p>
 
-              <div class="hero-pills">
-                <div class="hero-pill">Monthly recurring value</div>
-                <div class="hero-pill">Priority member access</div>
-                <div class="hero-pill">Luxury brand experience</div>
-                <div class="hero-pill">Flexible premium care</div>
+              <div class="hero-actions">
+                <a href="#plans" class="btn btn-gold">View Membership Options</a>
+                <a href="book-walk.php" class="btn btn-outline">Book Without Membership</a>
               </div>
             </div>
 
             <div class="hero-side">
-              <div class="hero-panel">
-                <small>Membership Advantages</small>
-                <h3>Reliable care with stronger monthly value.</h3>
-                <p>
-                  These plans are ideal for dog owners who want recurring support without needing a custom founder package.
-                </p>
-
-                <div class="hero-panel-list">
-                  <div>Lower per-service cost through monthly membership structure</div>
-                  <div>Priority booking access compared with one-off requests</div>
-                  <div>Consistent recurring care for a more seamless routine</div>
-                  <div>Simple enrollment with room to upgrade later</div>
-                </div>
+              <div class="info-card">
+                <strong>Member walk price</strong>
+                <span>$25 for a 30-minute walk under member pricing.</span>
               </div>
+              <div class="info-card">
+                <strong>Non-member walk price</strong>
+                <span>$30 for a 30-minute walk when booking without membership.</span>
+              </div>
+              <div class="info-card">
+                <strong>Founder advantage</strong>
+                <span>Only founder packages include rollover benefits along with deeper premium value.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="value-strip">
+          <div class="value-grid">
+            <div class="value-tile">
+              <strong>9 Walks</strong>
+              <span>now included in Walk Club for stronger value</span>
+            </div>
+            <div class="value-tile">
+              <strong>Free Gifts</strong>
+              <span>included across standard memberships</span>
+            </div>
+            <div class="value-tile">
+              <strong>Premium Perks</strong>
+              <span>photo updates, add-ons, and priority access</span>
+            </div>
+            <div class="value-tile">
+              <strong>Founder Rollover</strong>
+              <span>reserved only for founder packages</span>
             </div>
           </div>
         </div>
@@ -876,152 +734,215 @@ if (!$selectedPlan && !empty($formData['selected_membership']) && in_array($form
 
     <section>
       <div class="container">
-        <?php if ($flashMessage !== ''): ?>
-          <div class="flash <?php echo $flashType === 'success' ? 'success' : 'error'; ?>">
-            <?php echo htmlspecialchars($flashMessage, ENT_QUOTES, 'UTF-8'); ?>
-          </div>
-        <?php endif; ?>
-
-        <div class="section-intro">
-          <div class="mini">Basic Memberships</div>
-          <h2>Choose the membership that fits your routine.</h2>
+        <div class="section-head">
+          <h2>Regular booking vs membership pricing</h2>
           <p>
-            Each tier is designed to feel clear, elevated, and premium while giving members dependable recurring value.
+            Standard memberships are structured around the $25 member walk rate and now include more visible premium value.
+            Founder packages remain the more exclusive tier and are still the only plans that include rollover flexibility.
           </p>
         </div>
 
-        <div class="plans-grid">
-          <article class="plan-card">
+        <div class="comparison-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Non-Member</th>
+                <th>Member</th>
+                <th>Difference</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>30-Minute Walk</td>
+                <td><span class="price-badge">$30</span></td>
+                <td><span class="price-badge">$25</span></td>
+                <td>Members receive the preferred walk rate.</td>
+              </tr>
+              <tr>
+                <td>Standard Membership Packages</td>
+                <td>Pay-as-you-go</td>
+                <td>Built around $25 walk value plus perks</td>
+                <td>Better for clients who want recurring care and a higher-end experience.</td>
+              </tr>
+              <tr>
+                <td>Free Gift</td>
+                <td>Not included</td>
+                <td>Included</td>
+                <td>Each standard membership includes a complimentary gift.</td>
+              </tr>
+              <tr>
+                <td>Premium Add-Ons</td>
+                <td>Not included</td>
+                <td>Included in select plans</td>
+                <td>Photo updates, care add-ons, and service perks increase perceived value.</td>
+              </tr>
+              <tr>
+                <td>Rollover Walks</td>
+                <td>Not included</td>
+                <td>Founder packages only</td>
+                <td>Keeps founder memberships more exclusive.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="plans">
+      <div class="container">
+        <div class="section-head">
+          <h2>Membership options</h2>
+          <p>
+            These standard plans are based on the $25 member walk rate and now include extra perks that feel more premium
+            and more giftable. Founder plans remain your exclusive rollover tier.
+          </p>
+        </div>
+
+        <div class="plans">
+          <article class="plan">
             <div class="plan-top">
-              <div class="plan-label">Essential</div>
-              <h3 class="plan-title">Essential Membership</h3>
-              <p class="plan-subtitle">
-                A strong entry-level membership for clients who want recurring care and a more convenient monthly routine.
+              <div class="plan-tag">Walks Only</div>
+              <h3>Walk Club</h3>
+              <p class="plan-sub">
+                A simple monthly option for clients who mainly want recurring 30-minute walks with a little extra value built in.
               </p>
 
-              <div class="plan-price">
-                <strong>$199</strong>
+              <div class="price">
+                <strong>$200</strong>
                 <span>/ month</span>
               </div>
-
-              <div class="plan-value">A premium foundation for consistent monthly care.</div>
             </div>
 
             <div class="plan-body">
-              <div class="plan-stats">
-                <div class="stat-box">
-                  <strong>6</strong>
-                  <span>30-Minute Walks</span>
-                </div>
-                <div class="stat-box">
-                  <strong>1</strong>
-                  <span>Daycare Day</span>
-                </div>
+              <div class="savings-box">
+                <strong>Package walk value: $225</strong>
+                <span>Based on 9 included walks at the $25 member rate.</span>
               </div>
 
-              <div class="feature-group">
-                <h3>What’s Included</h3>
-                <ul class="feature-list">
-                  <li>6 complimentary 30-minute walks per month</li>
-                  <li>1 daycare day per month</li>
-                  <li>Priority member booking access</li>
-                  <li>Member-only pricing structure</li>
-                  <li>Easy upgrade path into higher tiers</li>
-                </ul>
-              </div>
+              <ul>
+                <li>9 included 30-minute walks each month</li>
+                <li>Additional 30-minute walks at the $25 member rate</li>
+                <li>Priority recurring scheduling</li>
+                <li>1 complimentary welcome gift</li>
+                <li>Best for clients who want a walk-only membership</li>
+              </ul>
 
-              <div class="plan-bottom">
-                <button type="button" class="btn btn-gold" onclick="choosePlan('Essential Membership')">Join Essential</button>
+              <div class="plan-actions">
+                <a href="signup.php?plan=walk-club" class="btn btn-outline">Choose Walk Club</a>
+                <div class="micro">A stronger walk-focused plan with a built-in value boost.</div>
               </div>
             </div>
           </article>
 
-          <article class="plan-card featured">
+          <article class="plan">
             <div class="plan-top">
-              <div class="plan-label">Preferred • Most Popular</div>
-              <h3 class="plan-title">Preferred Membership</h3>
-              <p class="plan-subtitle">
-                Our balanced recurring membership for clients who want stronger monthly value and more premium flexibility.
+              <div class="plan-tag">Light Recurring Care</div>
+              <h3>Essential</h3>
+              <p class="plan-sub">
+                A flexible membership for clients who want recurring walks, broader service access, and a more polished monthly experience.
               </p>
 
-              <div class="plan-price">
-                <strong>$349</strong>
+              <div class="price">
+                <strong>$250</strong>
                 <span>/ month</span>
               </div>
-
-              <div class="plan-value">The sweet spot for recurring walks and elevated convenience.</div>
             </div>
 
             <div class="plan-body">
-              <div class="plan-stats">
-                <div class="stat-box">
-                  <strong>12</strong>
-                  <span>30-Minute Walks</span>
-                </div>
-                <div class="stat-box">
-                  <strong>2</strong>
-                  <span>Daycare Days</span>
-                </div>
+              <div class="savings-box">
+                <strong>Package walk value: $250+</strong>
+                <span>Based on 10 included walks at the $25 member rate, plus added perks.</span>
               </div>
 
-              <div class="feature-group">
-                <h3>What’s Included</h3>
-                <ul class="feature-list">
-                  <li>12 complimentary 30-minute walks per month</li>
-                  <li>2 daycare days per month</li>
-                  <li>Priority member booking access</li>
-                  <li>Better bundled monthly value</li>
-                  <li>Preferred access during busier periods</li>
-                </ul>
-              </div>
+              <ul>
+                <li>10 included 30-minute walks each month</li>
+                <li>Additional 30-minute walks at the $25 member rate</li>
+                <li>Priority booking access</li>
+                <li>Member pricing access on qualifying services</li>
+                <li>1 complimentary free gift</li>
+                <li>1 complimentary treat or paw-care add-on each month</li>
+              </ul>
 
-              <div class="plan-bottom">
-                <button type="button" class="btn btn-gold" onclick="choosePlan('Preferred Membership')">Join Preferred</button>
+              <div class="plan-actions">
+                <a href="signup.php?plan=essential" class="btn btn-outline">Choose Essential</a>
+                <div class="micro">A cleaner entry membership with a little more luxury built in.</div>
               </div>
             </div>
           </article>
 
-          <article class="plan-card">
+          <article class="plan featured">
             <div class="plan-top">
-              <div class="plan-label">Signature</div>
-              <h3 class="plan-title">Signature Membership</h3>
-              <p class="plan-subtitle">
-                A more elevated recurring option for clients who want greater support, stronger convenience, and a more premium cadence of care.
+              <div class="plan-tag">Most Popular</div>
+              <h3>Premium</h3>
+              <p class="plan-sub">
+                The best balance of walk volume, premium perks, and recurring care for most ongoing clients.
               </p>
 
-              <div class="plan-price">
-                <strong>$549</strong>
+              <div class="price">
+                <strong>$375</strong>
                 <span>/ month</span>
               </div>
-
-              <div class="plan-value">Higher monthly support with more premium access built in.</div>
             </div>
 
             <div class="plan-body">
-              <div class="plan-stats">
-                <div class="stat-box">
-                  <strong>18</strong>
-                  <span>30-Minute Walks</span>
-                </div>
-                <div class="stat-box">
-                  <strong>3</strong>
-                  <span>Daycare Days</span>
-                </div>
+              <div class="savings-box">
+                <strong>Package walk value: $375+</strong>
+                <span>Based on 15 included walks at the $25 member rate, plus elevated extras.</span>
               </div>
 
-              <div class="feature-group">
-                <h3>What’s Included</h3>
-                <ul class="feature-list">
-                  <li>18 complimentary 30-minute walks per month</li>
-                  <li>3 daycare days per month</li>
-                  <li>Priority scheduling with stronger access</li>
-                  <li>Higher monthly bundled value</li>
-                  <li>Ideal for clients wanting more regular support</li>
-                </ul>
+              <ul>
+                <li>15 included 30-minute walks each month</li>
+                <li>1 complimentary daycare day each month</li>
+                <li>Additional 30-minute walks at the $25 member rate</li>
+                <li>Priority booking access</li>
+                <li>Member-favored pricing on qualifying services</li>
+                <li>1 complimentary premium gift</li>
+                <li>1 photo or video update package each month</li>
+              </ul>
+
+              <div class="plan-actions">
+                <a href="signup.php?plan=premium" class="btn btn-gold">Choose Premium</a>
+                <div class="micro">The strongest all-around plan for recurring clients.</div>
+              </div>
+            </div>
+          </article>
+
+          <article class="plan">
+            <div class="plan-top">
+              <div class="plan-tag">Luxury Frequent Care</div>
+              <h3>Elite</h3>
+              <p class="plan-sub">
+                A higher-touch membership for clients who want stronger volume, luxury perks, and premium service access.
+              </p>
+
+              <div class="price">
+                <strong>$550</strong>
+                <span>/ month</span>
+              </div>
+            </div>
+
+            <div class="plan-body">
+              <div class="savings-box">
+                <strong>Package walk value: $550+</strong>
+                <span>Based on 22 included walks at the $25 member rate before premium extras are counted.</span>
               </div>
 
-              <div class="plan-bottom">
-                <button type="button" class="btn btn-gold" onclick="choosePlan('Signature Membership')">Join Signature</button>
+              <ul>
+                <li>22 included 30-minute walks each month</li>
+                <li>2 complimentary daycare days each month</li>
+                <li>1 complimentary boarding night each month</li>
+                <li>Additional 30-minute walks at the $25 member rate</li>
+                <li>VIP booking priority</li>
+                <li>1 complimentary luxury gift</li>
+                <li>Birthday gift for your dog</li>
+                <li>Priority holiday scheduling request access</li>
+                <li>Complimentary post-service photo or video updates</li>
+              </ul>
+
+              <div class="plan-actions">
+                <a href="signup.php?plan=elite" class="btn btn-outline">Choose Elite</a>
+                <div class="micro">Built for clients who want frequent care with a more elevated experience.</div>
               </div>
             </div>
           </article>
@@ -1031,115 +952,115 @@ if (!$selectedPlan && !empty($formData['selected_membership']) && in_array($form
 
     <section>
       <div class="container">
-        <div class="section-intro">
-          <div class="mini">Why Membership Works</div>
-          <h2>Simple structure. Better value. More convenience.</h2>
-          <p>
-            Memberships work best when they make the client experience easier while giving clear recurring value month after month.
-          </p>
-        </div>
-
-        <div class="compare-grid">
-          <div class="compare-card">
-            <h3>Recurring Convenience</h3>
+        <div class="founders-wrap">
+          <div class="section-head" style="margin-bottom:0;">
+            <h2>Founding Client Status</h2>
             <p>
-              Memberships help create a more dependable routine without needing to book every service as a separate one-off request.
+              Founder packages remain your most exclusive offers. These are the only memberships that include rollover
+              along with higher inclusions and stronger premium positioning.
             </p>
           </div>
 
-          <div class="compare-card">
-            <h3>Priority Access</h3>
-            <p>
-              Members can receive stronger access to scheduling and better placement during higher-demand periods.
-            </p>
-          </div>
-
-          <div class="compare-card">
-            <h3>More Premium Value</h3>
-            <p>
-              Bundled monthly services help the plans feel more elevated, more efficient, and more worthwhile than pay-as-you-go care.
-            </p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="membership-signup">
-      <div class="container">
-        <div class="signup-shell">
-          <div class="signup-grid">
-            <div class="signup-copy">
-              <h3>Sign up for a membership.</h3>
+          <div class="founders-grid">
+            <div class="founder-card">
+              <h3>Founding Silver</h3>
+              <div class="founder-price">$500 / month</div>
               <p>
-                Choose your preferred plan and submit your request directly through the website. This version stores requests in your database so you can review and manage them properly.
+                A premium founder option that gives early clients strong recurring value, founder priority, and rollover flexibility.
               </p>
-
-              <div class="signup-copy-list">
-                <div>Real on-site membership request submission</div>
-                <div>Saved directly into your database</div>
-                <div>Luxury presentation that feels polished and intentional</div>
-                <div>Easy path to upgrade later into premium or founder tiers</div>
-              </div>
+              <ul>
+                <li>18 included 30-minute walks each month</li>
+                <li>2 complimentary daycare days each month</li>
+                <li>1 complimentary boarding night each month</li>
+                <li>Quarterly service credit equal to one month of membership</li>
+                <li>Rollover walks into the following month</li>
+                <li>Founder priority access ahead of future standard members</li>
+                <li>Exclusive founder gifting and recognition</li>
+              </ul>
             </div>
 
-            <form class="signup-form" action="process-membership-signup.php" method="post">
-              <div class="form-row">
-                <div class="field-group">
-                  <label for="full_name">Full Name</label>
-                  <input type="text" id="full_name" name="full_name" placeholder="Your full name" required value="<?php echo old_value($formData, 'full_name'); ?>">
-                </div>
+            <div class="founder-card">
+              <h3>Founding Gold</h3>
+              <div class="founder-price">$800 / month</div>
+              <p>
+                Your highest founder tier for clients who want the strongest access, deepest service volume, and premium exclusivity.
+              </p>
+              <ul>
+                <li>30 included 30-minute walks each month</li>
+                <li>4 complimentary daycare days each month</li>
+                <li>2 complimentary boarding nights each month</li>
+                <li>Quarterly service credit equal to one month of membership</li>
+                <li>Rollover walks into the following month</li>
+                <li>Highest booking priority tier</li>
+                <li>Founder-only premium gift package</li>
+                <li>Locked founding status unavailable to future clients</li>
+              </ul>
+            </div>
+          </div>
 
-                <div class="field-group">
-                  <label for="phone">Phone Number</label>
-                  <input type="tel" id="phone" name="phone" placeholder="Your phone number" value="<?php echo old_value($formData, 'phone'); ?>">
-                </div>
-              </div>
+          <div style="margin-top:24px; display:flex; gap:12px; flex-wrap:wrap;">
+            <a href="founders-memberships.php" class="btn btn-gold">View Founding Memberships</a>
+            <a href="contact.php" class="btn btn-outline">Request Membership Guidance</a>
+          </div>
+        </div>
+      </div>
+    </section>
 
-              <div class="form-row">
-                <div class="field-group">
-                  <label for="email">Email Address</label>
-                  <input type="email" id="email" name="email" placeholder="Your email address" required value="<?php echo old_value($formData, 'email'); ?>">
-                </div>
+    <section>
+      <div class="container">
+        <div class="section-head">
+          <h2>Membership questions</h2>
+          <p>
+            This section helps clients understand the difference between standard memberships and founder packages.
+          </p>
+        </div>
 
-                <div class="field-group">
-                  <label for="selected_membership">Selected Membership</label>
-                  <select id="selected_membership" name="selected_membership" required>
-                    <option value="">Choose a membership</option>
-                    <option value="Essential Membership" <?php echo $selectedPlan === 'Essential Membership' ? 'selected' : ''; ?>>Essential Membership</option>
-                    <option value="Preferred Membership" <?php echo $selectedPlan === 'Preferred Membership' ? 'selected' : ''; ?>>Preferred Membership</option>
-                    <option value="Signature Membership" <?php echo $selectedPlan === 'Signature Membership' ? 'selected' : ''; ?>>Signature Membership</option>
-                  </select>
-                </div>
-              </div>
+        <div class="faq-grid">
+          <div class="faq-item">
+            <h3>Do standard memberships include rollover?</h3>
+            <p>
+              No. Rollover is reserved only for founder packages to keep those plans more exclusive.
+            </p>
+          </div>
 
-              <div class="form-row">
-                <div class="field-group">
-                  <label for="dog_name">Dog Name</label>
-                  <input type="text" id="dog_name" name="dog_name" placeholder="Your dog's name" value="<?php echo old_value($formData, 'dog_name'); ?>">
-                </div>
+          <div class="faq-item">
+            <h3>How are standard plans valued?</h3>
+            <p>
+              Standard memberships are based on the $25 member rate for 30-minute walks, then boosted with appealing perks and gifts.
+            </p>
+          </div>
 
-                <div class="field-group">
-                  <label for="preferred_contact">Preferred Contact Method</label>
-                  <select id="preferred_contact" name="preferred_contact">
-                    <option value="">Select one</option>
-                    <option value="Phone" <?php echo old_value($formData, 'preferred_contact') === 'Phone' ? 'selected' : ''; ?>>Phone</option>
-                    <option value="Text" <?php echo old_value($formData, 'preferred_contact') === 'Text' ? 'selected' : ''; ?>>Text</option>
-                    <option value="Email" <?php echo old_value($formData, 'preferred_contact') === 'Email' ? 'selected' : ''; ?>>Email</option>
-                  </select>
-                </div>
-              </div>
+          <div class="faq-item">
+            <h3>What is the walk-only option?</h3>
+            <p>
+              Walk Club is the membership for clients who want recurring walks without needing a fuller care package.
+            </p>
+          </div>
 
-              <div class="field-group">
-                <label for="notes">Tell Us More</label>
-                <textarea id="notes" name="notes" placeholder="Share anything helpful about your schedule, your dog, or what you're looking for in a membership."><?php echo old_value($formData, 'notes'); ?></textarea>
-              </div>
+          <div class="faq-item">
+            <h3>What makes founder plans different?</h3>
+            <p>
+              Founder plans include rollover, stronger premium inclusions, and deeper exclusivity than standard memberships.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
 
-              <div class="form-note">
-                Once submitted, your request is saved to your database. Later, we can build an admin page to review, approve, and manage membership signups.
-              </div>
+    <section style="padding-top: 10px; padding-bottom: 80px;">
+      <div class="container">
+        <div class="cta-box">
+          <div>
+            <h2>Choose the membership style that fits your routine.</h2>
+            <p>
+              Join a standard membership for preferred walk pricing and premium perks, or step into a founder package
+              for your most exclusive benefits and rollover flexibility.
+            </p>
+          </div>
 
-              <button type="submit" class="btn btn-gold">Submit Membership Request</button>
-            </form>
+          <div style="display:flex; gap:12px; flex-wrap:wrap;">
+            <a href="signup.php" class="btn btn-gold">Join a Membership</a>
+            <a href="book-walk.php" class="btn btn-soft">Book as Non-Member</a>
           </div>
         </div>
       </div>
@@ -1147,15 +1068,8 @@ if (!$selectedPlan && !empty($formData['selected_membership']) && in_array($form
   </main>
 
   <footer>
-    <div class="container footer-wrap">
-      <div>
-        <div class="footer-brand">Doggie Dorian’s</div>
-        <div class="footer-text">Luxury dog walking, daycare, boarding, and premium membership care.</div>
-      </div>
-
-      <div class="footer-text">
-        © <?php echo date('Y'); ?> Doggie Dorian’s. All rights reserved.
-      </div>
+    <div class="container">
+      &copy; <?php echo date('Y'); ?> Doggie Dorian's. Luxury dog care with preferred member pricing and premium recurring service.
     </div>
   </footer>
 
