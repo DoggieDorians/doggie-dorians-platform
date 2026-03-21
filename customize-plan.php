@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/includes/member_config.php';
+require_once __DIR__ . '/includes/pricing.php';
 
 $member = currentMember($pdo);
 
@@ -14,29 +15,48 @@ if (!$member) {
     ];
 }
 
+function money_fmt(float $amount): string
+{
+    return '$' . number_format($amount, 2);
+}
+
 $memberRates = [
-    'walks_15' => 23.00,
-    'walks_20' => 25.00,
-    'walks_30' => 25.00,
-    'walks_45' => 31.00,
-    'walks_60' => 34.00,
-    'daycare_days' => 45.00,
-    'boarding_small' => 80.00,
-    'boarding_medium' => 100.00,
-    'boarding_large' => 120.00,
+    'walks_15' => dd_get_service_pricing('walk', true, ['duration_minutes' => 15])['unit_price'],
+    'walks_20' => dd_get_service_pricing('walk', true, ['duration_minutes' => 20])['unit_price'],
+    'walks_30' => dd_get_service_pricing('walk', true, ['duration_minutes' => 30])['unit_price'],
+    'walks_45' => dd_get_service_pricing('walk', true, ['duration_minutes' => 45])['unit_price'],
+    'walks_60' => dd_get_service_pricing('walk', true, ['duration_minutes' => 60])['unit_price'],
+
+    // Standard member daycare pricing
+    'daycare_small' => dd_get_service_pricing('daycare', true, ['dog_size' => 'small', 'quantity' => 1])['unit_price'],
+    'daycare_medium' => dd_get_service_pricing('daycare', true, ['dog_size' => 'medium', 'quantity' => 1])['unit_price'],
+    'daycare_large' => dd_get_service_pricing('daycare', true, ['dog_size' => 'large', 'quantity' => 1])['unit_price'],
+
+    // Standard member boarding pricing
+    'boarding_small' => dd_get_service_pricing('boarding', true, ['dog_size' => 'small', 'quantity' => 1])['unit_price'],
+    'boarding_medium' => dd_get_service_pricing('boarding', true, ['dog_size' => 'medium', 'quantity' => 1])['unit_price'],
+    'boarding_large' => dd_get_service_pricing('boarding', true, ['dog_size' => 'large', 'quantity' => 1])['unit_price'],
+
     'drop_ins' => 20.00,
 ];
 
+// Keep upfront as a separate discounted custom-plan mode
 $upfrontRates = [
     'walks_15' => 18.00,
     'walks_20' => 20.00,
     'walks_30' => 22.50,
     'walks_45' => 27.50,
     'walks_60' => 31.50,
-    'daycare_days' => 45.00,
+
+    // Upfront custom-plan daycare and boarding kept separate from standard booking pricing
+    'daycare_small' => 45.00,
+    'daycare_medium' => 45.00,
+    'daycare_large' => 45.00,
+
     'boarding_small' => 80.00,
     'boarding_medium' => 100.00,
     'boarding_large' => 120.00,
+
     'drop_ins' => 20.00,
 ];
 
@@ -49,10 +69,15 @@ $walks20 = 0;
 $walks30 = 0;
 $walks45 = 0;
 $walks60 = 0;
-$daycareDays = 0;
+
+$daycareSmall = 0;
+$daycareMedium = 0;
+$daycareLarge = 0;
+
 $boardingSmall = 0;
 $boardingMedium = 0;
 $boardingLarge = 0;
+
 $dropIns = 0;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -64,10 +89,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $walks30 = max(0, (int)($_POST['walks_30'] ?? 0));
     $walks45 = max(0, (int)($_POST['walks_45'] ?? 0));
     $walks60 = max(0, (int)($_POST['walks_60'] ?? 0));
-    $daycareDays = max(0, (int)($_POST['daycare_days'] ?? 0));
+
+    $daycareSmall = max(0, (int)($_POST['daycare_small'] ?? 0));
+    $daycareMedium = max(0, (int)($_POST['daycare_medium'] ?? 0));
+    $daycareLarge = max(0, (int)($_POST['daycare_large'] ?? 0));
+
     $boardingSmall = max(0, (int)($_POST['boarding_small'] ?? 0));
     $boardingMedium = max(0, (int)($_POST['boarding_medium'] ?? 0));
     $boardingLarge = max(0, (int)($_POST['boarding_large'] ?? 0));
+
     $dropIns = max(0, (int)($_POST['drop_ins'] ?? 0));
 
     if ($planName === '') {
@@ -84,7 +114,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $walks30 === 0 &&
         $walks45 === 0 &&
         $walks60 === 0 &&
-        $daycareDays === 0 &&
+        $daycareSmall === 0 &&
+        $daycareMedium === 0 &&
+        $daycareLarge === 0 &&
         $boardingSmall === 0 &&
         $boardingMedium === 0 &&
         $boardingLarge === 0 &&
@@ -101,13 +133,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ($walks30 * $activeRates['walks_30']) +
         ($walks45 * $activeRates['walks_45']) +
         ($walks60 * $activeRates['walks_60']) +
-        ($daycareDays * $activeRates['daycare_days']) +
+        ($daycareSmall * $activeRates['daycare_small']) +
+        ($daycareMedium * $activeRates['daycare_medium']) +
+        ($daycareLarge * $activeRates['daycare_large']) +
         ($boardingSmall * $activeRates['boarding_small']) +
         ($boardingMedium * $activeRates['boarding_medium']) +
         ($boardingLarge * $activeRates['boarding_large']) +
         ($dropIns * $activeRates['drop_ins']);
 
     if (!$errors && (int)$member['id'] > 0) {
+        $totalDaycareDays = $daycareSmall + $daycareMedium + $daycareLarge;
+        $totalBoardingNights = $boardingSmall + $boardingMedium + $boardingLarge;
+
         $insert = $pdo->prepare("
             INSERT INTO custom_plans (
                 member_id,
@@ -119,6 +156,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 walks_60,
                 daycare_days,
                 boarding_nights,
+                boarding_small,
+                boarding_medium,
+                boarding_large,
                 drop_ins,
                 monthly_total,
                 payment_mode,
@@ -133,14 +173,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 :walks_60,
                 :daycare_days,
                 :boarding_nights,
+                :boarding_small,
+                :boarding_medium,
+                :boarding_large,
                 :drop_ins,
                 :monthly_total,
                 :payment_mode,
                 :payment_status
             )
         ");
-
-        $totalBoardingNights = $boardingSmall + $boardingMedium + $boardingLarge;
 
         $insert->execute([
             ':member_id' => $member['id'],
@@ -150,8 +191,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ':walks_30' => $walks30,
             ':walks_45' => $walks45,
             ':walks_60' => $walks60,
-            ':daycare_days' => $daycareDays,
+            ':daycare_days' => $totalDaycareDays,
             ':boarding_nights' => $totalBoardingNights,
+            ':boarding_small' => $boardingSmall,
+            ':boarding_medium' => $boardingMedium,
+            ':boarding_large' => $boardingLarge,
             ':drop_ins' => $dropIns,
             ':monthly_total' => $monthlyTotal,
             ':payment_mode' => $paymentMode,
@@ -477,13 +521,14 @@ if ((int)$member['id'] > 0) {
     <section class="plan-hero">
       <h1>Customize Your Plan</h1>
       <p>
-        Build a personalized monthly membership plan with your preferred walk intervals,
-        daycare days, boarding options by dog size, and 30-minute drop-ins.
+        Build a personalized monthly plan using your current pricing system. Walks use your locked member rates,
+        while custom upfront pricing remains available for discounted plan purchases.
       </p>
 
       <div class="hero-actions">
         <a href="dashboard.php" class="hero-link">Back to Dashboard</a>
-        <a href="book-walk.php" class="hero-link">Book a Walk</a>
+        <a href="book-walk.php" class="hero-link">Book a Service</a>
+        <a href="pricing.php" class="hero-link">View Pricing</a>
       </div>
     </section>
 
@@ -508,115 +553,73 @@ if ((int)$member['id'] > 0) {
 
           <div class="section-label">Walk Intervals</div>
 
-          <div class="service-card">
-            <div class="service-top">
-              <strong>15 Minute Walks</strong>
-              <span>Quick relief and short support visits</span>
+          <?php
+          $walkCards = [
+              ['walks_15', '15 Minute Walks', 'Quick relief and short support visits', $upfrontRates['walks_15'], $memberRates['walks_15'], $walks15],
+              ['walks_20', '20 Minute Walks', 'Short daily care and routine support', $upfrontRates['walks_20'], $memberRates['walks_20'], $walks20],
+              ['walks_30', '30 Minute Walks', 'Balanced exercise and stimulation', $upfrontRates['walks_30'], $memberRates['walks_30'], $walks30],
+              ['walks_45', '45 Minute Walks', 'Extended walk for higher energy dogs', $upfrontRates['walks_45'], $memberRates['walks_45'], $walks45],
+              ['walks_60', '60 Minute Walks', 'Premium full-hour walk experience', $upfrontRates['walks_60'], $memberRates['walks_60'], $walks60],
+          ];
+          foreach ($walkCards as [$field, $title, $sub, $upfrontPrice, $paygPrice, $value]): ?>
+            <div class="service-card">
+              <div class="service-top">
+                <strong><?= e($title) ?></strong>
+                <span><?= e($sub) ?></span>
+              </div>
+              <div class="service-prices">
+                <div class="price-box"><small>Upfront</small><b><?= e(money_fmt((float)$upfrontPrice)) ?></b></div>
+                <div class="price-box"><small>As You Go</small><b><?= e(money_fmt((float)$paygPrice)) ?></b></div>
+                <div class="qty-input"><input type="number" min="0" name="<?= e($field) ?>" id="<?= e($field) ?>" value="<?= e((string)$value) ?>" placeholder="Qty"></div>
+              </div>
             </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$18.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$23.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="walks_15" id="walks_15" value="<?= e((string)$walks15) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
+          <?php endforeach; ?>
 
-          <div class="service-card">
-            <div class="service-top">
-              <strong>20 Minute Walks</strong>
-              <span>Short daily care and routine support</span>
-            </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$20.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$25.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="walks_20" id="walks_20" value="<?= e((string)$walks20) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
+          <div class="section-label">Daycare by Dog Size</div>
 
-          <div class="service-card">
-            <div class="service-top">
-              <strong>30 Minute Walks</strong>
-              <span>Balanced exercise and stimulation</span>
+          <?php
+          $daycareCards = [
+              ['daycare_small', 'Daycare Days — Small Dog', 'Standard member rate shown for pay-as-you-go', $upfrontRates['daycare_small'], $memberRates['daycare_small'], $daycareSmall],
+              ['daycare_medium', 'Daycare Days — Medium Dog', 'Standard member rate shown for pay-as-you-go', $upfrontRates['daycare_medium'], $memberRates['daycare_medium'], $daycareMedium],
+              ['daycare_large', 'Daycare Days — Large Dog', 'Standard member rate shown for pay-as-you-go', $upfrontRates['daycare_large'], $memberRates['daycare_large'], $daycareLarge],
+          ];
+          foreach ($daycareCards as [$field, $title, $sub, $upfrontPrice, $paygPrice, $value]): ?>
+            <div class="service-card">
+              <div class="service-top">
+                <strong><?= e($title) ?></strong>
+                <span><?= e($sub) ?></span>
+              </div>
+              <div class="service-prices">
+                <div class="price-box"><small>Upfront</small><b><?= e(money_fmt((float)$upfrontPrice)) ?></b></div>
+                <div class="price-box"><small>As You Go</small><b><?= e(money_fmt((float)$paygPrice)) ?></b></div>
+                <div class="qty-input"><input type="number" min="0" name="<?= e($field) ?>" id="<?= e($field) ?>" value="<?= e((string)$value) ?>" placeholder="Qty"></div>
+              </div>
             </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$22.50</b></div>
-              <div class="price-box"><small>As You Go</small><b>$25.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="walks_30" id="walks_30" value="<?= e((string)$walks30) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
+          <?php endforeach; ?>
 
-          <div class="service-card">
-            <div class="service-top">
-              <strong>45 Minute Walks</strong>
-              <span>Extended walk for higher energy dogs</span>
-            </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$27.50</b></div>
-              <div class="price-box"><small>As You Go</small><b>$31.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="walks_45" id="walks_45" value="<?= e((string)$walks45) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
+          <div class="section-label">Boarding by Dog Size</div>
 
-          <div class="service-card">
-            <div class="service-top">
-              <strong>60 Minute Walks</strong>
-              <span>Premium full-hour walk experience</span>
+          <?php
+          $boardingCards = [
+              ['boarding_small', 'Boarding Nights — Small Dog', 'Overnight care for small dogs', $upfrontRates['boarding_small'], $memberRates['boarding_small'], $boardingSmall],
+              ['boarding_medium', 'Boarding Nights — Medium Dog', 'Overnight care for medium dogs', $upfrontRates['boarding_medium'], $memberRates['boarding_medium'], $boardingMedium],
+              ['boarding_large', 'Boarding Nights — Large Dog', 'Overnight care for large dogs', $upfrontRates['boarding_large'], $memberRates['boarding_large'], $boardingLarge],
+          ];
+          foreach ($boardingCards as [$field, $title, $sub, $upfrontPrice, $paygPrice, $value]): ?>
+            <div class="service-card">
+              <div class="service-top">
+                <strong><?= e($title) ?></strong>
+                <span><?= e($sub) ?></span>
+              </div>
+              <div class="service-prices">
+                <div class="price-box"><small>Upfront</small><b><?= e(money_fmt((float)$upfrontPrice)) ?></b></div>
+                <div class="price-box"><small>As You Go</small><b><?= e(money_fmt((float)$paygPrice)) ?></b></div>
+                <div class="qty-input"><input type="number" min="0" name="<?= e($field) ?>" id="<?= e($field) ?>" value="<?= e((string)$value) ?>" placeholder="Qty"></div>
+              </div>
             </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$31.50</b></div>
-              <div class="price-box"><small>As You Go</small><b>$34.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="walks_60" id="walks_60" value="<?= e((string)$walks60) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
+          <?php endforeach; ?>
 
           <div class="section-label">Additional Services</div>
-
-          <div class="service-card">
-            <div class="service-top">
-              <strong>Daycare Days</strong>
-              <span>Structured daytime care</span>
-            </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$45.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$45.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="daycare_days" id="daycare_days" value="<?= e((string)$daycareDays) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
-
-          <div class="service-card">
-            <div class="service-top">
-              <strong>Boarding Nights — Small Dog</strong>
-              <span>Overnight care for small dogs</span>
-            </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$80.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$80.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="boarding_small" id="boarding_small" value="<?= e((string)$boardingSmall) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
-
-          <div class="service-card">
-            <div class="service-top">
-              <strong>Boarding Nights — Medium Dog</strong>
-              <span>Overnight care for medium dogs</span>
-            </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$100.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$100.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="boarding_medium" id="boarding_medium" value="<?= e((string)$boardingMedium) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
-
-          <div class="service-card">
-            <div class="service-top">
-              <strong>Boarding Nights — Large Dog</strong>
-              <span>Overnight care for large dogs</span>
-            </div>
-            <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$120.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$120.00</b></div>
-              <div class="qty-input"><input type="number" min="0" name="boarding_large" id="boarding_large" value="<?= e((string)$boardingLarge) ?>" placeholder="Qty"></div>
-            </div>
-          </div>
 
           <div class="service-card">
             <div class="service-top">
@@ -624,8 +627,8 @@ if ((int)$member['id'] > 0) {
               <span>30 minute visit for check-ins and care</span>
             </div>
             <div class="service-prices">
-              <div class="price-box"><small>Upfront</small><b>$20.00</b></div>
-              <div class="price-box"><small>As You Go</small><b>$20.00</b></div>
+              <div class="price-box"><small>Upfront</small><b><?= e(money_fmt((float)$upfrontRates['drop_ins'])) ?></b></div>
+              <div class="price-box"><small>As You Go</small><b><?= e(money_fmt((float)$memberRates['drop_ins'])) ?></b></div>
               <div class="qty-input"><input type="number" min="0" name="drop_ins" id="drop_ins" value="<?= e((string)$dropIns) ?>" placeholder="Qty"></div>
             </div>
           </div>
@@ -638,7 +641,7 @@ if ((int)$member['id'] > 0) {
                 <input type="radio" name="payment_mode" value="upfront" <?= $paymentMode === 'upfront' ? 'checked' : '' ?>>
                 <span class="payment-option-title">Upfront Payment</span>
               </div>
-              <p>Uses the lower upfront pricing and continues to the payment portal.</p>
+              <p>Uses custom upfront plan pricing and continues to the payment portal.</p>
             </label>
 
             <label class="payment-option <?= $paymentMode === 'payg' ? 'active' : '' ?>">
@@ -646,7 +649,7 @@ if ((int)$member['id'] > 0) {
                 <input type="radio" name="payment_mode" value="payg" <?= $paymentMode === 'payg' ? 'checked' : '' ?>>
                 <span class="payment-option-title">Pay As You Go</span>
               </div>
-              <p>Uses regular member pricing and lets you choose pay now or later.</p>
+              <p>Uses your current member pricing structure for monthly plan totals.</p>
             </label>
           </div>
 
@@ -666,23 +669,23 @@ if ((int)$member['id'] > 0) {
           <h3>Quick Price Comparison</h3>
           <div class="compare-line">
             <span>15 Minute Walk</span>
-            <strong>$18.00 upfront / $23.00 as you go</strong>
+            <strong><?= e(money_fmt((float)$upfrontRates['walks_15'])) ?> upfront / <?= e(money_fmt((float)$memberRates['walks_15'])) ?> as you go</strong>
           </div>
           <div class="compare-line">
             <span>20 Minute Walk</span>
-            <strong>$20.00 upfront / $25.00 as you go</strong>
+            <strong><?= e(money_fmt((float)$upfrontRates['walks_20'])) ?> upfront / <?= e(money_fmt((float)$memberRates['walks_20'])) ?> as you go</strong>
           </div>
           <div class="compare-line">
             <span>30 Minute Walk</span>
-            <strong>$22.50 upfront / $25.00 as you go</strong>
+            <strong><?= e(money_fmt((float)$upfrontRates['walks_30'])) ?> upfront / <?= e(money_fmt((float)$memberRates['walks_30'])) ?> as you go</strong>
           </div>
           <div class="compare-line">
             <span>45 Minute Walk</span>
-            <strong>$27.50 upfront / $31.00 as you go</strong>
+            <strong><?= e(money_fmt((float)$upfrontRates['walks_45'])) ?> upfront / <?= e(money_fmt((float)$memberRates['walks_45'])) ?> as you go</strong>
           </div>
           <div class="compare-line">
             <span>60 Minute Walk</span>
-            <strong>$31.50 upfront / $34.00 as you go</strong>
+            <strong><?= e(money_fmt((float)$upfrontRates['walks_60'])) ?> upfront / <?= e(money_fmt((float)$memberRates['walks_60'])) ?> as you go</strong>
           </div>
         </div>
 
@@ -736,6 +739,18 @@ if ((int)$member['id'] > 0) {
                     <?= e((string)$plan['boarding_nights']) ?>
                   </div>
                   <div class="saved-plan-box">
+                    <strong>Small Boarding</strong>
+                    <?= e((string)($plan['boarding_small'] ?? 0)) ?>
+                  </div>
+                  <div class="saved-plan-box">
+                    <strong>Medium Boarding</strong>
+                    <?= e((string)($plan['boarding_medium'] ?? 0)) ?>
+                  </div>
+                  <div class="saved-plan-box">
+                    <strong>Large Boarding</strong>
+                    <?= e((string)($plan['boarding_large'] ?? 0)) ?>
+                  </div>
+                  <div class="saved-plan-box">
                     <strong>Drop-Ins</strong>
                     <?= e((string)$plan['drop_ins']) ?>
                   </div>
@@ -757,29 +772,33 @@ if ((int)$member['id'] > 0) {
 
 <script>
 const memberRates = {
-  walks_15: 23,
-  walks_20: 25,
-  walks_30: 25,
-  walks_45: 31,
-  walks_60: 34,
-  daycare_days: 45,
-  boarding_small: 80,
-  boarding_medium: 100,
-  boarding_large: 120,
-  drop_ins: 20
+  walks_15: <?= json_encode($memberRates['walks_15']) ?>,
+  walks_20: <?= json_encode($memberRates['walks_20']) ?>,
+  walks_30: <?= json_encode($memberRates['walks_30']) ?>,
+  walks_45: <?= json_encode($memberRates['walks_45']) ?>,
+  walks_60: <?= json_encode($memberRates['walks_60']) ?>,
+  daycare_small: <?= json_encode($memberRates['daycare_small']) ?>,
+  daycare_medium: <?= json_encode($memberRates['daycare_medium']) ?>,
+  daycare_large: <?= json_encode($memberRates['daycare_large']) ?>,
+  boarding_small: <?= json_encode($memberRates['boarding_small']) ?>,
+  boarding_medium: <?= json_encode($memberRates['boarding_medium']) ?>,
+  boarding_large: <?= json_encode($memberRates['boarding_large']) ?>,
+  drop_ins: <?= json_encode($memberRates['drop_ins']) ?>
 };
 
 const upfrontRates = {
-  walks_15: 18,
-  walks_20: 20,
-  walks_30: 22.5,
-  walks_45: 27.5,
-  walks_60: 31.5,
-  daycare_days: 45,
-  boarding_small: 80,
-  boarding_medium: 100,
-  boarding_large: 120,
-  drop_ins: 20
+  walks_15: <?= json_encode($upfrontRates['walks_15']) ?>,
+  walks_20: <?= json_encode($upfrontRates['walks_20']) ?>,
+  walks_30: <?= json_encode($upfrontRates['walks_30']) ?>,
+  walks_45: <?= json_encode($upfrontRates['walks_45']) ?>,
+  walks_60: <?= json_encode($upfrontRates['walks_60']) ?>,
+  daycare_small: <?= json_encode($upfrontRates['daycare_small']) ?>,
+  daycare_medium: <?= json_encode($upfrontRates['daycare_medium']) ?>,
+  daycare_large: <?= json_encode($upfrontRates['daycare_large']) ?>,
+  boarding_small: <?= json_encode($upfrontRates['boarding_small']) ?>,
+  boarding_medium: <?= json_encode($upfrontRates['boarding_medium']) ?>,
+  boarding_large: <?= json_encode($upfrontRates['boarding_large']) ?>,
+  drop_ins: <?= json_encode($upfrontRates['drop_ins']) ?>
 };
 
 const labels = {
@@ -788,7 +807,9 @@ const labels = {
   walks_30: '30 Minute Walks',
   walks_45: '45 Minute Walks',
   walks_60: '60 Minute Walks',
-  daycare_days: 'Daycare Days',
+  daycare_small: 'Daycare Days — Small Dog',
+  daycare_medium: 'Daycare Days — Medium Dog',
+  daycare_large: 'Daycare Days — Large Dog',
   boarding_small: 'Boarding Nights — Small Dog',
   boarding_medium: 'Boarding Nights — Medium Dog',
   boarding_large: 'Boarding Nights — Large Dog',
@@ -819,6 +840,8 @@ function updatePlanSummary() {
 
   Object.keys(activeRates).forEach((key) => {
     const input = document.getElementById(key);
+    if (!input) return;
+
     const qty = parseInt(input.value || '0', 10) || 0;
 
     if (qty > 0) {
@@ -841,8 +864,8 @@ function updatePlanSummary() {
 
   const selectedMode = document.querySelector('input[name="payment_mode"]:checked');
   summaryModeText.textContent = selectedMode && selectedMode.value === 'payg'
-    ? 'Based on regular member pricing.'
-    : 'Based on upfront pricing.';
+    ? 'Based on current member pricing.'
+    : 'Based on upfront custom-plan pricing.';
 
   monthlyTotal.textContent = '$' + total.toFixed(2);
   updatePaymentCards();
