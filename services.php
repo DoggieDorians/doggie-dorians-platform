@@ -10,7 +10,7 @@ $isLoggedIn = isset($_SESSION['member_id']);
   <title>Services | Doggie Dorian's</title>
   <meta
     name="description"
-    content="Explore luxury dog walking, premium daycare, boutique boarding, and exclusive membership benefits from Doggie Dorian’s. Serving Manhattan’s Upper East Side with expanded coverage available when scheduled ahead of time."
+    content="Explore luxury dog walking, premium daycare, and boutique boarding from Doggie Dorian’s. Designed for Manhattan dog parents who want polished, dependable, elevated care."
   />
   <style>
     * {
@@ -345,7 +345,7 @@ $isLoggedIn = isset($_SESSION['member_id']);
     }
 
     .section-head {
-      max-width: 800px;
+      max-width: 860px;
       margin-bottom: 28px;
     }
 
@@ -408,13 +408,6 @@ $isLoggedIn = isset($_SESSION['member_id']);
       font-size: 1.7rem;
       line-height: 1.05;
       letter-spacing: -.03em;
-      margin-bottom: 10px;
-    }
-
-    .price {
-      color: var(--gold-2);
-      font-size: 1.05rem;
-      font-weight: 800;
       margin-bottom: 12px;
     }
 
@@ -589,6 +582,60 @@ $isLoggedIn = isset($_SESSION['member_id']);
       font-size: .96rem;
     }
 
+    .pricing-bridge {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 22px;
+      align-items: stretch;
+    }
+
+    .pricing-card,
+    .pricing-note {
+      border-radius: 28px;
+      padding: 30px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.03)),
+        linear-gradient(160deg, #15151b, #101015);
+      border: 1px solid rgba(255,255,255,.08);
+      box-shadow: var(--shadow);
+    }
+
+    .pricing-card h3,
+    .pricing-note h3 {
+      font-size: 1.6rem;
+      letter-spacing: -.03em;
+      margin-bottom: 10px;
+    }
+
+    .pricing-card p,
+    .pricing-note p {
+      color: var(--muted);
+      margin-bottom: 18px;
+    }
+
+    .pricing-list {
+      list-style: none;
+      display: grid;
+      gap: 12px;
+    }
+
+    .pricing-list li {
+      padding-left: 18px;
+      position: relative;
+      color: var(--text);
+    }
+
+    .pricing-list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 11px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--gold);
+    }
+
     .cta-panel {
       position: relative;
       overflow: hidden;
@@ -639,7 +686,8 @@ $isLoggedIn = isset($_SESSION['member_id']);
 
     @media (max-width: 1180px) {
       .hero-grid,
-      .split-grid {
+      .split-grid,
+      .pricing-bridge {
         grid-template-columns: 1fr;
       }
     }
@@ -680,6 +728,8 @@ $isLoggedIn = isset($_SESSION['member_id']);
       .feature-card,
       .feature-side,
       .hero-panel,
+      .pricing-card,
+      .pricing-note,
       .cta-panel {
         border-radius: 20px;
       }
@@ -710,6 +760,7 @@ $isLoggedIn = isset($_SESSION['member_id']);
       <ul class="nav-links">
         <li><a href="index.php">Home</a></li>
         <li><a href="services.php">Services</a></li>
+        <li><a href="pricing.php">Pricing</a></li>
         <li><a href="memberships.php">Memberships</a></li>
         <li><a href="book-walk.php">Book</a></li>
         <li><a href="contact.php">Contact</a></li>
@@ -742,44 +793,44 @@ $isLoggedIn = isset($_SESSION['member_id']);
             <span class="eyebrow">Signature Services</span>
             <h1>
               Refined dog care,
-              <span class="accent">designed to feel worth it.</span>
+              <span class="accent">designed to feel effortless.</span>
             </h1>
             <p>
-              Doggie Dorian’s offers luxury dog walking, premium daycare, and boutique boarding for Manhattan dog parents who want a more polished, personal, and dependable experience.
+              Doggie Dorian’s offers luxury dog walking, premium daycare, and boutique boarding for Manhattan dog parents who want a polished, personal, and dependable care experience from start to finish.
             </p>
 
             <div class="hero-actions">
               <a href="book-walk.php" class="btn btn-primary">Book a Service</a>
-              <a href="memberships.php" class="btn btn-secondary">Explore Memberships</a>
+              <a href="pricing.php" class="btn btn-secondary">View Pricing</a>
             </div>
 
             <div class="hero-badges">
-              <span class="hero-badge">Walks from $23</span>
-              <span class="hero-badge">Daycare from $65</span>
-              <span class="hero-badge">Boarding from $90</span>
+              <span class="hero-badge">Private Walks</span>
+              <span class="hero-badge">Premium Daycare</span>
+              <span class="hero-badge">Boutique Boarding</span>
               <span class="hero-badge">Premium Availability</span>
             </div>
           </div>
 
           <div class="hero-panel">
-            <h3>Luxury, with pricing clarity</h3>
-            <p>Serious clients convert faster when premium positioning and visible pricing work together.</p>
+            <h3>Luxury care, built around trust</h3>
+            <p>Your dog’s routine, comfort, and consistency come first — with service structured to feel smoother, more personal, and more elevated.</p>
 
             <div class="quick-grid">
               <div class="quick-box">
                 <small>Walking</small>
-                <strong>$23–$42</strong>
-                <span>15 to 60 minute options</span>
+                <strong>Tailored visits</strong>
+                <span>Flexible durations to suit your dog’s routine</span>
               </div>
               <div class="quick-box">
                 <small>Daycare</small>
-                <strong>$65–$110</strong>
-                <span>Based on dog size</span>
+                <strong>Structured daytime care</strong>
+                <span>Ideal for busy schedules and active dogs</span>
               </div>
               <div class="quick-box">
                 <small>Boarding</small>
-                <strong>$90–$120</strong>
-                <span>By dog size and stay type</span>
+                <strong>Overnight comfort</strong>
+                <span>Personal attention in a more boutique setting</span>
               </div>
               <div class="quick-box">
                 <small>Service area</small>
@@ -796,9 +847,9 @@ $isLoggedIn = isset($_SESSION['member_id']);
       <div class="container">
         <div class="section-head">
           <span class="eyebrow">Core Services</span>
-          <h2>Choose the level of care that fits your routine best.</h2>
+          <h2>Luxury care options designed around your dog’s lifestyle.</h2>
           <p>
-            Stronger service pages turn casual browsing into real booking intent by showing premium value, pricing, and convenience without making visitors work for the details.
+            This page is built to help clients understand the experience, the level of care, and the value behind each service. Exact rates and membership savings are available on the pricing page.
           </p>
         </div>
 
@@ -806,14 +857,13 @@ $isLoggedIn = isset($_SESSION['member_id']);
           <article class="service-card">
             <span class="service-tag">Dog Walking</span>
             <h3>Luxury Walks</h3>
-            <div class="price">From $23</div>
             <p>
-              Reliable, refined walking services for dog parents who want daily care to feel smooth, consistent, and elevated.
+              Reliable, refined walking services for dog parents who want daily care to feel smooth, consistent, and elevated rather than rushed or transactional.
             </p>
             <ul>
-              <li>15, 20, 30, 45, and 60 minute options</li>
-              <li>Ideal for recurring weekday routines</li>
-              <li>Perfect for busy Upper East Side schedules</li>
+              <li>Flexible walk durations for different routines</li>
+              <li>Ideal for weekday structure and recurring care</li>
+              <li>Designed for busy Manhattan schedules</li>
             </ul>
             <a href="book-walk.php" class="service-link">Book a walk →</a>
           </article>
@@ -821,14 +871,13 @@ $isLoggedIn = isset($_SESSION['member_id']);
           <article class="service-card">
             <span class="service-tag">Daycare</span>
             <h3>Premium Daycare</h3>
-            <div class="price">From $65</div>
             <p>
-              A more polished daytime care option for clients who want dependable support and a more premium overall experience.
+              A polished daytime care experience for clients who want dependable support, better routine coverage, and a more elevated standard of attention.
             </p>
             <ul>
-              <li>Small dog: $65</li>
-              <li>Medium dog: $85</li>
-              <li>Large dog: $110</li>
+              <li>Structured daytime care for active dogs</li>
+              <li>Strong fit for repeat weekday schedules</li>
+              <li>Member savings available for multi-day bookings</li>
             </ul>
             <a href="book-walk.php" class="service-link">Reserve daycare →</a>
           </article>
@@ -836,14 +885,13 @@ $isLoggedIn = isset($_SESSION['member_id']);
           <article class="service-card">
             <span class="service-tag">Boarding</span>
             <h3>Boutique Boarding</h3>
-            <div class="price">From $90 per night</div>
             <p>
-              High-end overnight care for dog owners who want more comfort, confidence, and personal attention than a standard boarding setup.
+              Overnight care for dog owners who want more comfort, confidence, and personal attention than a standard boarding setup usually provides.
             </p>
             <ul>
-              <li>Small dog: $90</li>
-              <li>Medium dog: $110</li>
-              <li>Large dog: $120</li>
+              <li>Comfort-focused overnight stays</li>
+              <li>Ideal for travel and extended care needs</li>
+              <li>Member savings available for longer stays</li>
             </ul>
             <a href="book-walk.php" class="service-link">Book boarding →</a>
           </article>
@@ -863,19 +911,19 @@ $isLoggedIn = isset($_SESSION['member_id']);
           <div class="feature-list">
             <div class="feature-item">
               <strong>Personalized attention</strong>
-              <span>Your dog’s routine and comfort stay central to the experience.</span>
+              <span>Your dog’s comfort, rhythm, and routine stay central to the experience.</span>
             </div>
             <div class="feature-item">
               <strong>Premium convenience</strong>
-              <span>Booking, scheduling, and repeat care are designed to feel smoother.</span>
+              <span>Booking, scheduling, and repeat care are designed to feel smoother and more organized.</span>
             </div>
             <div class="feature-item">
               <strong>Selective capacity</strong>
-              <span>Limited availability helps protect service quality and flexibility.</span>
+              <span>Limited availability helps protect consistency, care quality, and flexibility.</span>
             </div>
             <div class="feature-item">
               <strong>Luxury positioning</strong>
-              <span>The entire brand experience is built to feel polished and reassuring.</span>
+              <span>The full brand experience is meant to feel polished, calm, and reassuring.</span>
             </div>
           </div>
         </div>
@@ -903,9 +951,44 @@ $isLoggedIn = isset($_SESSION['member_id']);
           <div class="side-card">
             <strong>Membership-ready experience</strong>
             <p>
-              Clients who book regularly can step into a more seamless long-term experience through memberships and repeat-care benefits.
+              Clients who book regularly can move into a more seamless long-term relationship through memberships and preferred pricing.
             </p>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container pricing-bridge">
+        <div class="pricing-card">
+          <span class="eyebrow">Pricing & Memberships</span>
+          <h3>Transparent rates, with better value for members</h3>
+          <p>
+            Doggie Dorian’s pricing is structured to keep non-member booking simple while rewarding members with preferred pricing and volume discounts on qualifying daycare and boarding bookings.
+          </p>
+
+          <ul class="pricing-list">
+            <li>Members receive preferred service rates</li>
+            <li>Daycare discounts apply on qualifying 3+ day member bookings</li>
+            <li>Boarding discounts apply on qualifying 5+ night member bookings</li>
+            <li>Pricing is presented separately for maximum clarity</li>
+          </ul>
+
+          <div class="cta-actions" style="margin-top: 22px;">
+            <a href="pricing.php" class="btn btn-primary">View Pricing</a>
+            <a href="memberships.php" class="btn btn-secondary">Explore Memberships</a>
+          </div>
+        </div>
+
+        <div class="pricing-note">
+          <span class="eyebrow">Built for Repeat Care</span>
+          <h3>Designed for clients who want more than occasional help</h3>
+          <p>
+            The overall experience is especially strong for clients who need repeat walking, recurring daycare, or dependable boarding support throughout the year.
+          </p>
+          <p>
+            That is why services, pricing, and memberships are structured to work together instead of feeling disconnected.
+          </p>
         </div>
       </div>
     </section>
@@ -928,13 +1011,13 @@ $isLoggedIn = isset($_SESSION['member_id']);
           </div>
           <div class="step-card">
             <div class="step-number">2</div>
-            <h3>Request your date</h3>
-            <p>Choose your preferred date and time, with advance scheduling available for broader coverage.</p>
+            <h3>Check pricing</h3>
+            <p>Review member and non-member options clearly before moving forward.</p>
           </div>
           <div class="step-card">
             <div class="step-number">3</div>
-            <h3>Review your options</h3>
-            <p>Pricing stays visible, so you can move forward with confidence and less uncertainty.</p>
+            <h3>Request your date</h3>
+            <p>Choose your preferred timing, with advance scheduling available for broader coverage.</p>
           </div>
           <div class="step-card">
             <div class="step-number">4</div>
@@ -955,7 +1038,7 @@ $isLoggedIn = isset($_SESSION['member_id']);
           </p>
           <div class="cta-actions">
             <a href="book-walk.php" class="btn btn-primary">Book Premium Care</a>
-            <a href="memberships.php" class="btn btn-secondary">See Memberships</a>
+            <a href="pricing.php" class="btn btn-secondary">View Pricing</a>
             <?php if (!$isLoggedIn): ?>
               <a href="login.php" class="btn btn-ghost">Member Login</a>
             <?php else: ?>
@@ -974,7 +1057,8 @@ $isLoggedIn = isset($_SESSION['member_id']);
         Luxury dog walking, premium daycare & boutique boarding in Manhattan.
       </div>
       <div>
-        <a href="book-walk.php">Book</a> &nbsp;•&nbsp;
+        <a href="services.php">Services</a> &nbsp;•&nbsp;
+        <a href="pricing.php">Pricing</a> &nbsp;•&nbsp;
         <a href="memberships.php">Memberships</a> &nbsp;•&nbsp;
         <a href="contact.php">Contact</a>
       </div>

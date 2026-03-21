@@ -95,11 +95,6 @@ try {
         throw new RuntimeException('Database connection is not available from data/config/db.php.');
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | USER
-    |--------------------------------------------------------------------------
-    */
     if (!tableExists($pdo, 'users')) {
         throw new RuntimeException('The users table was not found.');
     }
@@ -117,11 +112,6 @@ try {
         throw new RuntimeException('Member not found.');
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | DOGS
-    |--------------------------------------------------------------------------
-    */
     $dogs = [];
 
     if (tableExists($pdo, 'dogs')) {
@@ -159,11 +149,6 @@ try {
         }
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | BOOKINGS
-    |--------------------------------------------------------------------------
-    */
     $bookings = [];
 
     if (tableExists($pdo, 'bookings')) {
@@ -206,11 +191,6 @@ try {
         }
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | CLIENT PROFILE
-    |--------------------------------------------------------------------------
-    */
     $clientProfile = null;
 
     if (tableExists($pdo, 'client_profiles')) {
@@ -423,6 +403,7 @@ try {
 
         <div class="actions">
             <a href="admin-add-dog.php?user_id=<?php echo (int)$userId; ?>" class="btn btn-primary">+ Add Dog</a>
+            <a href="admin-create-booking.php?user_id=<?php echo (int)$userId; ?>" class="btn btn-primary">+ Create Booking</a>
             <a href="admin-members.php" class="btn btn-secondary">← Back to Members</a>
         </div>
     </div>

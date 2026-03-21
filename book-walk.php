@@ -1,1391 +1,1564 @@
 <?php
 session_start();
 
+require_once __DIR__ . '/data/config/db.php';
+require_once __DIR__ . '/includes/pricing.php';
+
 $isLoggedIn = isset($_SESSION['member_id']);
+$userId = $isLoggedIn ? (int) $_SESSION['member_id'] : 0;
 
-$dbPath = __DIR__ . '/data/members.sqlite';
-$successMessage = '';
-$errorMessage = '';
+$success = '';
+$error = '';
+$pets = [];
+$pricingPreview = null;
 
-$ownerEmail = 'doggie.dorians@gmail.com';
-$textAlertEmail = '6316035644@vtext.com';
-
-function clean_input(string $value): string {
-    return trim($value);
+function h($value): string
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function old_value(string $key): string {
-    return htmlspecialchars($_POST[$key] ?? '', ENT_QUOTES, 'UTF-8');
+function posted(string $key, string $default = ''): string
+{
+    return isset($_POST[$key]) ? trim((string) $_POST[$key]) : $default;
 }
 
-function send_alert_email(string $to, string $subject, string $message, string $replyTo = ''): bool {
-    if ($to === '') {
-        return false;
+$serviceType      = posted('service_type', 'walk');
+$petId            = (int) ($_POST['pet_id'] ?? 0);
+$guestName        = posted('guest_name');
+$guestEmail       = posted('guest_email');
+$guestPhone       = posted('guest_phone');
+$dogName          = posted('dog_name');
+$dogSize          = posted('dog_size');
+$walkDate         = posted('walk_date');
+$walkTime         = posted('walk_time');
+$durationMinutes  = (int) ($_POST['duration_minutes'] ?? 30);
+$daycareStart     = posted('daycare_start');
+$daycareEnd       = posted('daycare_end');
+$daycareTime      = posted('daycare_time');
+$boardingStart    = posted('boarding_start');
+$boardingEnd      = posted('boarding_end');
+$boardingTime     = posted('boarding_time');
+$feedingSchedule  = posted('feeding_schedule');
+$preferredContact = posted('preferred_contact');
+$clientNotes      = posted('client_notes');
+$accessNotes      = posted('access_notes');
+
+if ($isLoggedIn) {
+    try {
+        $stmt = $pdo->prepare("
+            SELECT id, pet_name, size
+            FROM pets
+            WHERE user_id = :user_id
+            ORDER BY pet_name ASC
+        ");
+        $stmt->execute([':user_id' => $userId]);
+        $pets = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    } catch (Throwable $e) {
+        $pets = [];
     }
-
-    $domain = $_SERVER['HTTP_HOST'] ?? 'localhost';
-
-    $headers = [];
-    $headers[] = 'MIME-Version: 1.0';
-    $headers[] = 'Content-type: text/plain; charset=UTF-8';
-    $headers[] = 'From: Doggie Dorian\'s <no-reply@' . $domain . '>';
-
-    if ($replyTo !== '') {
-        $headers[] = 'Reply-To: ' . $replyTo;
-    }
-
-    return @mail($to, $subject, $message, implode("\r\n", $headers));
-}
-
-function is_valid_date(string $date): bool {
-    if ($date === '') {
-        return false;
-    }
-
-    $parts = explode('-', $date);
-    if (count($parts) !== 3) {
-        return false;
-    }
-
-    return checkdate((int)$parts[1], (int)$parts[2], (int)$parts[0]);
-}
-
-function format_service_label(string $serviceType): string {
-    return match ($serviceType) {
-        'walk' => 'Walk',
-        'daycare' => 'Daycare',
-        'boarding' => 'Boarding',
-        default => 'Unknown'
-    };
-}
-
-function get_estimated_price(string $serviceType, string $walkDuration, string $petSize): ?float {
-    $walkPrices = [
-        '15' => 23,
-        '20' => 25,
-        '30' => 30,
-        '45' => 38,
-        '60' => 42,
-    ];
-
-    $daycarePrices = [
-        'small' => 65,
-        'medium' => 85,
-        'large' => 110,
-    ];
-
-    $boardingPrices = [
-        'small' => 90,
-        'medium' => 110,
-        'large' => 120,
-    ];
-
-    if ($serviceType === 'walk' && isset($walkPrices[$walkDuration])) {
-        return (float)$walkPrices[$walkDuration];
-    }
-
-    if ($serviceType === 'daycare' && isset($daycarePrices[$petSize])) {
-        return (float)$daycarePrices[$petSize];
-    }
-
-    if ($serviceType === 'boarding' && isset($boardingPrices[$petSize])) {
-        return (float)$boardingPrices[$petSize];
-    }
-
-    return null;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $fullName = clean_input($_POST['full_name'] ?? '');
-    $email = clean_input($_POST['email'] ?? '');
-    $phone = clean_input($_POST['phone'] ?? '');
-    $serviceType = clean_input($_POST['service_type'] ?? '');
-    $walkDuration = clean_input($_POST['walk_duration'] ?? '');
-    $petName = clean_input($_POST['pet_name'] ?? '');
-    $petSize = clean_input($_POST['pet_size'] ?? '');
-    $preferredDate = clean_input($_POST['preferred_date'] ?? '');
-    $preferredTime = clean_input($_POST['preferred_time'] ?? '');
-    $dropoffTime = clean_input($_POST['dropoff_time'] ?? '');
-    $pickupTime = clean_input($_POST['pickup_time'] ?? '');
-    $checkinDate = clean_input($_POST['checkin_date'] ?? '');
-    $checkoutDate = clean_input($_POST['checkout_date'] ?? '');
-    $checkinTime = clean_input($_POST['checkin_time'] ?? '');
-    $checkoutTime = clean_input($_POST['checkout_time'] ?? '');
-    $feedingSchedule = clean_input($_POST['feeding_schedule'] ?? '');
-    $notes = clean_input($_POST['notes'] ?? '');
+    try {
+        $serviceType = dd_normalize_service_type($serviceType);
 
-    $allowedServices = ['walk', 'daycare', 'boarding'];
-    $allowedDurations = ['15', '20', '30', '45', '60', ''];
-    $allowedSizes = ['small', 'medium', 'large', ''];
-
-    $today = date('Y-m-d');
-
-    if (
-        $fullName === '' ||
-        $email === '' ||
-        $phone === '' ||
-        $serviceType === '' ||
-        $petName === '' ||
-        $petSize === ''
-    ) {
-        $errorMessage = 'Please complete all required fields before submitting your request.';
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $errorMessage = 'Please enter a valid email address.';
-    } elseif (!in_array($serviceType, $allowedServices, true)) {
-        $errorMessage = 'Please choose a valid service type.';
-    } elseif (!in_array($walkDuration, $allowedDurations, true)) {
-        $errorMessage = 'Please choose a valid walk duration.';
-    } elseif (!in_array($petSize, $allowedSizes, true)) {
-        $errorMessage = 'Please choose a valid dog size.';
-    } elseif ($serviceType === 'walk' && $walkDuration === '') {
-        $errorMessage = 'Please select a walk duration for walk bookings.';
-    } elseif ($serviceType === 'walk' && $preferredDate === '') {
-        $errorMessage = 'Please select a preferred date for your walk request.';
-    } elseif ($serviceType === 'walk' && !is_valid_date($preferredDate)) {
-        $errorMessage = 'Please enter a valid walk date.';
-    } elseif ($serviceType === 'walk' && $preferredDate < $today) {
-        $errorMessage = 'Walk requests cannot be submitted for a past date.';
-    } elseif ($serviceType === 'daycare' && $preferredDate === '') {
-        $errorMessage = 'Please select a date for your daycare request.';
-    } elseif ($serviceType === 'daycare' && !is_valid_date($preferredDate)) {
-        $errorMessage = 'Please enter a valid daycare date.';
-    } elseif ($serviceType === 'daycare' && $preferredDate < $today) {
-        $errorMessage = 'Daycare requests cannot be submitted for a past date.';
-    } elseif ($serviceType === 'boarding' && ($checkinDate === '' || $checkoutDate === '')) {
-        $errorMessage = 'Please select both check-in and check-out dates for boarding.';
-    } elseif ($serviceType === 'boarding' && (!is_valid_date($checkinDate) || !is_valid_date($checkoutDate))) {
-        $errorMessage = 'Please enter valid boarding dates.';
-    } elseif ($serviceType === 'boarding' && $checkinDate < $today) {
-        $errorMessage = 'Boarding check-in cannot be in the past.';
-    } elseif ($serviceType === 'boarding' && $checkoutDate < $checkinDate) {
-        $errorMessage = 'Boarding check-out date must be the same day or later than check-in.';
-    } else {
-        try {
-            if (!is_dir(__DIR__ . '/data')) {
-                mkdir(__DIR__ . '/data', 0775, true);
-            }
-
-            $db = new SQLite3($dbPath);
-            $db->busyTimeout(5000);
-
-            $db->exec("
-                CREATE TABLE IF NOT EXISTS public_booking_requests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    full_name TEXT NOT NULL,
-                    email TEXT NOT NULL,
-                    phone TEXT NOT NULL,
-                    service_type TEXT NOT NULL,
-                    walk_duration INTEGER,
-                    pet_name TEXT NOT NULL,
-                    pet_size TEXT NOT NULL,
-                    preferred_date TEXT,
-                    preferred_time TEXT,
-                    dropoff_time TEXT,
-                    pickup_time TEXT,
-                    checkin_date TEXT,
-                    checkout_date TEXT,
-                    checkin_time TEXT,
-                    checkout_time TEXT,
-                    feeding_schedule TEXT,
-                    notes TEXT,
-                    estimated_price REAL,
-                    source TEXT NOT NULL DEFAULT 'public_booking_page',
-                    status TEXT NOT NULL DEFAULT 'New',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            ");
-
-            $existingColumns = [];
-            $columnsResult = $db->query("PRAGMA table_info(public_booking_requests)");
-            while ($column = $columnsResult->fetchArray(SQLITE3_ASSOC)) {
-                $existingColumns[] = $column['name'];
-            }
-
-            $columnsToAdd = [
-                'dropoff_time' => 'ALTER TABLE public_booking_requests ADD COLUMN dropoff_time TEXT',
-                'pickup_time' => 'ALTER TABLE public_booking_requests ADD COLUMN pickup_time TEXT',
-                'checkin_date' => 'ALTER TABLE public_booking_requests ADD COLUMN checkin_date TEXT',
-                'checkout_date' => 'ALTER TABLE public_booking_requests ADD COLUMN checkout_date TEXT',
-                'checkin_time' => 'ALTER TABLE public_booking_requests ADD COLUMN checkin_time TEXT',
-                'checkout_time' => 'ALTER TABLE public_booking_requests ADD COLUMN checkout_time TEXT',
-                'estimated_price' => 'ALTER TABLE public_booking_requests ADD COLUMN estimated_price REAL',
-            ];
-
-            foreach ($columnsToAdd as $columnName => $sql) {
-                if (!in_array($columnName, $existingColumns, true)) {
-                    $db->exec($sql);
-                }
-            }
-
-            $estimatedPrice = get_estimated_price($serviceType, $walkDuration, $petSize);
-            $walkDurationValue = $walkDuration === '' ? null : (int)$walkDuration;
-
-            $storedPreferredDate = null;
-            $storedPreferredTime = null;
-
-            if ($serviceType === 'walk') {
-                $storedPreferredDate = $preferredDate;
-                $storedPreferredTime = $preferredTime;
-            } elseif ($serviceType === 'daycare') {
-                $storedPreferredDate = $preferredDate;
-            }
-
-            $stmt = $db->prepare("
-                INSERT INTO public_booking_requests (
-                    full_name,
-                    email,
-                    phone,
-                    service_type,
-                    walk_duration,
-                    pet_name,
-                    pet_size,
-                    preferred_date,
-                    preferred_time,
-                    dropoff_time,
-                    pickup_time,
-                    checkin_date,
-                    checkout_date,
-                    checkin_time,
-                    checkout_time,
-                    feeding_schedule,
-                    notes,
-                    estimated_price
-                ) VALUES (
-                    :full_name,
-                    :email,
-                    :phone,
-                    :service_type,
-                    :walk_duration,
-                    :pet_name,
-                    :pet_size,
-                    :preferred_date,
-                    :preferred_time,
-                    :dropoff_time,
-                    :pickup_time,
-                    :checkin_date,
-                    :checkout_date,
-                    :checkin_time,
-                    :checkout_time,
-                    :feeding_schedule,
-                    :notes,
-                    :estimated_price
-                )
-            ");
-
-            $stmt->bindValue(':full_name', $fullName, SQLITE3_TEXT);
-            $stmt->bindValue(':email', $email, SQLITE3_TEXT);
-            $stmt->bindValue(':phone', $phone, SQLITE3_TEXT);
-            $stmt->bindValue(':service_type', $serviceType, SQLITE3_TEXT);
-
-            if ($walkDurationValue === null) {
-                $stmt->bindValue(':walk_duration', null, SQLITE3_NULL);
-            } else {
-                $stmt->bindValue(':walk_duration', $walkDurationValue, SQLITE3_INTEGER);
-            }
-
-            $stmt->bindValue(':pet_name', $petName, SQLITE3_TEXT);
-            $stmt->bindValue(':pet_size', $petSize, SQLITE3_TEXT);
-
-            if ($storedPreferredDate === null) {
-                $stmt->bindValue(':preferred_date', null, SQLITE3_NULL);
-            } else {
-                $stmt->bindValue(':preferred_date', $storedPreferredDate, SQLITE3_TEXT);
-            }
-
-            if ($storedPreferredTime === null || $storedPreferredTime === '') {
-                $stmt->bindValue(':preferred_time', null, SQLITE3_NULL);
-            } else {
-                $stmt->bindValue(':preferred_time', $storedPreferredTime, SQLITE3_TEXT);
-            }
-
-            $stmt->bindValue(':dropoff_time', $dropoffTime !== '' ? $dropoffTime : null, $dropoffTime !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':pickup_time', $pickupTime !== '' ? $pickupTime : null, $pickupTime !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':checkin_date', $checkinDate !== '' ? $checkinDate : null, $checkinDate !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':checkout_date', $checkoutDate !== '' ? $checkoutDate : null, $checkoutDate !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':checkin_time', $checkinTime !== '' ? $checkinTime : null, $checkinTime !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':checkout_time', $checkoutTime !== '' ? $checkoutTime : null, $checkoutTime !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':feeding_schedule', $feedingSchedule !== '' ? $feedingSchedule : null, $feedingSchedule !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-            $stmt->bindValue(':notes', $notes !== '' ? $notes : null, $notes !== '' ? SQLITE3_TEXT : SQLITE3_NULL);
-
-            if ($estimatedPrice === null) {
-                $stmt->bindValue(':estimated_price', null, SQLITE3_NULL);
-            } else {
-                $stmt->bindValue(':estimated_price', $estimatedPrice, SQLITE3_FLOAT);
-            }
-
-            $result = $stmt->execute();
-
-            if ($result) {
-                $bookingId = $db->lastInsertRowID();
-
-                $serviceLabel = format_service_label($serviceType);
-                $durationLabel = ($serviceType === 'walk' && $walkDuration !== '') ? $walkDuration . '-minute walk' : 'N/A';
-                $preferredTimeLabel = $preferredTime !== '' ? $preferredTime : 'Not provided';
-                $dropoffLabel = $dropoffTime !== '' ? $dropoffTime : 'Not provided';
-                $pickupLabel = $pickupTime !== '' ? $pickupTime : 'Not provided';
-                $checkinDateLabel = $checkinDate !== '' ? $checkinDate : 'Not provided';
-                $checkoutDateLabel = $checkoutDate !== '' ? $checkoutDate : 'Not provided';
-                $checkinTimeLabel = $checkinTime !== '' ? $checkinTime : 'Not provided';
-                $checkoutTimeLabel = $checkoutTime !== '' ? $checkoutTime : 'Not provided';
-                $feedingLabel = $feedingSchedule !== '' ? $feedingSchedule : 'Not provided';
-                $notesLabel = $notes !== '' ? $notes : 'None';
-                $priceLabel = $estimatedPrice !== null ? '$' . number_format($estimatedPrice, 2) : 'Not available';
-
-                $emailSubject = 'New Doggie Dorian\'s Booking Request #' . $bookingId;
-                $emailBody = "A new public booking request was submitted.\n\n"
-                    . "Booking ID: {$bookingId}\n"
-                    . "Client Name: {$fullName}\n"
-                    . "Email: {$email}\n"
-                    . "Phone: {$phone}\n"
-                    . "Dog Name: {$petName}\n"
-                    . "Dog Size: {$petSize}\n"
-                    . "Service Type: {$serviceLabel}\n"
-                    . "Walk Duration: {$durationLabel}\n"
-                    . "Preferred Date: " . ($storedPreferredDate ?? 'Not provided') . "\n"
-                    . "Preferred Time: {$preferredTimeLabel}\n"
-                    . "Daycare Drop-Off Time: {$dropoffLabel}\n"
-                    . "Daycare Pick-Up Time: {$pickupLabel}\n"
-                    . "Boarding Check-In Date: {$checkinDateLabel}\n"
-                    . "Boarding Check-Out Date: {$checkoutDateLabel}\n"
-                    . "Boarding Check-In Time: {$checkinTimeLabel}\n"
-                    . "Boarding Check-Out Time: {$checkoutTimeLabel}\n"
-                    . "Feeding Schedule: {$feedingLabel}\n"
-                    . "Estimated Price: {$priceLabel}\n"
-                    . "Notes: {$notesLabel}\n";
-
-                send_alert_email($ownerEmail, $emailSubject, $emailBody, $email);
-
-                if ($textAlertEmail !== '') {
-                    $textBody = "New booking #{$bookingId}: {$fullName}, {$serviceLabel}";
-                    if ($serviceType === 'walk' && $walkDuration !== '') {
-                        $textBody .= ", {$walkDuration} min";
-                    }
-                    if ($serviceType === 'walk' && $storedPreferredDate !== null) {
-                        $textBody .= ", {$storedPreferredDate}";
-                    }
-                    if ($serviceType === 'daycare' && $storedPreferredDate !== null) {
-                        $textBody .= ", {$storedPreferredDate}";
-                    }
-                    if ($serviceType === 'boarding' && $checkinDate !== '' && $checkoutDate !== '') {
-                        $textBody .= ", {$checkinDate} to {$checkoutDate}";
-                    }
-                    send_alert_email($textAlertEmail, 'New Booking Alert', $textBody, $email);
-                }
-
-                $successMessage = 'Thank you — your booking request has been received. We will review it and reach out shortly to confirm availability and details.';
-                $_POST = [];
-            } else {
-                $errorMessage = 'Something went wrong while saving your request. Please try again.';
-            }
-
-            $db->close();
-        } catch (Throwable $e) {
-            $errorMessage = 'Something went wrong while saving your request. Please try again.';
+        if ($serviceType === '') {
+            throw new InvalidArgumentException('Please choose a valid service.');
         }
+
+        if ($isLoggedIn) {
+            if ($petId <= 0) {
+                throw new InvalidArgumentException('Please select your dog.');
+            }
+
+            $stmt = $pdo->prepare("
+                SELECT id, pet_name, size
+                FROM pets
+                WHERE id = :id AND user_id = :user_id
+                LIMIT 1
+            ");
+            $stmt->execute([
+                ':id' => $petId,
+                ':user_id' => $userId
+            ]);
+            $selectedPet = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$selectedPet) {
+                throw new InvalidArgumentException('Selected dog was not found.');
+            }
+
+            $dogName = trim((string) $selectedPet['pet_name']);
+            $dogSize = dd_normalize_dog_size((string) ($selectedPet['size'] ?? ''));
+
+            if ($dogSize === '') {
+                throw new InvalidArgumentException('This pet does not have a size saved yet. Please update the pet profile first.');
+            }
+        } else {
+            if ($guestName === '' || $guestEmail === '' || $guestPhone === '') {
+                throw new InvalidArgumentException('Please complete your contact information.');
+            }
+
+            if ($dogName === '') {
+                throw new InvalidArgumentException('Please enter your dog’s name.');
+            }
+
+            $dogSize = dd_normalize_dog_size($dogSize);
+            if ($dogSize === '') {
+                throw new InvalidArgumentException('Please select your dog’s size.');
+            }
+        }
+
+        if ($serviceType === 'walk') {
+            if ($walkDate === '' || $walkTime === '') {
+                throw new InvalidArgumentException('Please choose a walk date and time.');
+            }
+
+            $pricingPreview = dd_get_service_pricing('walk', $isLoggedIn, [
+                'duration_minutes' => $durationMinutes
+            ]);
+
+            if ($isLoggedIn) {
+                $stmt = $pdo->prepare("
+                    INSERT INTO bookings (
+                        user_id,
+                        pet_id,
+                        service_type,
+                        service_date,
+                        service_time,
+                        duration_minutes,
+                        status,
+                        access_notes,
+                        client_notes,
+                        price,
+                        is_instant_booking,
+                        pricing_type,
+                        unit_price,
+                        discount_label,
+                        quantity,
+                        end_date
+                    ) VALUES (
+                        :user_id,
+                        :pet_id,
+                        :service_type,
+                        :service_date,
+                        :service_time,
+                        :duration_minutes,
+                        'pending',
+                        :access_notes,
+                        :client_notes,
+                        :price,
+                        0,
+                        :pricing_type,
+                        :unit_price,
+                        :discount_label,
+                        :quantity,
+                        :end_date
+                    )
+                ");
+
+                $stmt->execute([
+                    ':user_id' => $userId,
+                    ':pet_id' => $petId,
+                    ':service_type' => 'walk',
+                    ':service_date' => $walkDate,
+                    ':service_time' => $walkTime,
+                    ':duration_minutes' => $durationMinutes,
+                    ':access_notes' => $accessNotes,
+                    ':client_notes' => $clientNotes,
+                    ':price' => $pricingPreview['total_price'],
+                    ':pricing_type' => $pricingPreview['pricing_type'],
+                    ':unit_price' => $pricingPreview['unit_price'],
+                    ':discount_label' => $pricingPreview['discount_label'],
+                    ':quantity' => 1,
+                    ':end_date' => null
+                ]);
+            } else {
+                $stmt = $pdo->prepare("
+                    INSERT INTO non_member_bookings (
+                        full_name,
+                        phone,
+                        email,
+                        service_type,
+                        dog_name,
+                        dog_size,
+                        walk_duration,
+                        preferred_walk_time,
+                        date_start,
+                        date_end,
+                        feeding_schedule,
+                        preferred_contact,
+                        notes,
+                        estimated_price,
+                        status,
+                        pricing_type,
+                        unit_price,
+                        discount_label,
+                        quantity
+                    ) VALUES (
+                        :full_name,
+                        :phone,
+                        :email,
+                        :service_type,
+                        :dog_name,
+                        :dog_size,
+                        :walk_duration,
+                        :preferred_walk_time,
+                        :date_start,
+                        :date_end,
+                        :feeding_schedule,
+                        :preferred_contact,
+                        :notes,
+                        :estimated_price,
+                        'Requested',
+                        :pricing_type,
+                        :unit_price,
+                        :discount_label,
+                        :quantity
+                    )
+                ");
+
+                $stmt->execute([
+                    ':full_name' => $guestName,
+                    ':phone' => $guestPhone,
+                    ':email' => $guestEmail,
+                    ':service_type' => 'walk',
+                    ':dog_name' => $dogName,
+                    ':dog_size' => $dogSize,
+                    ':walk_duration' => $durationMinutes,
+                    ':preferred_walk_time' => $walkTime,
+                    ':date_start' => $walkDate,
+                    ':date_end' => $walkDate,
+                    ':feeding_schedule' => $feedingSchedule,
+                    ':preferred_contact' => $preferredContact !== '' ? $preferredContact : 'phone',
+                    ':notes' => $clientNotes,
+                    ':estimated_price' => $pricingPreview['total_price'],
+                    ':pricing_type' => $pricingPreview['pricing_type'],
+                    ':unit_price' => $pricingPreview['unit_price'],
+                    ':discount_label' => $pricingPreview['discount_label'],
+                    ':quantity' => 1
+                ]);
+            }
+
+            $success = 'Your walk request has been submitted successfully.';
+        } elseif ($serviceType === 'daycare') {
+            if ($daycareStart === '' || $daycareEnd === '') {
+                throw new InvalidArgumentException('Please choose daycare start and end dates.');
+            }
+
+            if ($daycareTime === '') {
+                throw new InvalidArgumentException('Please choose a preferred daycare drop-off time.');
+            }
+
+            $quantity = dd_calculate_daycare_days($daycareStart, $daycareEnd);
+
+            $pricingPreview = dd_get_service_pricing('daycare', $isLoggedIn, [
+                'dog_size' => $dogSize,
+                'quantity' => $quantity
+            ]);
+
+            if ($isLoggedIn) {
+                $stmt = $pdo->prepare("
+                    INSERT INTO bookings (
+                        user_id,
+                        pet_id,
+                        service_type,
+                        service_date,
+                        service_time,
+                        duration_minutes,
+                        status,
+                        access_notes,
+                        client_notes,
+                        price,
+                        is_instant_booking,
+                        pricing_type,
+                        unit_price,
+                        discount_label,
+                        quantity,
+                        end_date
+                    ) VALUES (
+                        :user_id,
+                        :pet_id,
+                        :service_type,
+                        :service_date,
+                        :service_time,
+                        NULL,
+                        'pending',
+                        :access_notes,
+                        :client_notes,
+                        :price,
+                        0,
+                        :pricing_type,
+                        :unit_price,
+                        :discount_label,
+                        :quantity,
+                        :end_date
+                    )
+                ");
+
+                $stmt->execute([
+                    ':user_id' => $userId,
+                    ':pet_id' => $petId,
+                    ':service_type' => 'daycare',
+                    ':service_date' => $daycareStart,
+                    ':service_time' => $daycareTime,
+                    ':access_notes' => $accessNotes,
+                    ':client_notes' => $clientNotes,
+                    ':price' => $pricingPreview['total_price'],
+                    ':pricing_type' => $pricingPreview['pricing_type'],
+                    ':unit_price' => $pricingPreview['unit_price'],
+                    ':discount_label' => $pricingPreview['discount_label'],
+                    ':quantity' => $quantity,
+                    ':end_date' => $daycareEnd
+                ]);
+            } else {
+                $stmt = $pdo->prepare("
+                    INSERT INTO non_member_bookings (
+                        full_name,
+                        phone,
+                        email,
+                        service_type,
+                        dog_name,
+                        dog_size,
+                        walk_duration,
+                        preferred_walk_time,
+                        date_start,
+                        date_end,
+                        feeding_schedule,
+                        preferred_contact,
+                        notes,
+                        estimated_price,
+                        status,
+                        pricing_type,
+                        unit_price,
+                        discount_label,
+                        quantity
+                    ) VALUES (
+                        :full_name,
+                        :phone,
+                        :email,
+                        :service_type,
+                        :dog_name,
+                        :dog_size,
+                        NULL,
+                        :preferred_walk_time,
+                        :date_start,
+                        :date_end,
+                        :feeding_schedule,
+                        :preferred_contact,
+                        :notes,
+                        :estimated_price,
+                        'Requested',
+                        :pricing_type,
+                        :unit_price,
+                        :discount_label,
+                        :quantity
+                    )
+                ");
+
+                $stmt->execute([
+                    ':full_name' => $guestName,
+                    ':phone' => $guestPhone,
+                    ':email' => $guestEmail,
+                    ':service_type' => 'daycare',
+                    ':dog_name' => $dogName,
+                    ':dog_size' => $dogSize,
+                    ':preferred_walk_time' => $daycareTime,
+                    ':date_start' => $daycareStart,
+                    ':date_end' => $daycareEnd,
+                    ':feeding_schedule' => $feedingSchedule,
+                    ':preferred_contact' => $preferredContact !== '' ? $preferredContact : 'phone',
+                    ':notes' => $clientNotes,
+                    ':estimated_price' => $pricingPreview['total_price'],
+                    ':pricing_type' => $pricingPreview['pricing_type'],
+                    ':unit_price' => $pricingPreview['unit_price'],
+                    ':discount_label' => $pricingPreview['discount_label'],
+                    ':quantity' => $quantity
+                ]);
+            }
+
+            $success = 'Your daycare request has been submitted successfully.';
+        } elseif ($serviceType === 'boarding') {
+            if ($boardingStart === '' || $boardingEnd === '') {
+                throw new InvalidArgumentException('Please choose boarding check-in and check-out dates.');
+            }
+
+            if ($boardingTime === '') {
+                throw new InvalidArgumentException('Please choose a preferred check-in time.');
+            }
+
+            $quantity = dd_calculate_boarding_nights($boardingStart, $boardingEnd);
+
+            $pricingPreview = dd_get_service_pricing('boarding', $isLoggedIn, [
+                'dog_size' => $dogSize,
+                'quantity' => $quantity
+            ]);
+
+            if ($isLoggedIn) {
+                $stmt = $pdo->prepare("
+                    INSERT INTO bookings (
+                        user_id,
+                        pet_id,
+                        service_type,
+                        service_date,
+                        service_time,
+                        duration_minutes,
+                        status,
+                        access_notes,
+                        client_notes,
+                        price,
+                        is_instant_booking,
+                        pricing_type,
+                        unit_price,
+                        discount_label,
+                        quantity,
+                        end_date
+                    ) VALUES (
+                        :user_id,
+                        :pet_id,
+                        :service_type,
+                        :service_date,
+                        :service_time,
+                        NULL,
+                        'pending',
+                        :access_notes,
+                        :client_notes,
+                        :price,
+                        0,
+                        :pricing_type,
+                        :unit_price,
+                        :discount_label,
+                        :quantity,
+                        :end_date
+                    )
+                ");
+
+                $stmt->execute([
+                    ':user_id' => $userId,
+                    ':pet_id' => $petId,
+                    ':service_type' => 'boarding',
+                    ':service_date' => $boardingStart,
+                    ':service_time' => $boardingTime,
+                    ':access_notes' => $accessNotes,
+                    ':client_notes' => $clientNotes,
+                    ':price' => $pricingPreview['total_price'],
+                    ':pricing_type' => $pricingPreview['pricing_type'],
+                    ':unit_price' => $pricingPreview['unit_price'],
+                    ':discount_label' => $pricingPreview['discount_label'],
+                    ':quantity' => $quantity,
+                    ':end_date' => $boardingEnd
+                ]);
+            } else {
+                $stmt = $pdo->prepare("
+                    INSERT INTO non_member_bookings (
+                        full_name,
+                        phone,
+                        email,
+                        service_type,
+                        dog_name,
+                        dog_size,
+                        walk_duration,
+                        preferred_walk_time,
+                        date_start,
+                        date_end,
+                        feeding_schedule,
+                        preferred_contact,
+                        notes,
+                        estimated_price,
+                        status,
+                        pricing_type,
+                        unit_price,
+                        discount_label,
+                        quantity
+                    ) VALUES (
+                        :full_name,
+                        :phone,
+                        :email,
+                        :service_type,
+                        :dog_name,
+                        :dog_size,
+                        NULL,
+                        :preferred_walk_time,
+                        :date_start,
+                        :date_end,
+                        :feeding_schedule,
+                        :preferred_contact,
+                        :notes,
+                        :estimated_price,
+                        'Requested',
+                        :pricing_type,
+                        :unit_price,
+                        :discount_label,
+                        :quantity
+                    )
+                ");
+
+                $stmt->execute([
+                    ':full_name' => $guestName,
+                    ':phone' => $guestPhone,
+                    ':email' => $guestEmail,
+                    ':service_type' => 'boarding',
+                    ':dog_name' => $dogName,
+                    ':dog_size' => $dogSize,
+                    ':preferred_walk_time' => $boardingTime,
+                    ':date_start' => $boardingStart,
+                    ':date_end' => $boardingEnd,
+                    ':feeding_schedule' => $feedingSchedule,
+                    ':preferred_contact' => $preferredContact !== '' ? $preferredContact : 'phone',
+                    ':notes' => $clientNotes,
+                    ':estimated_price' => $pricingPreview['total_price'],
+                    ':pricing_type' => $pricingPreview['pricing_type'],
+                    ':unit_price' => $pricingPreview['unit_price'],
+                    ':discount_label' => $pricingPreview['discount_label'],
+                    ':quantity' => $quantity
+                ]);
+            }
+
+            $success = 'Your boarding request has been submitted successfully.';
+        }
+
+        if ($success !== '') {
+            $serviceType      = 'walk';
+            $petId            = 0;
+            $guestName        = '';
+            $guestEmail       = '';
+            $guestPhone       = '';
+            $dogName          = '';
+            $dogSize          = '';
+            $walkDate         = '';
+            $walkTime         = '';
+            $durationMinutes  = 30;
+            $daycareStart     = '';
+            $daycareEnd       = '';
+            $daycareTime      = '';
+            $boardingStart    = '';
+            $boardingEnd      = '';
+            $boardingTime     = '';
+            $feedingSchedule  = '';
+            $preferredContact = '';
+            $clientNotes      = '';
+            $accessNotes      = '';
+            $pricingPreview   = null;
+        }
+    } catch (Throwable $e) {
+        $error = $e->getMessage();
     }
+}
+
+if ($pricingPreview === null) {
+    try {
+        if ($serviceType === 'walk') {
+            $pricingPreview = dd_get_service_pricing('walk', $isLoggedIn, [
+                'duration_minutes' => $durationMinutes
+            ]);
+        } elseif ($serviceType === 'daycare' && $dogSize !== '' && $daycareStart !== '' && $daycareEnd !== '') {
+            $quantity = dd_calculate_daycare_days($daycareStart, $daycareEnd);
+            $pricingPreview = dd_get_service_pricing('daycare', $isLoggedIn, [
+                'dog_size' => $dogSize,
+                'quantity' => $quantity
+            ]);
+        } elseif ($serviceType === 'boarding' && $dogSize !== '' && $boardingStart !== '' && $boardingEnd !== '') {
+            $quantity = dd_calculate_boarding_nights($boardingStart, $boardingEnd);
+            $pricingPreview = dd_get_service_pricing('boarding', $isLoggedIn, [
+                'dog_size' => $dogSize,
+                'quantity' => $quantity
+            ]);
+        }
+    } catch (Throwable $e) {
+        $pricingPreview = null;
+    }
+}
+
+$jsPets = [];
+foreach ($pets as $pet) {
+    $jsPets[] = [
+        'id' => (int) $pet['id'],
+        'pet_name' => (string) $pet['pet_name'],
+        'size' => dd_normalize_dog_size((string) ($pet['size'] ?? ''))
+    ];
 }
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Book a Service | Doggie Dorian's</title>
-  <meta name="description" content="Book dog walking, daycare, or boarding with Doggie Dorian’s. Premium dog care, clear pricing, and an easy luxury booking experience.">
-
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Book Premium Care | Doggie Dorian's</title>
+  <meta name="description" content="Book luxury dog walks, premium daycare, and boutique boarding with Doggie Dorian’s." />
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg: #07080b;
-      --bg-soft: #0d1016;
+      --bg: #09090c;
+      --bg-2: #101016;
       --panel: rgba(255,255,255,0.05);
-      --panel-strong: rgba(255,255,255,0.08);
-      --line: rgba(255,255,255,0.10);
-      --text: #f6f1e8;
-      --muted: #c9c0af;
-      --soft: #9d968a;
-      --gold: #d7b26a;
-      --gold-light: #f0d59f;
-      --white: #ffffff;
-      --danger: #ff8d8d;
-      --success: #9fe0b1;
-      --shadow: 0 22px 65px rgba(0,0,0,0.38);
-      --max: 1280px;
+      --border: rgba(255,255,255,0.1);
+      --text: #f7f3ec;
+      --muted: #cbc3b7;
+      --soft: #9d9486;
+      --gold: #d7b56d;
+      --gold-2: #f2dba9;
+      --danger: #ff9696;
+      --success: #9de3b1;
+      --shadow: 0 24px 70px rgba(0,0,0,0.45);
+      --max: 1220px;
+      --radius: 28px;
     }
 
     body {
-      font-family: "Georgia", "Times New Roman", serif;
+      font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
       background:
-        radial-gradient(circle at top, rgba(215,178,106,0.10), transparent 25%),
-        linear-gradient(180deg, #06070a 0%, #0b0d12 45%, #06070a 100%);
+        radial-gradient(circle at top left, rgba(215,181,109,0.16), transparent 24%),
+        radial-gradient(circle at top right, rgba(242,219,169,0.08), transparent 20%),
+        linear-gradient(180deg, #09090c 0%, #101016 34%, #09090c 100%);
       color: var(--text);
       line-height: 1.6;
+      overflow-x: hidden;
     }
 
-    a {
-      color: inherit;
-      text-decoration: none;
-    }
+    a { color: inherit; text-decoration: none; }
 
     .container {
-      width: min(var(--max), calc(100% - 34px));
+      width: min(var(--max), calc(100% - 28px));
       margin: 0 auto;
     }
 
-    .site-header {
+    .topbar {
       position: sticky;
       top: 0;
-      z-index: 100;
-      backdrop-filter: blur(14px);
-      background: rgba(7, 8, 11, 0.80);
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      z-index: 1000;
+      backdrop-filter: blur(18px);
+      background: rgba(8, 8, 11, 0.72);
+      border-bottom: 1px solid rgba(255,255,255,.08);
     }
 
-    .nav-wrap {
+    .nav {
+      min-height: 84px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 20px;
-      padding: 18px 0;
-      flex-wrap: wrap;
+      gap: 18px;
     }
 
     .brand {
-      font-size: 1.18rem;
-      letter-spacing: 0.08em;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-mark {
+      width: 48px;
+      height: 48px;
+      border-radius: 15px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(242,219,169,.24), rgba(184,141,68,.72));
+      border: 1px solid rgba(255,255,255,.12);
+      color: #fff6e5;
+      font-weight: 800;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 10px 30px rgba(0,0,0,.24);
+    }
+
+    .brand-title {
+      font-size: 1.08rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .brand-subtitle {
+      font-size: 0.78rem;
+      color: var(--soft);
       text-transform: uppercase;
-      color: var(--white);
-      font-weight: 700;
+      letter-spacing: 0.1em;
     }
 
     .nav-links {
+      list-style: none;
       display: flex;
       align-items: center;
-      gap: 22px;
-      flex-wrap: wrap;
-    }
-
-    .nav-links a {
+      gap: 26px;
       color: var(--muted);
-      font-size: 0.95rem;
-      transition: 0.22s ease;
+      font-size: 0.98rem;
     }
 
-    .nav-links a:hover,
-    .nav-links a.active {
-      color: var(--gold);
-    }
+    .nav-links a:hover { color: var(--text); }
 
     .nav-actions {
       display: flex;
       align-items: center;
       gap: 12px;
-      flex-wrap: wrap;
     }
 
     .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      min-height: 50px;
+      padding: 0 22px;
       border-radius: 999px;
-      padding: 13px 22px;
-      font-size: 0.95rem;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease, background 0.22s ease;
       border: 1px solid transparent;
+      font-size: 0.96rem;
+      font-weight: 700;
       cursor: pointer;
-      text-align: center;
-      min-height: 48px;
+      transition: .18s ease;
+      white-space: nowrap;
     }
 
-    .btn:hover {
-      transform: translateY(-2px);
+    .btn:hover { transform: translateY(-1px); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--gold-2), var(--gold));
+      color: #171105;
+      box-shadow: 0 16px 38px rgba(215,181,109,.3);
     }
 
-    .btn-gold {
-      background: linear-gradient(135deg, var(--gold) 0%, var(--gold-light) 100%);
-      color: #15120d;
-      box-shadow: 0 16px 38px rgba(215,178,106,0.22);
+    .btn-secondary {
+      background: rgba(255,255,255,.05);
+      border-color: rgba(255,255,255,.14);
+      color: var(--text);
     }
 
-    .btn-outline {
-      border-color: rgba(215,178,106,0.45);
-      background: rgba(255,255,255,0.02);
-      color: var(--gold);
-    }
-
-    .btn-soft {
-      border-color: rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.03);
-      color: var(--white);
+    .btn-ghost {
+      background: transparent;
+      border-color: rgba(255,255,255,.1);
+      color: var(--muted);
     }
 
     .hero {
-      padding: 72px 0 26px;
-    }
-
-    .hero-card {
-      border-radius: 38px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
-        linear-gradient(135deg, rgba(215,178,106,0.10), rgba(255,255,255,0.02));
-      box-shadow: var(--shadow);
-      overflow: hidden;
+      padding: 40px 0 28px;
     }
 
     .hero-grid {
       display: grid;
-      grid-template-columns: 1.1fr 0.9fr;
-      gap: 28px;
-      padding: 56px;
-      align-items: start;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 22px;
+      align-items: stretch;
+    }
+
+    .panel {
+      border-radius: var(--radius);
+      padding: 28px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.03)),
+        linear-gradient(160deg, #15151b, #101015);
+      border: 1px solid rgba(255,255,255,.08);
+      box-shadow: var(--shadow);
     }
 
     .eyebrow {
-      display: inline-block;
-      padding: 8px 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px;
       border-radius: 999px;
-      border: 1px solid rgba(215,178,106,0.30);
-      background: rgba(215,178,106,0.08);
-      color: #f2d9a8;
-      font-size: 0.78rem;
-      letter-spacing: 0.14em;
+      border: 1px solid rgba(215,181,109,.24);
+      background: rgba(215,181,109,.08);
+      color: var(--gold-2);
+      font-size: 0.82rem;
+      font-weight: 700;
       text-transform: uppercase;
-      margin-bottom: 18px;
+      letter-spacing: 0.08em;
+      margin-bottom: 16px;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--gold);
+      box-shadow: 0 0 14px rgba(215,181,109,.95);
     }
 
     h1 {
-      font-size: clamp(2.6rem, 5vw, 5rem);
-      line-height: 0.96;
-      color: var(--white);
-      margin-bottom: 18px;
-      max-width: 760px;
+      font-size: clamp(2.5rem, 5vw, 4.8rem);
+      line-height: .95;
+      letter-spacing: -.06em;
+      margin-bottom: 16px;
     }
 
-    .hero-copy p {
-      font-size: 1.08rem;
+    h1 span,
+    h2,
+    h3,
+    .price-highlight {
+      color: var(--gold-2);
+    }
+
+    .lead {
       color: var(--muted);
+      font-size: 1.05rem;
       max-width: 720px;
+      margin-bottom: 24px;
     }
 
-    .hero-actions {
+    .hero-badges {
       display: flex;
-      gap: 14px;
       flex-wrap: wrap;
-      margin-top: 28px;
-    }
-
-    .hero-side {
-      display: grid;
-      gap: 14px;
-    }
-
-    .spotlight-card {
-      border-radius: 22px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.03);
-      padding: 20px;
-    }
-
-    .spotlight-card strong {
-      display: block;
-      color: var(--white);
-      font-size: 1.02rem;
-      margin-bottom: 5px;
-    }
-
-    .spotlight-card span {
-      color: var(--muted);
-      font-size: 0.95rem;
-    }
-
-    .spotlight-card.highlight {
-      border-color: rgba(215,178,106,0.26);
-      background: rgba(215,178,106,0.10);
-    }
-
-    .spotlight-price {
-      display: block;
-      font-size: 2rem;
-      color: #f5ddaf;
-      font-weight: 700;
-      line-height: 1;
-      margin-bottom: 8px;
-    }
-
-    section {
-      padding: 46px 0;
-    }
-
-    .section-head {
-      max-width: 820px;
-      margin-bottom: 28px;
-    }
-
-    .section-head h2 {
-      font-size: clamp(1.9rem, 3vw, 3rem);
-      line-height: 1.08;
-      margin-bottom: 10px;
-      color: var(--white);
-    }
-
-    .section-head p {
-      color: var(--muted);
-      font-size: 1rem;
-    }
-
-    .pricing-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 20px;
-    }
-
-    .pricing-card {
-      border-radius: 24px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.03);
-      padding: 24px;
-      box-shadow: var(--shadow);
-    }
-
-    .pricing-card h3 {
-      color: var(--white);
-      font-size: 1.35rem;
-      margin-bottom: 12px;
-    }
-
-    .pricing-list {
-      display: grid;
-      gap: 10px;
-    }
-
-    .pricing-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      padding: 12px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-      color: var(--muted);
-      font-size: 0.96rem;
-    }
-
-    .pricing-row:last-child {
-      border-bottom: none;
-    }
-
-    .pricing-row strong {
-      color: #f5ddaf;
-      white-space: nowrap;
-    }
-
-    .booking-wrap {
-      display: grid;
-      grid-template-columns: 0.95fr 1.05fr;
-      gap: 24px;
-      align-items: start;
-    }
-
-    .info-panel,
-    .form-panel {
-      border-radius: 28px;
-      border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.03);
-      box-shadow: var(--shadow);
-      padding: 28px;
-    }
-
-    .info-panel h3,
-    .form-panel h3 {
-      color: var(--white);
-      font-size: 1.6rem;
-      margin-bottom: 12px;
-    }
-
-    .info-panel p,
-    .form-panel p {
-      color: var(--muted);
-      margin-bottom: 18px;
-    }
-
-    .info-list {
-      display: grid;
       gap: 12px;
-      margin-top: 18px;
     }
 
-    .info-item {
-      border-radius: 18px;
-      padding: 16px;
-      background: rgba(215,178,106,0.08);
-      border: 1px solid rgba(215,178,106,0.16);
+    .badge {
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.1);
+      background: rgba(255,255,255,.04);
+      color: var(--text);
+      font-size: .9rem;
+      font-weight: 600;
     }
 
-    .info-item strong {
-      display: block;
-      color: var(--white);
-      margin-bottom: 4px;
-    }
-
-    .info-item span {
-      color: var(--muted);
-      font-size: 0.95rem;
-    }
-
-    .status-message {
-      border-radius: 18px;
-      padding: 15px 16px;
-      margin-bottom: 18px;
-      font-size: 0.96rem;
-    }
-
-    .status-message.success {
-      background: rgba(159,224,177,0.10);
-      border: 1px solid rgba(159,224,177,0.30);
-      color: var(--success);
-    }
-
-    .status-message.error {
-      background: rgba(255,141,141,0.10);
-      border: 1px solid rgba(255,141,141,0.30);
-      color: var(--danger);
-    }
-
-    .estimate-box {
-      border-radius: 20px;
-      padding: 16px;
-      margin-bottom: 18px;
-      background: rgba(215,178,106,0.08);
-      border: 1px solid rgba(215,178,106,0.18);
-    }
-
-    .estimate-box strong {
-      display: block;
-      color: var(--white);
-      font-size: 1rem;
-      margin-bottom: 4px;
-    }
-
-    .estimate-box span {
-      color: var(--muted);
-      font-size: 0.95rem;
-    }
-
-    .estimate-price {
-      display: block;
-      font-size: 1.8rem;
-      line-height: 1;
-      color: #f5ddaf;
-      margin-bottom: 8px;
-      font-weight: 700;
-    }
-
-    .form-grid {
+    .page-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 370px;
+      gap: 22px;
+      padding-bottom: 64px;
+    }
+
+    .section-title {
+      font-size: 1.75rem;
+      margin-bottom: 8px;
+      letter-spacing: -.03em;
+    }
+
+    .section-copy {
+      color: var(--muted);
+      margin-bottom: 22px;
+    }
+
+    .alert {
+      padding: 14px 16px;
+      border-radius: 16px;
+      margin-bottom: 18px;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+
+    .alert-success {
+      background: rgba(157,227,177,.08);
+      color: var(--success);
+      border-color: rgba(157,227,177,.2);
+    }
+
+    .alert-error {
+      background: rgba(255,150,150,.08);
+      color: var(--danger);
+      border-color: rgba(255,150,150,.2);
+    }
+
+    form {
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
     }
 
-    .field {
+    .grid-3 {
       display: grid;
-      gap: 8px;
-    }
-
-    .field.full {
-      grid-column: 1 / -1;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
     }
 
     label {
-      color: var(--white);
-      font-size: 0.94rem;
+      display: block;
+      font-size: 0.92rem;
       font-weight: 700;
+      margin-bottom: 8px;
+      color: var(--text);
     }
 
-    input,
-    select,
-    textarea {
+    input, select, textarea {
       width: 100%;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.04);
-      color: var(--text);
-      border-radius: 16px;
       padding: 14px 15px;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,.1);
+      background: rgba(255,255,255,.04);
+      color: var(--text);
       font: inherit;
       outline: none;
-      transition: border-color 0.2s ease, background 0.2s ease;
     }
 
-    input:focus,
-    select:focus,
-    textarea:focus {
-      border-color: rgba(215,178,106,0.50);
-      background: rgba(255,255,255,0.06);
+    input:focus, select:focus, textarea:focus {
+      border-color: rgba(215,181,109,.4);
+      box-shadow: 0 0 0 3px rgba(215,181,109,.08);
     }
 
     textarea {
-      min-height: 140px;
+      min-height: 120px;
       resize: vertical;
     }
 
-    .helper {
-      color: var(--soft);
-      font-size: 0.86rem;
-      margin-top: -2px;
-    }
-
-    .member-banner {
-      border-radius: 26px;
-      padding: 26px;
-      border: 1px solid rgba(215,178,106,0.22);
-      background:
-        linear-gradient(135deg, rgba(215,178,106,0.12), rgba(255,255,255,0.03));
-      box-shadow: var(--shadow);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 20px;
-      flex-wrap: wrap;
-    }
-
-    .member-banner h2 {
-      color: var(--white);
-      font-size: clamp(1.7rem, 3vw, 2.5rem);
-      line-height: 1.08;
-      margin-bottom: 8px;
-    }
-
-    .member-banner p {
-      color: var(--muted);
-      max-width: 760px;
-    }
-
-    .hidden-service-field {
+    .service-block {
       display: none;
     }
 
-    footer {
-      padding: 28px 0 48px;
-      text-align: center;
-      color: var(--soft);
-      font-size: 0.92rem;
+    .service-block.active {
+      display: block;
     }
 
-    @media (max-width: 1180px) {
+    .sidebar-card h3 {
+      font-size: 1.35rem;
+      margin-bottom: 10px;
+    }
+
+    .sidebar-card p {
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    .price-box {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      margin-bottom: 14px;
+    }
+
+    .price-box strong {
+      display: block;
+      color: var(--gold-2);
+      font-size: 1.05rem;
+      margin-bottom: 6px;
+    }
+
+    .price-box span {
+      color: var(--muted);
+      display: block;
+      font-size: .94rem;
+    }
+
+    .list {
+      list-style: none;
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .list li {
+      padding-left: 18px;
+      position: relative;
+      color: var(--text);
+    }
+
+    .list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 11px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--gold);
+    }
+
+    .footer {
+      padding: 42px 0 54px;
+      color: var(--soft);
+    }
+
+    .footer-wrap {
+      border-top: 1px solid rgba(255,255,255,.08);
+      padding-top: 26px;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 18px;
+    }
+
+    @media (max-width: 1100px) {
       .hero-grid,
-      .booking-wrap,
-      .pricing-grid {
+      .page-grid {
         grid-template-columns: 1fr;
       }
     }
 
-    @media (max-width: 860px) {
-      .nav-wrap {
-        flex-direction: column;
-        align-items: flex-start;
+    @media (max-width: 920px) {
+      .nav {
+        flex-wrap: wrap;
+        padding: 16px 0;
       }
 
-      .hero-grid {
-        padding: 34px 24px;
+      .nav-links {
+        width: 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 16px;
       }
 
-      .form-grid {
+      .grid-2,
+      .grid-3 {
         grid-template-columns: 1fr;
       }
     }
 
     @media (max-width: 640px) {
-      .container {
-        width: min(var(--max), calc(100% - 20px));
-      }
-
-      .hero {
-        padding-top: 54px;
-      }
-
-      .btn {
-        width: 100%;
-      }
-
-      .hero-actions,
       .nav-actions {
         width: 100%;
+        justify-content: space-between;
       }
 
-      .nav-actions a {
-        flex: 1;
+      .hide-mobile {
+        display: none;
       }
 
-      .pricing-card,
-      .info-panel,
-      .form-panel,
-      .member-banner,
-      .spotlight-card {
-        padding-left: 18px;
-        padding-right: 18px;
+      .panel {
+        border-radius: 20px;
       }
     }
   </style>
 </head>
 <body>
 
-  <header class="site-header">
-    <div class="container nav-wrap">
-      <a href="index.php" class="brand">Doggie Dorian's</a>
+<header class="topbar">
+  <div class="container nav">
+    <a href="index.php" class="brand" aria-label="Doggie Dorian's home">
+      <div class="brand-mark">DD</div>
+      <div>
+        <div class="brand-title">Doggie Dorian’s</div>
+        <div class="brand-subtitle">Luxury Pet Care</div>
+      </div>
+    </a>
 
-      <nav class="nav-links">
-        <a href="index.php">Home</a>
-        <a href="services.php">Services</a>
-        <a href="memberships.php">Memberships</a>
-        <a href="book-walk.php" class="active">Book</a>
-        <a href="contact.php">Contact</a>
-      </nav>
+    <ul class="nav-links">
+      <li><a href="index.php">Home</a></li>
+      <li><a href="services.php">Services</a></li>
+      <li><a href="pricing.php">Pricing</a></li>
+      <li><a href="memberships.php">Memberships</a></li>
+      <li><a href="book-walk.php">Book</a></li>
+      <li><a href="contact.php">Contact</a></li>
+    </ul>
 
-      <div class="nav-actions">
-        <?php if ($isLoggedIn): ?>
-          <a href="dashboard.php" class="btn btn-soft">Dashboard</a>
-        <?php else: ?>
-          <a href="login.php" class="btn btn-soft">Member Login</a>
-        <?php endif; ?>
-        <a href="memberships.php" class="btn btn-gold">View Memberships</a>
+    <div class="nav-actions">
+      <?php if ($isLoggedIn): ?>
+        <a href="dashboard.php" class="btn btn-secondary">Member Dashboard</a>
+      <?php else: ?>
+        <a href="login.php" class="btn btn-ghost hide-mobile">Member Login</a>
+        <a href="memberships.php" class="btn btn-primary">Become a Member</a>
+      <?php endif; ?>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="container hero-grid">
+      <div class="panel">
+        <span class="eyebrow">Book Premium Care</span>
+        <h1>Walks, daycare, and boarding <span>in one place.</span></h1>
+        <p class="lead">
+          Submit a booking request for private walks, premium daycare, or boutique boarding. Member pricing and qualifying discounts are applied automatically.
+        </p>
+
+        <div class="hero-badges">
+          <span class="badge">Member Savings</span>
+          <span class="badge">Daycare 3+ Day Discount</span>
+          <span class="badge">Boarding 5+ Night Discount</span>
+          <span class="badge">Upper East Side Priority</span>
+        </div>
+      </div>
+
+      <div class="panel sidebar-card">
+        <h3>How pricing works</h3>
+        <p>Non-members can book directly. Logged-in members automatically receive member pricing.</p>
+
+        <div class="price-box">
+          <strong>Walks</strong>
+          <span>Member pricing applies to every duration.</span>
+        </div>
+
+        <div class="price-box">
+          <strong>Daycare</strong>
+          <span>Member discount applies at 3 or more booked days.</span>
+        </div>
+
+        <div class="price-box">
+          <strong>Boarding</strong>
+          <span>Member discount applies at 5 or more booked nights.</span>
+        </div>
       </div>
     </div>
-  </header>
+  </section>
 
-  <main>
-    <section class="hero">
-      <div class="container">
-        <div class="hero-card">
-          <div class="hero-grid">
-            <div class="hero-copy">
-              <div class="eyebrow">Public Booking</div>
-              <h1>Book premium dog care with a clearer, more tailored request experience.</h1>
-              <p>
-                Request dog walking, daycare, or boarding without creating an account first. We’ll review your request, confirm availability, and follow up with next steps shortly.
-              </p>
+  <section class="container page-grid">
+    <div class="panel">
+      <h2 class="section-title">Request a Booking</h2>
+      <p class="section-copy">Choose a service, complete the details, and submit your request.</p>
 
-              <div class="hero-actions">
-                <a href="#booking-form" class="btn btn-gold">Request a Booking</a>
-                <a href="memberships.php" class="btn btn-outline">See Member Pricing</a>
-              </div>
-            </div>
+      <?php if ($success !== ''): ?>
+        <div class="alert alert-success"><?php echo h($success); ?></div>
+      <?php endif; ?>
 
-            <div class="hero-side">
-              <div class="spotlight-card highlight">
-                <span class="spotlight-price">$30</span>
-                <strong>30-minute non-member walk</strong>
-                <span>Public bookings are available without requiring a membership.</span>
-              </div>
+      <?php if ($error !== ''): ?>
+        <div class="alert alert-error"><?php echo h($error); ?></div>
+      <?php endif; ?>
 
-              <div class="spotlight-card">
-                <span class="spotlight-price">$25</span>
-                <strong>Member 30-minute walk rate</strong>
-                <span>Members receive preferred pricing and stronger recurring value.</span>
-              </div>
-
-              <div class="spotlight-card">
-                <span class="spotlight-price">Fast Follow-Up</span>
-                <strong>We confirm details directly</strong>
-                <span>After your request is submitted, we review availability and reach out to finalize care details.</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <?php if ($isLoggedIn): ?>
-      <section style="padding-top: 0;">
-        <div class="container">
-          <div class="member-banner">
-            <div>
-              <h2>Already a member?</h2>
-              <p>
-                You can still use this public request form, but your dashboard is the better place for recurring care, account-specific requests, and member access.
-              </p>
-            </div>
-            <div style="display:flex; gap:12px; flex-wrap:wrap;">
-              <a href="dashboard.php" class="btn btn-gold">Go to Dashboard</a>
-              <a href="#booking-form" class="btn btn-soft">Use Public Form</a>
-            </div>
-          </div>
-        </div>
-      </section>
-    <?php endif; ?>
-
-    <section>
-      <div class="container">
-        <div class="section-head">
-          <h2>Public pricing</h2>
-          <p>
-            These are your non-member booking rates. Clients who join a membership receive preferred pricing and stronger ongoing value.
-          </p>
+      <form method="post" action="">
+        <div>
+          <label for="service_type">Service Type</label>
+          <select name="service_type" id="service_type" required>
+            <option value="walk" <?php echo $serviceType === 'walk' ? 'selected' : ''; ?>>Walk</option>
+            <option value="daycare" <?php echo $serviceType === 'daycare' ? 'selected' : ''; ?>>Daycare</option>
+            <option value="boarding" <?php echo $serviceType === 'boarding' ? 'selected' : ''; ?>>Boarding</option>
+          </select>
         </div>
 
-        <div class="pricing-grid">
-          <article class="pricing-card">
-            <h3>Walks</h3>
-            <div class="pricing-list">
-              <div class="pricing-row"><span>15-minute walk</span><strong>$23</strong></div>
-              <div class="pricing-row"><span>20-minute walk</span><strong>$25</strong></div>
-              <div class="pricing-row"><span>30-minute walk</span><strong>$30</strong></div>
-              <div class="pricing-row"><span>45-minute walk</span><strong>$38</strong></div>
-              <div class="pricing-row"><span>60-minute walk</span><strong>$42</strong></div>
-            </div>
-          </article>
-
-          <article class="pricing-card">
-            <h3>Daycare</h3>
-            <div class="pricing-list">
-              <div class="pricing-row"><span>Small dog</span><strong>$65</strong></div>
-              <div class="pricing-row"><span>Medium dog</span><strong>$85</strong></div>
-              <div class="pricing-row"><span>Large dog</span><strong>$110</strong></div>
-            </div>
-          </article>
-
-          <article class="pricing-card">
-            <h3>Boarding</h3>
-            <div class="pricing-list">
-              <div class="pricing-row"><span>Small dog</span><strong>$90 / night</strong></div>
-              <div class="pricing-row"><span>Medium dog</span><strong>$110 / night</strong></div>
-              <div class="pricing-row"><span>Large dog</span><strong>$120 / night</strong></div>
-            </div>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section id="booking-form">
-      <div class="container">
-        <div class="section-head">
-          <h2>Submit a booking request</h2>
-          <p>
-            Complete the form below and we’ll review your request, confirm availability, and follow up with next steps. The form adjusts based on the service you select.
-          </p>
-        </div>
-
-        <div class="booking-wrap">
-          <aside class="info-panel">
-            <h3>What happens next</h3>
-            <p>
-              Once your request is submitted, we review the details, check availability, and reach out to confirm the booking. Your request is not considered final until confirmed.
-            </p>
-
-            <div class="info-list">
-              <div class="info-item">
-                <strong>Easy to request</strong>
-                <span>No login is required for non-members to request service.</span>
-              </div>
-
-              <div class="info-item">
-                <strong>Tailored by service type</strong>
-                <span>Walks, daycare, and boarding each collect the details most relevant to that service.</span>
-              </div>
-
-              <div class="info-item">
-                <strong>Premium care standards</strong>
-                <span>We prioritize safety, communication, reliability, and personalized attention.</span>
-              </div>
-
-              <div class="info-item">
-                <strong>Membership path available</strong>
-                <span>Recurring clients can move into membership for preferred pricing and added value.</span>
-              </div>
-            </div>
-          </aside>
-
-          <div class="form-panel">
-            <h3>Booking request form</h3>
-            <p>Please complete the required details and submit your request.</p>
-
-            <?php if ($successMessage !== ''): ?>
-              <div class="status-message success"><?php echo htmlspecialchars($successMessage, ENT_QUOTES, 'UTF-8'); ?></div>
-            <?php endif; ?>
-
-            <?php if ($errorMessage !== ''): ?>
-              <div class="status-message error"><?php echo htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8'); ?></div>
-            <?php endif; ?>
-
-            <div class="estimate-box" id="estimate-box">
-              <strong>Estimated rate</strong>
-              <span class="estimate-price" id="estimate-price">Select a service</span>
-              <span id="estimate-detail">Choose your service details to see the estimated rate.</span>
-            </div>
-
-            <form method="post" action="book-walk.php">
-              <div class="form-grid">
-                <div class="field">
-                  <label for="full_name">Full Name *</label>
-                  <input type="text" id="full_name" name="full_name" value="<?php echo old_value('full_name'); ?>" required>
-                </div>
-
-                <div class="field">
-                  <label for="email">Email *</label>
-                  <input type="email" id="email" name="email" value="<?php echo old_value('email'); ?>" required>
-                </div>
-
-                <div class="field">
-                  <label for="phone">Phone *</label>
-                  <input type="text" id="phone" name="phone" value="<?php echo old_value('phone'); ?>" required>
-                </div>
-
-                <div class="field">
-                  <label for="pet_name">Dog's Name *</label>
-                  <input type="text" id="pet_name" name="pet_name" value="<?php echo old_value('pet_name'); ?>" required>
-                </div>
-
-                <div class="field">
-                  <label for="service_type">Service Type *</label>
-                  <select id="service_type" name="service_type" required>
-                    <option value="">Select a service</option>
-                    <option value="walk" <?php echo (old_value('service_type') === 'walk') ? 'selected' : ''; ?>>Walk</option>
-                    <option value="daycare" <?php echo (old_value('service_type') === 'daycare') ? 'selected' : ''; ?>>Daycare</option>
-                    <option value="boarding" <?php echo (old_value('service_type') === 'boarding') ? 'selected' : ''; ?>>Boarding</option>
-                  </select>
-                </div>
-
-                <div class="field">
-                  <label for="pet_size">Dog Size *</label>
-                  <select id="pet_size" name="pet_size" required>
-                    <option value="">Select a size</option>
-                    <option value="small" <?php echo (old_value('pet_size') === 'small') ? 'selected' : ''; ?>>Small</option>
-                    <option value="medium" <?php echo (old_value('pet_size') === 'medium') ? 'selected' : ''; ?>>Medium</option>
-                    <option value="large" <?php echo (old_value('pet_size') === 'large') ? 'selected' : ''; ?>>Large</option>
-                  </select>
-                </div>
-
-                <div class="field service-walk">
-                  <label for="walk_duration">Walk Duration *</label>
-                  <select id="walk_duration" name="walk_duration">
-                    <option value="">Select walk duration</option>
-                    <option value="15" <?php echo (old_value('walk_duration') === '15') ? 'selected' : ''; ?>>15 minutes</option>
-                    <option value="20" <?php echo (old_value('walk_duration') === '20') ? 'selected' : ''; ?>>20 minutes</option>
-                    <option value="30" <?php echo (old_value('walk_duration') === '30') ? 'selected' : ''; ?>>30 minutes</option>
-                    <option value="45" <?php echo (old_value('walk_duration') === '45') ? 'selected' : ''; ?>>45 minutes</option>
-                    <option value="60" <?php echo (old_value('walk_duration') === '60') ? 'selected' : ''; ?>>60 minutes</option>
-                  </select>
-                  <div class="helper">Required for walk requests.</div>
-                </div>
-
-                <div class="field service-walk service-daycare">
-                  <label for="preferred_date">Date *</label>
-                  <input type="date" id="preferred_date" name="preferred_date" value="<?php echo old_value('preferred_date'); ?>">
-                </div>
-
-                <div class="field service-walk">
-                  <label for="preferred_time">Preferred Walk Time</label>
-                  <input type="time" id="preferred_time" name="preferred_time" value="<?php echo old_value('preferred_time'); ?>">
-                </div>
-
-                <div class="field service-daycare">
-                  <label for="dropoff_time">Daycare Drop-Off Time</label>
-                  <input type="time" id="dropoff_time" name="dropoff_time" value="<?php echo old_value('dropoff_time'); ?>">
-                </div>
-
-                <div class="field service-daycare">
-                  <label for="pickup_time">Daycare Pick-Up Time</label>
-                  <input type="time" id="pickup_time" name="pickup_time" value="<?php echo old_value('pickup_time'); ?>">
-                </div>
-
-                <div class="field service-boarding">
-                  <label for="checkin_date">Boarding Check-In Date *</label>
-                  <input type="date" id="checkin_date" name="checkin_date" value="<?php echo old_value('checkin_date'); ?>">
-                </div>
-
-                <div class="field service-boarding">
-                  <label for="checkout_date">Boarding Check-Out Date *</label>
-                  <input type="date" id="checkout_date" name="checkout_date" value="<?php echo old_value('checkout_date'); ?>">
-                </div>
-
-                <div class="field service-boarding">
-                  <label for="checkin_time">Boarding Check-In Time</label>
-                  <input type="time" id="checkin_time" name="checkin_time" value="<?php echo old_value('checkin_time'); ?>">
-                </div>
-
-                <div class="field service-boarding">
-                  <label for="checkout_time">Boarding Check-Out Time</label>
-                  <input type="time" id="checkout_time" name="checkout_time" value="<?php echo old_value('checkout_time'); ?>">
-                </div>
-
-                <div class="field full service-daycare service-boarding">
-                  <label for="feeding_schedule">Feeding Schedule</label>
-                  <input type="text" id="feeding_schedule" name="feeding_schedule" value="<?php echo old_value('feeding_schedule'); ?>" placeholder="Example: Breakfast 8am, Dinner 6pm">
-                </div>
-
-                <div class="field full">
-                  <label for="notes">Additional Notes</label>
-                  <textarea id="notes" name="notes" placeholder="Share anything helpful about routines, behavior, medications, pickup details, access notes, or care preferences."><?php echo old_value('notes'); ?></textarea>
-                </div>
-
-                <div class="field full">
-                  <button type="submit" class="btn btn-gold">Submit Booking Request</button>
-                </div>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section style="padding-top: 10px; padding-bottom: 80px;">
-      <div class="container">
-        <div class="member-banner">
+        <?php if ($isLoggedIn && !empty($pets)): ?>
           <div>
-            <h2>Want better recurring value?</h2>
-            <p>
-              Non-members can book anytime here. Clients who need ongoing care can usually get stronger value, preferred walk pricing, and premium perks through a membership.
-            </p>
+            <label for="pet_id">Select Your Dog</label>
+            <select name="pet_id" id="pet_id" required>
+              <option value="">Choose a dog</option>
+              <?php foreach ($pets as $pet): ?>
+                <option value="<?php echo (int) $pet['id']; ?>" <?php echo $petId === (int) $pet['id'] ? 'selected' : ''; ?>>
+                  <?php echo h($pet['pet_name']); ?><?php echo !empty($pet['size']) ? ' (' . h($pet['size']) . ')' : ''; ?>
+                </option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+        <?php else: ?>
+          <div class="grid-3">
+            <div>
+              <label for="guest_name">Your Name</label>
+              <input type="text" name="guest_name" id="guest_name" value="<?php echo h($guestName); ?>" <?php echo !$isLoggedIn ? 'required' : ''; ?>>
+            </div>
+            <div>
+              <label for="guest_email">Email</label>
+              <input type="email" name="guest_email" id="guest_email" value="<?php echo h($guestEmail); ?>" <?php echo !$isLoggedIn ? 'required' : ''; ?>>
+            </div>
+            <div>
+              <label for="guest_phone">Phone</label>
+              <input type="text" name="guest_phone" id="guest_phone" value="<?php echo h($guestPhone); ?>" <?php echo !$isLoggedIn ? 'required' : ''; ?>>
+            </div>
           </div>
 
-          <div style="display:flex; gap:12px; flex-wrap:wrap;">
-            <a href="memberships.php" class="btn btn-gold">Explore Memberships</a>
-            <a href="services.php" class="btn btn-soft">View Services</a>
+          <div class="grid-2">
+            <div>
+              <label for="dog_name">Dog Name</label>
+              <input type="text" name="dog_name" id="dog_name" value="<?php echo h($dogName); ?>" <?php echo !$isLoggedIn ? 'required' : ''; ?>>
+            </div>
+            <div>
+              <label for="dog_size">Dog Size</label>
+              <select name="dog_size" id="dog_size" <?php echo !$isLoggedIn ? 'required' : ''; ?>>
+                <option value="">Choose size</option>
+                <option value="small" <?php echo $dogSize === 'small' ? 'selected' : ''; ?>>Small</option>
+                <option value="medium" <?php echo $dogSize === 'medium' ? 'selected' : ''; ?>>Medium</option>
+                <option value="large" <?php echo $dogSize === 'large' ? 'selected' : ''; ?>>Large</option>
+              </select>
+            </div>
+          </div>
+        <?php endif; ?>
+
+        <div id="walk-block" class="service-block <?php echo $serviceType === 'walk' ? 'active' : ''; ?>">
+          <div class="grid-3">
+            <div>
+              <label for="walk_date">Walk Date</label>
+              <input type="date" name="walk_date" id="walk_date" value="<?php echo h($walkDate); ?>">
+            </div>
+            <div>
+              <label for="walk_time">Walk Time</label>
+              <input type="time" name="walk_time" id="walk_time" value="<?php echo h($walkTime); ?>">
+            </div>
+            <div>
+              <label for="duration_minutes">Duration</label>
+              <select name="duration_minutes" id="duration_minutes">
+                <option value="15" <?php echo $durationMinutes === 15 ? 'selected' : ''; ?>>15 Minutes</option>
+                <option value="20" <?php echo $durationMinutes === 20 ? 'selected' : ''; ?>>20 Minutes</option>
+                <option value="30" <?php echo $durationMinutes === 30 ? 'selected' : ''; ?>>30 Minutes</option>
+                <option value="45" <?php echo $durationMinutes === 45 ? 'selected' : ''; ?>>45 Minutes</option>
+                <option value="60" <?php echo $durationMinutes === 60 ? 'selected' : ''; ?>>60 Minutes</option>
+              </select>
+            </div>
           </div>
         </div>
-      </div>
-    </section>
-  </main>
 
-  <footer>
-    <div class="container">
-      &copy; <?php echo date('Y'); ?> Doggie Dorian's. Luxury dog care with public booking and premium membership options.
+        <div id="daycare-block" class="service-block <?php echo $serviceType === 'daycare' ? 'active' : ''; ?>">
+          <div class="grid-3">
+            <div>
+              <label for="daycare_start">Start Date</label>
+              <input type="date" name="daycare_start" id="daycare_start" value="<?php echo h($daycareStart); ?>">
+            </div>
+            <div>
+              <label for="daycare_end">End Date</label>
+              <input type="date" name="daycare_end" id="daycare_end" value="<?php echo h($daycareEnd); ?>">
+            </div>
+            <div>
+              <label for="daycare_time">Preferred Drop-Off Time</label>
+              <input type="time" name="daycare_time" id="daycare_time" value="<?php echo h($daycareTime); ?>">
+            </div>
+          </div>
+        </div>
+
+        <div id="boarding-block" class="service-block <?php echo $serviceType === 'boarding' ? 'active' : ''; ?>">
+          <div class="grid-3">
+            <div>
+              <label for="boarding_start">Check-In Date</label>
+              <input type="date" name="boarding_start" id="boarding_start" value="<?php echo h($boardingStart); ?>">
+            </div>
+            <div>
+              <label for="boarding_end">Check-Out Date</label>
+              <input type="date" name="boarding_end" id="boarding_end" value="<?php echo h($boardingEnd); ?>">
+            </div>
+            <div>
+              <label for="boarding_time">Preferred Check-In Time</label>
+              <input type="time" name="boarding_time" id="boarding_time" value="<?php echo h($boardingTime); ?>">
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div>
+            <label for="feeding_schedule">Feeding Schedule</label>
+            <input type="text" name="feeding_schedule" id="feeding_schedule" value="<?php echo h($feedingSchedule); ?>" placeholder="Example: Breakfast 8am, Dinner 6pm">
+          </div>
+          <div>
+            <label for="preferred_contact">Preferred Contact Method</label>
+            <select name="preferred_contact" id="preferred_contact">
+              <option value="">Choose method</option>
+              <option value="phone" <?php echo $preferredContact === 'phone' ? 'selected' : ''; ?>>Phone</option>
+              <option value="email" <?php echo $preferredContact === 'email' ? 'selected' : ''; ?>>Email</option>
+              <option value="text" <?php echo $preferredContact === 'text' ? 'selected' : ''; ?>>Text</option>
+            </select>
+          </div>
+        </div>
+
+        <?php if ($isLoggedIn): ?>
+          <div>
+            <label for="access_notes">Access Notes</label>
+            <textarea name="access_notes" id="access_notes" placeholder="Building access, door instructions, concierge notes, or anything helpful..."><?php echo h($accessNotes); ?></textarea>
+          </div>
+        <?php endif; ?>
+
+        <div>
+          <label for="client_notes">Care Notes</label>
+          <textarea name="client_notes" id="client_notes" placeholder="Anything important about your dog, routine, temperament, medications, or preferences..."><?php echo h($clientNotes); ?></textarea>
+        </div>
+
+        <div>
+          <button type="submit" class="btn btn-primary">Submit Booking Request</button>
+        </div>
+      </form>
     </div>
-  </footer>
 
-  <script>
-    const serviceType = document.getElementById('service_type');
-    const petSize = document.getElementById('pet_size');
-    const walkDuration = document.getElementById('walk_duration');
+    <aside class="panel sidebar-card">
+      <h3>Booking Summary</h3>
+      <p>Your expected pricing updates as you choose service details.</p>
 
-    const preferredDate = document.getElementById('preferred_date');
-    const checkinDate = document.getElementById('checkin_date');
-    const checkoutDate = document.getElementById('checkout_date');
+      <div class="price-box">
+        <strong>Pricing Type</strong>
+        <span id="summary-pricing-type"><?php echo $pricingPreview ? h(ucwords(str_replace('_', ' ', $pricingPreview['pricing_type']))) : '—'; ?></span>
+      </div>
 
-    const estimatePrice = document.getElementById('estimate-price');
-    const estimateDetail = document.getElementById('estimate-detail');
+      <div class="price-box">
+        <strong>Unit Price</strong>
+        <span id="summary-unit-price">
+          <?php echo $pricingPreview ? h(dd_format_money((float) $pricingPreview['unit_price'])) . ' per ' . h($pricingPreview['unit_label']) : 'Choose enough details to calculate'; ?>
+        </span>
+      </div>
 
-    const walkPrices = {
-      '15': 23,
-      '20': 25,
-      '30': 30,
-      '45': 38,
-      '60': 42
-    };
-
-    const daycarePrices = {
-      'small': 65,
-      'medium': 85,
-      'large': 110
-    };
-
-    const boardingPrices = {
-      'small': 90,
-      'medium': 110,
-      'large': 120
-    };
-
-    function toggleServiceFields() {
-      const selectedService = serviceType.value;
-
-      document.querySelectorAll('.service-walk, .service-daycare, .service-boarding').forEach(field => {
-        field.classList.add('hidden-service-field');
-      });
-
-      if (selectedService === 'walk') {
-        document.querySelectorAll('.service-walk').forEach(field => field.classList.remove('hidden-service-field'));
-      }
-
-      if (selectedService === 'daycare') {
-        document.querySelectorAll('.service-daycare').forEach(field => field.classList.remove('hidden-service-field'));
-      }
-
-      if (selectedService === 'boarding') {
-        document.querySelectorAll('.service-boarding').forEach(field => field.classList.remove('hidden-service-field'));
-      }
-
-      updateEstimate();
-    }
-
-    function updateEstimate() {
-      const selectedService = serviceType.value;
-      const selectedSize = petSize.value;
-      const selectedDuration = walkDuration.value;
-
-      if (selectedService === 'walk') {
-        if (selectedDuration && walkPrices[selectedDuration]) {
-          estimatePrice.textContent = '$' + walkPrices[selectedDuration];
-          estimateDetail.textContent = selectedDuration + '-minute walk estimate for public booking.';
-        } else {
-          estimatePrice.textContent = 'Select walk duration';
-          estimateDetail.textContent = 'Choose a walk duration to see the estimated walk rate.';
-        }
-        return;
-      }
-
-      if (selectedService === 'daycare') {
-        if (selectedSize && daycarePrices[selectedSize]) {
-          estimatePrice.textContent = '$' + daycarePrices[selectedSize];
-          estimateDetail.textContent = 'Estimated daycare rate based on dog size.';
-        } else {
-          estimatePrice.textContent = 'Select dog size';
-          estimateDetail.textContent = 'Choose your dog size to see the estimated daycare rate.';
-        }
-        return;
-      }
-
-      if (selectedService === 'boarding') {
-        if (selectedSize && boardingPrices[selectedSize]) {
-          estimatePrice.textContent = '$' + boardingPrices[selectedSize] + ' / night';
-          estimateDetail.textContent = 'Estimated boarding rate per night based on dog size.';
-        } else {
-          estimatePrice.textContent = 'Select dog size';
-          estimateDetail.textContent = 'Choose your dog size to see the estimated boarding rate.';
-        }
-        return;
-      }
-
-      estimatePrice.textContent = 'Select a service';
-      estimateDetail.textContent = 'Choose your service details to see the estimated rate.';
-    }
-
-    function setMinDates() {
-      const today = new Date().toISOString().split('T')[0];
-
-      if (preferredDate) {
-        preferredDate.min = today;
-      }
-
-      if (checkinDate) {
-        checkinDate.min = today;
-      }
-
-      if (checkoutDate) {
-        checkoutDate.min = today;
-      }
-
-      if (checkinDate && checkoutDate) {
-        checkinDate.addEventListener('change', function () {
-          checkoutDate.min = checkinDate.value || today;
-          if (checkoutDate.value && checkinDate.value && checkoutDate.value < checkinDate.value) {
-            checkoutDate.value = checkinDate.value;
+      <div class="price-box">
+        <strong>Quantity</strong>
+        <span id="summary-quantity">
+          <?php
+          if ($pricingPreview) {
+              echo h((string) $pricingPreview['quantity']) . ' ' . h($pricingPreview['unit_label']) . ($pricingPreview['quantity'] !== 1 ? 's' : '');
+          } else {
+              echo '—';
           }
-        });
-      }
+          ?>
+        </span>
+      </div>
+
+      <div class="price-box">
+        <strong>Total Estimate</strong>
+        <span class="price-highlight" id="summary-total"><?php echo $pricingPreview ? h(dd_format_money((float) $pricingPreview['total_price'])) : '—'; ?></span>
+      </div>
+
+      <div class="price-box">
+        <strong>Pricing Rule</strong>
+        <span id="summary-rule"><?php echo $pricingPreview ? h(ucwords(str_replace('_', ' ', $pricingPreview['discount_label']))) : '—'; ?></span>
+      </div>
+
+      <ul class="list">
+        <li>Members automatically receive member pricing when logged in</li>
+        <li>Daycare member discount applies at 3 or more days</li>
+        <li>Boarding member discount applies at 5 or more nights</li>
+        <li>Final booking approval remains subject to availability</li>
+      </ul>
+    </aside>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="container footer-wrap">
+    <div>
+      <strong style="color: var(--text);">Doggie Dorian’s</strong><br />
+      Luxury dog walking, premium daycare & boutique boarding in Manhattan.
+    </div>
+    <div>
+      <a href="services.php">Services</a> &nbsp;•&nbsp;
+      <a href="pricing.php">Pricing</a> &nbsp;•&nbsp;
+      <a href="memberships.php">Memberships</a> &nbsp;•&nbsp;
+      <a href="contact.php">Contact</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const IS_MEMBER = <?php echo $isLoggedIn ? 'true' : 'false'; ?>;
+  const PETS = <?php echo json_encode($jsPets, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE); ?>;
+
+  const WALK_PRICES = {
+    non_member: {15: 23, 20: 25, 30: 30, 45: 38, 60: 42},
+    member: {15: 20, 20: 22, 30: 25, 45: 32, 60: 35}
+  };
+
+  const DAYCARE_PRICES = {
+    non_member: {small: 65, medium: 85, large: 110},
+    member: {small: 55, medium: 70, large: 90},
+    member_3plus: {small: 50, medium: 65, large: 82}
+  };
+
+  const BOARDING_PRICES = {
+    non_member: {small: 90, medium: 110, large: 120},
+    member: {small: 75, medium: 90, large: 100},
+    member_5plus: {small: 68, medium: 82, large: 92}
+  };
+
+  const serviceTypeSelect = document.getElementById('service_type');
+  const walkBlock = document.getElementById('walk-block');
+  const daycareBlock = document.getElementById('daycare-block');
+  const boardingBlock = document.getElementById('boarding-block');
+
+  const petIdField = document.getElementById('pet_id');
+  const dogSizeField = document.getElementById('dog_size');
+  const durationField = document.getElementById('duration_minutes');
+  const daycareStartField = document.getElementById('daycare_start');
+  const daycareEndField = document.getElementById('daycare_end');
+  const boardingStartField = document.getElementById('boarding_start');
+  const boardingEndField = document.getElementById('boarding_end');
+
+  const summaryPricingType = document.getElementById('summary-pricing-type');
+  const summaryUnitPrice = document.getElementById('summary-unit-price');
+  const summaryQuantity = document.getElementById('summary-quantity');
+  const summaryTotal = document.getElementById('summary-total');
+  const summaryRule = document.getElementById('summary-rule');
+
+  function formatMoney(amount) {
+    return '$' + Number(amount).toFixed(2);
+  }
+
+  function titleize(value) {
+    return String(value)
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, function(char) {
+        return char.toUpperCase();
+      });
+  }
+
+  function getSelectedDogSize() {
+    if (IS_MEMBER) {
+      if (!petIdField || !petIdField.value) return '';
+      const petId = Number(petIdField.value);
+      const pet = PETS.find(function(item) {
+        return Number(item.id) === petId;
+      });
+      return pet && pet.size ? pet.size : '';
     }
 
-    serviceType.addEventListener('change', toggleServiceFields);
-    petSize.addEventListener('change', updateEstimate);
-    walkDuration.addEventListener('change', updateEstimate);
+    return dogSizeField ? dogSizeField.value : '';
+  }
 
-    setMinDates();
-    toggleServiceFields();
-    updateEstimate();
-  </script>
+  function calculateInclusiveDays(startDate, endDate) {
+    if (!startDate || !endDate) return 0;
+
+    const start = new Date(startDate + 'T00:00:00');
+    const end = new Date(endDate + 'T00:00:00');
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) {
+      return 0;
+    }
+
+    const diffMs = end.getTime() - start.getTime();
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    return diffDays + 1;
+  }
+
+  function calculateNights(checkIn, checkOut) {
+    if (!checkIn || !checkOut) return 0;
+
+    const start = new Date(checkIn + 'T00:00:00');
+    const end = new Date(checkOut + 'T00:00:00');
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
+      return 0;
+    }
+
+    const diffMs = end.getTime() - start.getTime();
+    return Math.floor(diffMs / 86400000);
+  }
+
+  function renderEmptySummary(message) {
+    summaryPricingType.textContent = IS_MEMBER ? 'Member' : 'Non Member';
+    summaryUnitPrice.textContent = message || 'Choose enough details to calculate';
+    summaryQuantity.textContent = '—';
+    summaryTotal.textContent = '—';
+    summaryRule.textContent = '—';
+  }
+
+  function updateSummary() {
+    const serviceType = serviceTypeSelect.value;
+    const dogSize = getSelectedDogSize();
+    const pricingType = IS_MEMBER ? 'member' : 'non_member';
+
+    if (serviceType === 'walk') {
+      const duration = Number(durationField ? durationField.value : 0);
+      const unitPrice = WALK_PRICES[pricingType] && WALK_PRICES[pricingType][duration]
+        ? WALK_PRICES[pricingType][duration]
+        : 0;
+
+      if (!unitPrice) {
+        renderEmptySummary('Choose a valid walk duration');
+        return;
+      }
+
+      summaryPricingType.textContent = titleize(pricingType);
+      summaryUnitPrice.textContent = formatMoney(unitPrice) + ' per walk';
+      summaryQuantity.textContent = '1 walk';
+      summaryTotal.textContent = formatMoney(unitPrice);
+      summaryRule.textContent = titleize(IS_MEMBER ? 'standard_member' : 'standard_non_member');
+      return;
+    }
+
+    if (serviceType === 'daycare') {
+      const days = calculateInclusiveDays(
+        daycareStartField ? daycareStartField.value : '',
+        daycareEndField ? daycareEndField.value : ''
+      );
+
+      if (!dogSize) {
+        renderEmptySummary('Choose a dog size to calculate daycare pricing');
+        return;
+      }
+
+      if (days < 1) {
+        renderEmptySummary('Choose valid daycare dates');
+        return;
+      }
+
+      let unitPrice = 0;
+      let rule = IS_MEMBER ? 'standard_member' : 'standard_non_member';
+
+      if (IS_MEMBER && days >= 3) {
+        unitPrice = DAYCARE_PRICES.member_3plus[dogSize] || 0;
+        rule = 'member_3plus_daycare';
+      } else if (IS_MEMBER) {
+        unitPrice = DAYCARE_PRICES.member[dogSize] || 0;
+      } else {
+        unitPrice = DAYCARE_PRICES.non_member[dogSize] || 0;
+      }
+
+      if (!unitPrice) {
+        renderEmptySummary('Choose valid daycare details');
+        return;
+      }
+
+      summaryPricingType.textContent = titleize(pricingType);
+      summaryUnitPrice.textContent = formatMoney(unitPrice) + ' per day';
+      summaryQuantity.textContent = days + ' day' + (days !== 1 ? 's' : '');
+      summaryTotal.textContent = formatMoney(unitPrice * days);
+      summaryRule.textContent = titleize(rule);
+      return;
+    }
+
+    if (serviceType === 'boarding') {
+      const nights = calculateNights(
+        boardingStartField ? boardingStartField.value : '',
+        boardingEndField ? boardingEndField.value : ''
+      );
+
+      if (!dogSize) {
+        renderEmptySummary('Choose a dog size to calculate boarding pricing');
+        return;
+      }
+
+      if (nights < 1) {
+        renderEmptySummary('Choose valid boarding dates');
+        return;
+      }
+
+      let unitPrice = 0;
+      let rule = IS_MEMBER ? 'standard_member' : 'standard_non_member';
+
+      if (IS_MEMBER && nights >= 5) {
+        unitPrice = BOARDING_PRICES.member_5plus[dogSize] || 0;
+        rule = 'member_5plus_boarding';
+      } else if (IS_MEMBER) {
+        unitPrice = BOARDING_PRICES.member[dogSize] || 0;
+      } else {
+        unitPrice = BOARDING_PRICES.non_member[dogSize] || 0;
+      }
+
+      if (!unitPrice) {
+        renderEmptySummary('Choose valid boarding details');
+        return;
+      }
+
+      summaryPricingType.textContent = titleize(pricingType);
+      summaryUnitPrice.textContent = formatMoney(unitPrice) + ' per night';
+      summaryQuantity.textContent = nights + ' night' + (nights !== 1 ? 's' : '');
+      summaryTotal.textContent = formatMoney(unitPrice * nights);
+      summaryRule.textContent = titleize(rule);
+      return;
+    }
+
+    renderEmptySummary();
+  }
+
+  function toggleBlocks() {
+    const value = serviceTypeSelect.value;
+
+    walkBlock.classList.remove('active');
+    daycareBlock.classList.remove('active');
+    boardingBlock.classList.remove('active');
+
+    if (value === 'walk') {
+      walkBlock.classList.add('active');
+    } else if (value === 'daycare') {
+      daycareBlock.classList.add('active');
+    } else if (value === 'boarding') {
+      boardingBlock.classList.add('active');
+    }
+
+    updateSummary();
+  }
+
+  const watchedFields = [
+    serviceTypeSelect,
+    petIdField,
+    dogSizeField,
+    durationField,
+    daycareStartField,
+    daycareEndField,
+    boardingStartField,
+    boardingEndField,
+    document.getElementById('walk_date'),
+    document.getElementById('walk_time'),
+    document.getElementById('daycare_time'),
+    document.getElementById('boarding_time')
+  ];
+
+  watchedFields.forEach(function(field) {
+    if (!field) return;
+    field.addEventListener('change', updateSummary);
+    field.addEventListener('input', updateSummary);
+  });
+
+  serviceTypeSelect.addEventListener('change', toggleBlocks);
+
+  toggleBlocks();
+  updateSummary();
+</script>
 
 </body>
 </html>

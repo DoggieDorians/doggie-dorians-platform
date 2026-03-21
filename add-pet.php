@@ -1,57 +1,109 @@
 <?php
 session_start();
-require_once __DIR__ . '/data/config/db.php';
+require_once __DIR__ . '/db.php';
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: login.php');
     exit;
 }
 
+$userId = (int) $_SESSION['user_id'];
+
 $success = '';
 $error = '';
 
+$petName = '';
+$breed = '';
+$age = '';
+$weight = '';
+$birthday = '';
+$gender = '';
+$spayedNeutered = '';
+$status = 'Active';
+
+function h(?string $value): string
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $petName = trim($_POST['pet_name'] ?? '');
-    $breed = trim($_POST['breed'] ?? '');
-    $age = trim($_POST['age'] ?? '');
-    $weight = trim($_POST['weight'] ?? '');
-    $birthday = trim($_POST['birthday'] ?? '');
-    $gender = trim($_POST['gender'] ?? '');
-    $spayedNeutered = isset($_POST['spayed_neutered']) ? 1 : 0;
+    $petName = trim((string) ($_POST['pet_name'] ?? ''));
+    $breed = trim((string) ($_POST['breed'] ?? ''));
+    $age = trim((string) ($_POST['age'] ?? ''));
+    $weight = trim((string) ($_POST['weight'] ?? ''));
+    $birthday = trim((string) ($_POST['birthday'] ?? ''));
+    $gender = trim((string) ($_POST['gender'] ?? ''));
+    $spayedNeutered = trim((string) ($_POST['spayed_neutered'] ?? ''));
+    $status = 'Active';
 
     if ($petName === '') {
         $error = 'Please enter your dog’s name.';
+    } elseif ($breed === '') {
+        $error = 'Please enter your dog’s breed.';
+    } elseif ($age === '') {
+        $error = 'Please enter your dog’s age.';
+    } elseif (!is_numeric($age) || (int) $age < 0 || (int) $age > 40) {
+        $error = 'Please enter a valid age.';
+    } elseif ($weight === '') {
+        $error = 'Please enter your dog’s weight.';
+    } elseif ($birthday === '') {
+        $error = 'Please select your dog’s birthday.';
+    } elseif ($gender === '') {
+        $error = 'Please select your dog’s gender.';
+    } elseif ($spayedNeutered !== 'Yes' && $spayedNeutered !== 'No') {
+        $error = 'Please select whether your dog is spayed or neutered.';
     } else {
         try {
-            $stmt = $pdo->prepare("
-                INSERT INTO pets (
-                    user_id,
-                    pet_name,
-                    breed,
-                    age,
-                    weight,
-                    birthday,
-                    gender,
-                    spayed_neutered,
-                    photo_path,
-                    status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            $userCheck = $pdo->prepare("
+                SELECT id
+                FROM users
+                WHERE id = ?
+                LIMIT 1
             ");
+            $userCheck->execute([$userId]);
+            $existingUser = $userCheck->fetch(PDO::FETCH_ASSOC);
 
-            $stmt->execute([
-                $_SESSION['user_id'],
-                $petName,
-                $breed !== '' ? $breed : null,
-                $age !== '' ? (int)$age : null,
-                $weight !== '' ? $weight : null,
-                $birthday !== '' ? $birthday : null,
-                $gender !== '' ? $gender : null,
-                $spayedNeutered,
-                null,
-                'active'
-            ]);
+            if (!$existingUser) {
+                $error = 'Your account could not be verified. Please log out and log back in.';
+            } else {
+                $stmt = $pdo->prepare("
+                    INSERT INTO pets (
+                        user_id,
+                        pet_name,
+                        breed,
+                        age,
+                        weight,
+                        birthday,
+                        gender,
+                        spayed_neutered,
+                        status,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ");
 
-            $success = 'Pet profile added successfully.';
+                $stmt->execute([
+                    $userId,
+                    $petName,
+                    $breed,
+                    (int) $age,
+                    $weight,
+                    $birthday,
+                    $gender,
+                    $spayedNeutered,
+                    $status
+                ]);
+
+                $success = 'Your pet profile has been added successfully.';
+
+                $petName = '';
+                $breed = '';
+                $age = '';
+                $weight = '';
+                $birthday = '';
+                $gender = '';
+                $spayedNeutered = '';
+            }
         } catch (PDOException $e) {
             $error = 'Could not save pet profile: ' . $e->getMessage();
         }
@@ -64,158 +116,162 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Add Pet | Doggie Dorian's</title>
+    <meta name="description" content="Add your dog’s profile to your Doggie Dorian’s member account.">
     <style>
-        body {
+        * {
+            box-sizing: border-box;
             margin: 0;
-            font-family: Arial, sans-serif;
-            background: #f7f8fb;
-            color: #111;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #f4f1ec;
+            --panel: #ffffff;
+            --text: #121212;
+            --muted: #666;
+            --gold: #d7b26a;
+            --danger-bg: #fce8e8;
+            --danger-text: #a52828;
+            --success-bg: #e9f7ee;
+            --success-text: #1f7a44;
+            --shadow: 0 18px 45px rgba(0,0,0,0.08);
+            --radius: 24px;
+            --max: 860px;
+        }
+
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
         }
 
         .page {
             min-height: 100vh;
-            padding: 40px 20px;
-            box-sizing: border-box;
+            padding: 40px 20px 60px;
         }
 
         .wrap {
-            max-width: 760px;
+            max-width: var(--max);
             margin: 0 auto;
         }
 
-        .topbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 16px;
-            margin-bottom: 24px;
-            flex-wrap: wrap;
-        }
-
-        .brand {
-            font-size: 28px;
-            font-weight: 700;
-        }
-
-        .nav-links {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        .nav-links a {
-            text-decoration: none;
-            color: #111;
-            background: #fff;
-            padding: 10px 14px;
-            border-radius: 12px;
-            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
-            font-weight: 700;
-        }
-
         .card {
-            background: #fff;
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            background: var(--panel);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 36px;
+            border: 1px solid rgba(0,0,0,0.05);
         }
 
         h1 {
-            margin: 0 0 8px;
-            font-size: 34px;
+            font-size: 3rem;
+            line-height: 1;
+            margin-bottom: 10px;
+            letter-spacing: -0.02em;
         }
 
         .subtext {
-            margin: 0 0 24px;
-            color: #666;
-            line-height: 1.6;
+            color: var(--muted);
+            font-size: 1.05rem;
+            margin-bottom: 28px;
         }
 
-        .message {
-            margin-bottom: 18px;
-            padding: 14px 16px;
-            border-radius: 12px;
-            font-size: 14px;
+        .alert {
+            padding: 16px 18px;
+            border-radius: 18px;
+            margin-bottom: 22px;
+            font-size: 1rem;
         }
 
-        .error {
-            background: #ffe7e7;
-            color: #9b1111;
+        .alert-error {
+            background: var(--danger-bg);
+            color: var(--danger-text);
+            border: 1px solid #f3caca;
         }
 
-        .success {
-            background: #e8f8ea;
-            color: #146c2e;
+        .alert-success {
+            background: var(--success-bg);
+            color: var(--success-text);
+            border: 1px solid #ccebd8;
+        }
+
+        form {
+            display: grid;
+            gap: 22px;
         }
 
         .grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 18px;
+            gap: 20px;
         }
 
-        .full {
+        .field {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .field-full {
             grid-column: 1 / -1;
         }
 
         label {
-            display: block;
-            margin: 0 0 6px;
+            font-size: 0.95rem;
             font-weight: 700;
+            margin-bottom: 8px;
+            color: #111;
         }
 
         input,
         select {
             width: 100%;
-            padding: 13px 14px;
-            border: 1px solid #d9d9d9;
-            border-radius: 12px;
-            box-sizing: border-box;
-            font-size: 15px;
+            min-height: 54px;
+            padding: 14px 16px;
+            border-radius: 16px;
+            border: 1px solid #d6d1c9;
             background: #fff;
+            color: #111;
+            font-size: 1rem;
+            outline: none;
         }
 
         input:focus,
         select:focus {
-            outline: none;
-            border-color: #111;
+            border-color: var(--gold);
+            box-shadow: 0 0 0 4px rgba(215,178,106,0.15);
         }
 
-        .checkbox-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            background: #fafafa;
-            padding: 14px;
-            border-radius: 12px;
-            border: 1px solid #ececec;
-        }
-
-        .checkbox-row input {
-            width: auto;
-            margin: 0;
+        .choice-card {
+            border: 1px solid #ddd7cf;
+            border-radius: 18px;
+            background: #faf8f5;
+            padding: 18px;
         }
 
         .actions {
             display: flex;
-            gap: 12px;
-            margin-top: 24px;
+            gap: 14px;
             flex-wrap: wrap;
+            padding-top: 4px;
         }
 
         .btn {
-            display: inline-block;
-            padding: 14px 18px;
-            border-radius: 12px;
-            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 52px;
+            padding: 0 22px;
+            border-radius: 16px;
+            font-size: 1rem;
             font-weight: 700;
             border: none;
             cursor: pointer;
-            font-size: 15px;
+            text-decoration: none;
         }
 
         .btn-primary {
-            background: #111;
+            background: #0f1115;
             color: #fff;
         }
 
@@ -224,13 +280,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: #111;
         }
 
+        .helper {
+            color: var(--muted);
+            font-size: 0.92rem;
+            margin-top: 6px;
+        }
+
         @media (max-width: 720px) {
+            .page {
+                padding: 20px 12px 40px;
+            }
+
+            .card {
+                padding: 24px;
+                border-radius: 20px;
+            }
+
+            h1 {
+                font-size: 2.2rem;
+            }
+
             .grid {
                 grid-template-columns: 1fr;
             }
 
-            h1 {
-                font-size: 28px;
+            .actions .btn {
+                width: 100%;
             }
         }
     </style>
@@ -238,69 +313,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
     <div class="page">
         <div class="wrap">
-            <div class="topbar">
-                <div class="brand">Doggie Dorian’s</div>
-                <div class="nav-links">
-                    <a href="dashboard.php">Dashboard</a>
-                    <a href="book-walk.php">Book Walk</a>
-                    <a href="logout.php">Logout</a>
-                </div>
-            </div>
-
             <div class="card">
                 <h1>Add Your Dog</h1>
-                <p class="subtext">Create a polished pet profile so your care experience can feel personal, safe, and premium.</p>
+                <p class="subtext">
+                    Create a polished pet profile so your care experience can feel personal, safe, and premium.
+                </p>
 
                 <?php if ($error !== ''): ?>
-                    <div class="message error"><?php echo htmlspecialchars($error); ?></div>
+                    <div class="alert alert-error"><?php echo h($error); ?></div>
                 <?php endif; ?>
 
                 <?php if ($success !== ''): ?>
-                    <div class="message success"><?php echo htmlspecialchars($success); ?></div>
+                    <div class="alert alert-success"><?php echo h($success); ?></div>
                 <?php endif; ?>
 
                 <form method="POST" action="">
+                    <div class="field field-full">
+                        <label for="pet_name">Dog Name</label>
+                        <input type="text" id="pet_name" name="pet_name" value="<?php echo h($petName); ?>" required>
+                    </div>
+
                     <div class="grid">
-                        <div class="full">
-                            <label for="pet_name">Dog Name</label>
-                            <input type="text" id="pet_name" name="pet_name" required>
-                        </div>
-
-                        <div>
+                        <div class="field">
                             <label for="breed">Breed</label>
-                            <input type="text" id="breed" name="breed">
+                            <input type="text" id="breed" name="breed" value="<?php echo h($breed); ?>" required>
                         </div>
 
-                        <div>
+                        <div class="field">
                             <label for="age">Age</label>
-                            <input type="number" id="age" name="age" min="0" step="1">
+                            <input type="number" id="age" name="age" min="0" max="40" value="<?php echo h($age); ?>" required>
                         </div>
 
-                        <div>
+                        <div class="field">
                             <label for="weight">Weight</label>
-                            <input type="text" id="weight" name="weight" placeholder="Example: 22 lbs">
+                            <input type="text" id="weight" name="weight" placeholder="Example: 22 lbs" value="<?php echo h($weight); ?>" required>
                         </div>
 
-                        <div>
+                        <div class="field">
                             <label for="birthday">Birthday</label>
-                            <input type="date" id="birthday" name="birthday">
+                            <input type="date" id="birthday" name="birthday" value="<?php echo h($birthday); ?>" required>
                         </div>
 
-                        <div>
+                        <div class="field">
                             <label for="gender">Gender</label>
-                            <select id="gender" name="gender">
+                            <select id="gender" name="gender" required>
                                 <option value="">Select gender</option>
-                                <option value="Male">Male</option>
-                                <option value="Female">Female</option>
+                                <option value="Male" <?php echo $gender === 'Male' ? 'selected' : ''; ?>>Male</option>
+                                <option value="Female" <?php echo $gender === 'Female' ? 'selected' : ''; ?>>Female</option>
                             </select>
                         </div>
 
-                        <div class="full">
-                            <label>Spayed / Neutered</label>
-                            <div class="checkbox-row">
-                                <input type="checkbox" id="spayed_neutered" name="spayed_neutered" value="1">
-                                <label for="spayed_neutered" style="margin: 0; font-weight: 600;">Yes, this pet is spayed or neutered</label>
-                            </div>
+                        <div class="field">
+                            <label for="spayed_neutered">Spayed / Neutered</label>
+                            <select id="spayed_neutered" name="spayed_neutered" required>
+                                <option value="">Select option</option>
+                                <option value="Yes" <?php echo $spayedNeutered === 'Yes' ? 'selected' : ''; ?>>Yes</option>
+                                <option value="No" <?php echo $spayedNeutered === 'No' ? 'selected' : ''; ?>>No</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="choice-card">
+                        <strong>Profile note:</strong>
+                        <div class="helper">
+                            This profile helps us personalize care, keep records cleaner, and make future booking smoother.
                         </div>
                     </div>
 

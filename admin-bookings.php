@@ -1,1179 +1,720 @@
 <?php
-declare(strict_types=1);
+session_start();
+require_once __DIR__ . '/data/config/db.php';
 
-require_once __DIR__ . '/admin-auth.php';
-require_once __DIR__ . '/db.php';
-
-function tableExists(PDO $pdo, string $table): bool
-{
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool) $stmt->fetchColumn();
+if (!isset($_SESSION['member_id'])) {
+    header('Location: login.php');
+    exit;
 }
 
-function getTableColumns(PDO $pdo, string $table): array
+$memberId = (int) $_SESSION['member_id'];
+
+function h(?string $value): string
 {
-    try {
-        $stmt = $pdo->query("PRAGMA table_info(" . $table . ")");
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        return array_values(array_filter(array_map(static fn($row) => $row['name'] ?? '', $rows)));
-    } catch (Throwable $e) {
-        return [];
-    }
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function hasColumn(array $columns, string $column): bool
+function getPlanRate(int $duration, int $walksPerMonth): float
 {
-    return in_array($column, $columns, true);
-}
+    $memberPricing = [
+        15 => 18.00,
+        20 => 20.00,
+        30 => 25.00,
+        45 => 30.00,
+        60 => 34.00,
+    ];
 
-function formatDisplayDate(?string $date): string
-{
-    $date = trim((string) $date);
-
-    if ($date === '') {
-        return 'N/A';
-    }
-
-    $timestamp = strtotime($date);
-    if ($timestamp === false) {
-        return htmlspecialchars($date, ENT_QUOTES, 'UTF-8');
-    }
-
-    return date('F j, Y', $timestamp);
-}
-
-function formatDisplayTime(?string $time): string
-{
-    $time = trim((string) $time);
-
-    if ($time === '') {
-        return 'N/A';
-    }
-
-    $timestamp = strtotime($time);
-    if ($timestamp === false) {
-        return htmlspecialchars($time, ENT_QUOTES, 'UTF-8');
-    }
-
-    return date('g:i A', $timestamp);
-}
-
-function formatDisplayDateTime(?string $dateTime): string
-{
-    $dateTime = trim((string) $dateTime);
-
-    if ($dateTime === '') {
-        return 'N/A';
-    }
-
-    $timestamp = strtotime($dateTime);
-    if ($timestamp === false) {
-        return htmlspecialchars($dateTime, ENT_QUOTES, 'UTF-8');
-    }
-
-    return date('F j, Y \a\t g:i A', $timestamp);
-}
-
-function formatMoney(mixed $amount): string
-{
-    if ($amount === null || $amount === '') {
-        return 'N/A';
-    }
-
-    return '$' . number_format((float) $amount, 2);
-}
-
-function formatServiceName(string $service): string
-{
-    $service = trim($service);
-    if ($service === '') {
-        return 'Service';
-    }
-
-    return ucwords(str_replace(['-', '_'], ' ', $service));
-}
-
-function formatStatusClass(string $status): string
-{
-    $normalized = strtolower(trim($status));
-
-    return match ($normalized) {
-        'approved', 'confirmed', 'completed', 'active' => 'status-positive',
-        'pending', 'requested', 'scheduled', 'new' => 'status-neutral',
-        'declined', 'cancelled', 'canceled' => 'status-negative',
-        default => 'status-default',
-    };
-}
-
-function formatRequestType(string $type): string
-{
-    $type = strtolower(trim($type));
-
-    return match ($type) {
-        'cancel' => 'Cancellation Request',
-        'reschedule' => 'Reschedule Request',
-        default => ucwords(str_replace(['-', '_'], ' ', $type)),
-    };
-}
-
-function createBookingChangeRequestsTable(PDO $pdo): void
-{
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS booking_change_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            booking_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            request_type TEXT NOT NULL,
-            current_service_date TEXT,
-            current_service_time TEXT,
-            requested_service_date TEXT,
-            requested_service_time TEXT,
-            note TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'Pending',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    ");
-}
-
-function normalizeStatus(?string $status): string
-{
-    return strtolower(trim((string) $status));
-}
-
-function recordMatchesSearch(array $record, array $fields, string $search): bool
-{
-    if ($search === '') {
-        return true;
-    }
-
-    foreach ($fields as $field) {
-        $value = strtolower(trim((string) ($record[$field] ?? '')));
-        if ($value !== '' && str_contains($value, $search)) {
-            return true;
+    if ($walksPerMonth >= 12) {
+        if ($duration === 30) {
+            return 22.50;
+        }
+        if ($duration === 45) {
+            return 27.50;
+        }
+        if ($duration === 60) {
+            return 31.50;
         }
     }
 
-    return false;
+    return $memberPricing[$duration] ?? 0.00;
 }
 
-function recordMatchesStatus(array $record, string $statusField, string $statusFilter): bool
+function getStandardMemberRate(int $duration): float
 {
-    if ($statusFilter === '') {
-        return true;
-    }
+    $memberPricing = [
+        15 => 18.00,
+        20 => 20.00,
+        30 => 25.00,
+        45 => 30.00,
+        60 => 34.00,
+    ];
 
-    return normalizeStatus((string) ($record[$statusField] ?? '')) === $statusFilter;
+    return $memberPricing[$duration] ?? 0.00;
 }
 
-$successMessage = '';
-$errorMessage = '';
-$fatalError = '';
+$success = '';
+$error = '';
 
-$memberBookings = [];
-$publicBookings = [];
-$changeRequests = [];
+$dogsStmt = $pdo->prepare("
+    SELECT id, name
+    FROM dogs
+    WHERE member_id = ?
+    ORDER BY name ASC, id DESC
+");
+$dogsStmt->execute([$memberId]);
+$dogs = $dogsStmt->fetchAll(PDO::FETCH_ASSOC);
 
-$search = strtolower(trim((string) ($_GET['search'] ?? '')));
-$statusFilter = strtolower(trim((string) ($_GET['status'] ?? '')));
-$sourceFilter = strtolower(trim((string) ($_GET['source'] ?? 'all')));
+$selectedDogId = '';
+$selectedDuration = '30';
+$selectedWalks = '12';
+$notes = '';
 
-$allowedSourceFilters = ['all', 'member', 'requests', 'public'];
-if (!in_array($sourceFilter, $allowedSourceFilters, true)) {
-    $sourceFilter = 'all';
-}
+$ratePerWalk = getPlanRate((int) $selectedDuration, (int) $selectedWalks);
+$monthlyTotal = $ratePerWalk * (int) $selectedWalks;
+$standardRate = getStandardMemberRate((int) $selectedDuration);
+$monthlySavings = ($standardRate - $ratePerWalk) * (int) $selectedWalks;
 
-try {
-    $pdo = getDatabaseConnection();
-    createBookingChangeRequestsTable($pdo);
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $selectedDogId = trim((string) ($_POST['dog_id'] ?? ''));
+    $selectedDuration = trim((string) ($_POST['duration'] ?? '30'));
+    $selectedWalks = trim((string) ($_POST['walks_per_month'] ?? '12'));
+    $notes = trim((string) ($_POST['notes'] ?? ''));
 
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $actionType = trim((string) ($_POST['action_type'] ?? ''));
+    $dogId = (int) $selectedDogId;
+    $duration = (int) $selectedDuration;
+    $walksPerMonth = (int) $selectedWalks;
 
-        if ($actionType === 'update_member_booking_status') {
-            $bookingId = (int) ($_POST['booking_id'] ?? 0);
-            $newStatus = trim((string) ($_POST['new_status'] ?? ''));
+    $validDurations = [15, 20, 30, 45, 60];
 
-            $allowedStatuses = ['Requested', 'Pending', 'Scheduled', 'Confirmed', 'Completed', 'Cancelled'];
+    if (empty($dogs)) {
+        $error = 'Please add a dog to your account before creating a walking plan.';
+    } elseif ($dogId <= 0) {
+        $error = 'Please choose a dog.';
+    } elseif (!in_array($duration, $validDurations, true)) {
+        $error = 'Please choose a valid walk duration.';
+    } elseif ($walksPerMonth < 1 || $walksPerMonth > 60) {
+        $error = 'Please enter a valid number of walks per month.';
+    } else {
+        $dogCheck = $pdo->prepare("
+            SELECT id, name
+            FROM dogs
+            WHERE id = ? AND member_id = ?
+            LIMIT 1
+        ");
+        $dogCheck->execute([$dogId, $memberId]);
+        $dog = $dogCheck->fetch(PDO::FETCH_ASSOC);
 
-            if ($bookingId <= 0) {
-                $errorMessage = 'Invalid member booking ID.';
-            } elseif (!in_array($newStatus, $allowedStatuses, true)) {
-                $errorMessage = 'Invalid member booking status.';
-            } elseif (!tableExists($pdo, 'bookings')) {
-                $errorMessage = 'Bookings table not found.';
-            } else {
-                $columns = getTableColumns($pdo, 'bookings');
-
-                if (!hasColumn($columns, 'status')) {
-                    $errorMessage = 'Bookings table is missing the status column.';
-                } else {
-                    $stmt = $pdo->prepare("
-                        UPDATE bookings
-                        SET status = :status
-                        WHERE id = :id
-                    ");
-                    $stmt->execute([
-                        'status' => $newStatus,
-                        'id' => $bookingId,
-                    ]);
-
-                    $successMessage = 'Member booking status updated successfully.';
-                }
-            }
-        } elseif ($actionType === 'update_public_booking_status') {
-            $bookingId = (int) ($_POST['booking_id'] ?? 0);
-            $newStatus = trim((string) ($_POST['new_status'] ?? ''));
-
-            $allowedStatuses = ['New', 'Requested', 'Pending', 'Scheduled', 'Confirmed', 'Completed', 'Cancelled'];
-
-            if ($bookingId <= 0) {
-                $errorMessage = 'Invalid public booking ID.';
-            } elseif (!in_array($newStatus, $allowedStatuses, true)) {
-                $errorMessage = 'Invalid public booking status.';
-            } elseif (!tableExists($pdo, 'public_booking_requests')) {
-                $errorMessage = 'Public booking requests table not found.';
-            } else {
-                $columns = getTableColumns($pdo, 'public_booking_requests');
-
-                if (!hasColumn($columns, 'status')) {
-                    $errorMessage = 'Public booking requests table is missing the status column.';
-                } else {
-                    $stmt = $pdo->prepare("
-                        UPDATE public_booking_requests
-                        SET status = :status
-                        WHERE id = :id
-                    ");
-                    $stmt->execute([
-                        'status' => $newStatus,
-                        'id' => $bookingId,
-                    ]);
-
-                    $successMessage = 'Public booking status updated successfully.';
-                }
-            }
-        } elseif ($actionType === 'review_change_request') {
-            $requestId = (int) ($_POST['request_id'] ?? 0);
-            $adminAction = strtolower(trim((string) ($_POST['admin_action'] ?? '')));
-
-            if ($requestId <= 0) {
-                $errorMessage = 'Invalid change request ID.';
-            } elseif (!in_array($adminAction, ['approve', 'decline'], true)) {
-                $errorMessage = 'Invalid change request action.';
-            } else {
-                $requestStmt = $pdo->prepare("
-                    SELECT *
-                    FROM booking_change_requests
-                    WHERE id = :id
-                    LIMIT 1
-                ");
-                $requestStmt->execute(['id' => $requestId]);
-                $requestRow = $requestStmt->fetch();
-
-                if (!$requestRow) {
-                    $errorMessage = 'Change request not found.';
-                } elseif (strtolower((string) ($requestRow['status'] ?? '')) !== 'pending') {
-                    $errorMessage = 'This request has already been reviewed.';
-                } elseif (!tableExists($pdo, 'bookings')) {
-                    $errorMessage = 'Bookings table not found.';
-                } else {
-                    $bookingColumns = getTableColumns($pdo, 'bookings');
-
-                    try {
-                        $pdo->beginTransaction();
-
-                        if ($adminAction === 'approve') {
-                            $requestType = strtolower(trim((string) ($requestRow['request_type'] ?? '')));
-                            $bookingId = (int) ($requestRow['booking_id'] ?? 0);
-
-                            if ($requestType === 'cancel') {
-                                if (!hasColumn($bookingColumns, 'status')) {
-                                    throw new RuntimeException('Bookings table is missing the status column.');
-                                }
-
-                                $updateBooking = $pdo->prepare("
-                                    UPDATE bookings
-                                    SET status = :status
-                                    WHERE id = :booking_id
-                                ");
-                                $updateBooking->execute([
-                                    'status' => 'Cancelled',
-                                    'booking_id' => $bookingId,
-                                ]);
-                            } elseif ($requestType === 'reschedule') {
-                                if (!hasColumn($bookingColumns, 'service_date')) {
-                                    throw new RuntimeException('Bookings table is missing the service_date column.');
-                                }
-
-                                $requestedDate = trim((string) ($requestRow['requested_service_date'] ?? ''));
-                                $requestedTime = trim((string) ($requestRow['requested_service_time'] ?? ''));
-
-                                if ($requestedDate === '') {
-                                    throw new RuntimeException('Reschedule request is missing a requested date.');
-                                }
-
-                                $setParts = ['service_date = :service_date'];
-                                $params = [
-                                    'service_date' => $requestedDate,
-                                    'booking_id' => $bookingId,
-                                ];
-
-                                if (hasColumn($bookingColumns, 'service_time') && $requestedTime !== '') {
-                                    $setParts[] = 'service_time = :service_time';
-                                    $params['service_time'] = $requestedTime;
-                                }
-
-                                if (hasColumn($bookingColumns, 'status')) {
-                                    $setParts[] = 'status = :status';
-                                    $params['status'] = 'Scheduled';
-                                }
-
-                                $sql = "
-                                    UPDATE bookings
-                                    SET " . implode(', ', $setParts) . "
-                                    WHERE id = :booking_id
-                                ";
-
-                                $updateBooking = $pdo->prepare($sql);
-                                $updateBooking->execute($params);
-                            } else {
-                                throw new RuntimeException('Unknown request type.');
-                            }
-
-                            $updateRequest = $pdo->prepare("
-                                UPDATE booking_change_requests
-                                SET status = 'Approved'
-                                WHERE id = :id
-                            ");
-                            $updateRequest->execute(['id' => $requestId]);
-
-                            $pdo->commit();
-                            $successMessage = 'Change request approved and booking updated successfully.';
-                        } else {
-                            $updateRequest = $pdo->prepare("
-                                UPDATE booking_change_requests
-                                SET status = 'Declined'
-                                WHERE id = :id
-                            ");
-                            $updateRequest->execute(['id' => $requestId]);
-
-                            $pdo->commit();
-                            $successMessage = 'Change request declined successfully.';
-                        }
-                    } catch (Throwable $e) {
-                        if ($pdo->inTransaction()) {
-                            $pdo->rollBack();
-                        }
-                        $errorMessage = $e->getMessage();
-                    }
-                }
-            }
-        }
-    }
-
-    if (tableExists($pdo, 'bookings')) {
-        $bookingColumns = getTableColumns($pdo, 'bookings');
-        $petsColumns = tableExists($pdo, 'pets') ? getTableColumns($pdo, 'pets') : [];
-        $usersColumns = tableExists($pdo, 'users') ? getTableColumns($pdo, 'users') : [];
-        $membersColumns = tableExists($pdo, 'members') ? getTableColumns($pdo, 'members') : [];
-
-        $petJoin = '';
-        $petSelect = "NULL AS booking_pet_name";
-
-        if (
-            tableExists($pdo, 'pets') &&
-            hasColumn($bookingColumns, 'pet_id') &&
-            hasColumn($petsColumns, 'id') &&
-            hasColumn($petsColumns, 'pet_name')
-        ) {
-            $petJoin = " LEFT JOIN pets p ON b.pet_id = p.id ";
-            $petSelect = "p.pet_name AS booking_pet_name";
-        } elseif (hasColumn($bookingColumns, 'pet_name')) {
-            $petSelect = "b.pet_name AS booking_pet_name";
-        }
-
-        $memberNameSelect = "NULL AS member_full_name";
-
-        if (tableExists($pdo, 'users')) {
-            if (hasColumn($usersColumns, 'full_name') && hasColumn($usersColumns, 'id')) {
-                $memberNameSelect = "(SELECT u.full_name FROM users u WHERE u.id = b.user_id LIMIT 1) AS member_full_name";
-            } elseif (hasColumn($usersColumns, 'name') && hasColumn($usersColumns, 'id')) {
-                $memberNameSelect = "(SELECT u.name FROM users u WHERE u.id = b.user_id LIMIT 1) AS member_full_name";
-            }
-        } elseif (tableExists($pdo, 'members')) {
-            if (hasColumn($membersColumns, 'full_name') && hasColumn($membersColumns, 'id')) {
-                $memberNameSelect = "(SELECT m.full_name FROM members m WHERE m.id = b.user_id LIMIT 1) AS member_full_name";
-            } elseif (hasColumn($membersColumns, 'name') && hasColumn($membersColumns, 'id')) {
-                $memberNameSelect = "(SELECT m.name FROM members m WHERE m.id = b.user_id LIMIT 1) AS member_full_name";
-            }
-        }
-
-        $orderDate = hasColumn($bookingColumns, 'service_date') ? "date(COALESCE(b.service_date, '9999-12-31'))" : "date('9999-12-31')";
-        $orderTime = hasColumn($bookingColumns, 'service_time') ? "time(COALESCE(b.service_time, '23:59:59'))" : "time('23:59:59')";
-        $createdAtOrder = hasColumn($bookingColumns, 'created_at') ? "b.created_at DESC" : "b.id DESC";
-
-        $memberBookingsSql = "
-            SELECT
-                b.*,
-                {$petSelect},
-                {$memberNameSelect}
-            FROM bookings b
-            {$petJoin}
-            ORDER BY
-                CASE
-                    WHEN LOWER(COALESCE(b.status, '')) IN ('requested', 'pending', 'scheduled') THEN 0
-                    ELSE 1
-                END,
-                {$orderDate} ASC,
-                {$orderTime} ASC,
-                {$createdAtOrder}
-            LIMIT 250
-        ";
-
-        $memberBookings = $pdo->query($memberBookingsSql)->fetchAll();
-
-        $memberBookings = array_values(array_filter($memberBookings, function ($booking) use ($search, $statusFilter) {
-            return recordMatchesSearch($booking, [
-                'member_full_name',
-                'booking_pet_name',
-                'pet_name',
-                'service_type',
-                'email',
-                'phone'
-            ], $search) && recordMatchesStatus($booking, 'status', $statusFilter);
-        }));
-    }
-
-    if (tableExists($pdo, 'public_booking_requests')) {
-        $publicColumns = getTableColumns($pdo, 'public_booking_requests');
-
-        $dateExpr = hasColumn($publicColumns, 'preferred_date')
-            ? 'preferred_date'
-            : (hasColumn($publicColumns, 'created_at') ? 'created_at' : 'id');
-
-        $timeExpr = hasColumn($publicColumns, 'preferred_time') ? 'preferred_time' : "'23:59:59'";
-        $createdAtOrder = hasColumn($publicColumns, 'created_at') ? 'created_at DESC' : 'id DESC';
-
-        $publicSql = "
-            SELECT *
-            FROM public_booking_requests
-            ORDER BY
-                CASE
-                    WHEN LOWER(COALESCE(status, '')) IN ('new', 'requested', 'pending', 'scheduled') THEN 0
-                    ELSE 1
-                END,
-                date(COALESCE({$dateExpr}, '9999-12-31')) ASC,
-                time(COALESCE({$timeExpr}, '23:59:59')) ASC,
-                {$createdAtOrder}
-            LIMIT 250
-        ";
-
-        $publicBookings = $pdo->query($publicSql)->fetchAll();
-
-        $publicBookings = array_values(array_filter($publicBookings, function ($booking) use ($search, $statusFilter) {
-            return recordMatchesSearch($booking, [
-                'full_name',
-                'pet_name',
-                'service_type',
-                'email',
-                'phone'
-            ], $search) && recordMatchesStatus($booking, 'status', $statusFilter);
-        }));
-    }
-
-    if (tableExists($pdo, 'booking_change_requests')) {
-        $bookingColumns = tableExists($pdo, 'bookings') ? getTableColumns($pdo, 'bookings') : [];
-        $petsColumns = tableExists($pdo, 'pets') ? getTableColumns($pdo, 'pets') : [];
-        $usersColumns = tableExists($pdo, 'users') ? getTableColumns($pdo, 'users') : [];
-        $membersColumns = tableExists($pdo, 'members') ? getTableColumns($pdo, 'members') : [];
-
-        $petJoin = '';
-        $petSelect = "NULL AS booking_pet_name";
-
-        if (
-            tableExists($pdo, 'bookings') &&
-            tableExists($pdo, 'pets') &&
-            hasColumn($bookingColumns, 'pet_id') &&
-            hasColumn($petsColumns, 'id') &&
-            hasColumn($petsColumns, 'pet_name')
-        ) {
-            $petJoin = " LEFT JOIN bookings b ON b.id = r.booking_id LEFT JOIN pets p ON b.pet_id = p.id ";
-            $petSelect = "p.pet_name AS booking_pet_name";
+        if (!$dog) {
+            $error = 'That dog could not be verified for your account.';
         } else {
-            $petJoin = " LEFT JOIN bookings b ON b.id = r.booking_id ";
-            if (hasColumn($bookingColumns, 'pet_name')) {
-                $petSelect = "b.pet_name AS booking_pet_name";
+            $ratePerWalk = getPlanRate($duration, $walksPerMonth);
+            $monthlyTotal = $ratePerWalk * $walksPerMonth;
+            $standardRate = getStandardMemberRate($duration);
+            $monthlySavings = max(0, ($standardRate - $ratePerWalk) * $walksPerMonth);
+
+            try {
+                $insert = $pdo->prepare("
+                    INSERT INTO membership_walk_plans (
+                        member_id,
+                        dog_id,
+                        walk_duration,
+                        walks_per_month,
+                        rate_per_walk,
+                        monthly_total,
+                        notes,
+                        status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')
+                ");
+
+                $insert->execute([
+                    $memberId,
+                    $dogId,
+                    $duration,
+                    $walksPerMonth,
+                    $ratePerWalk,
+                    $monthlyTotal,
+                    $notes
+                ]);
+
+                $success = 'Your custom walking plan has been saved successfully.';
+                $selectedDogId = '';
+                $selectedDuration = '30';
+                $selectedWalks = '12';
+                $notes = '';
+
+                $ratePerWalk = getPlanRate((int) $selectedDuration, (int) $selectedWalks);
+                $monthlyTotal = $ratePerWalk * (int) $selectedWalks;
+                $standardRate = getStandardMemberRate((int) $selectedDuration);
+                $monthlySavings = ($standardRate - $ratePerWalk) * (int) $selectedWalks;
+            } catch (Throwable $e) {
+                $error = 'There was a problem saving your walking plan. Please try again.';
             }
         }
-
-        $memberNameSelect = "NULL AS member_full_name";
-
-        if (tableExists($pdo, 'users')) {
-            if (hasColumn($usersColumns, 'full_name') && hasColumn($usersColumns, 'id')) {
-                $memberNameSelect = "(SELECT u.full_name FROM users u WHERE u.id = r.user_id LIMIT 1) AS member_full_name";
-            } elseif (hasColumn($usersColumns, 'name') && hasColumn($usersColumns, 'id')) {
-                $memberNameSelect = "(SELECT u.name FROM users u WHERE u.id = r.user_id LIMIT 1) AS member_full_name";
-            }
-        } elseif (tableExists($pdo, 'members')) {
-            if (hasColumn($membersColumns, 'full_name') && hasColumn($membersColumns, 'id')) {
-                $memberNameSelect = "(SELECT m.full_name FROM members m WHERE m.id = r.user_id LIMIT 1) AS member_full_name";
-            } elseif (hasColumn($membersColumns, 'name') && hasColumn($membersColumns, 'id')) {
-                $memberNameSelect = "(SELECT m.name FROM members m WHERE m.id = r.user_id LIMIT 1) AS member_full_name";
-            }
-        }
-
-        $bookingServiceSelect = hasColumn($bookingColumns, 'service_type') ? "b.service_type AS booking_service_type" : "NULL AS booking_service_type";
-        $bookingStatusSelect = hasColumn($bookingColumns, 'status') ? "b.status AS booking_status" : "NULL AS booking_status";
-        $bookingPriceSelect = hasColumn($bookingColumns, 'price') ? "b.price AS booking_price" : "NULL AS booking_price";
-
-        $changeRequestsSql = "
-            SELECT
-                r.*,
-                {$petSelect},
-                {$memberNameSelect},
-                {$bookingServiceSelect},
-                {$bookingStatusSelect},
-                {$bookingPriceSelect}
-            FROM booking_change_requests r
-            {$petJoin}
-            ORDER BY
-                CASE
-                    WHEN LOWER(COALESCE(r.status, '')) = 'pending' THEN 0
-                    WHEN LOWER(COALESCE(r.status, '')) = 'approved' THEN 1
-                    ELSE 2
-                END,
-                r.created_at DESC
-            LIMIT 250
-        ";
-
-        $changeRequests = $pdo->query($changeRequestsSql)->fetchAll();
-
-        $changeRequests = array_values(array_filter($changeRequests, function ($request) use ($search, $statusFilter) {
-            return recordMatchesSearch($request, [
-                'member_full_name',
-                'booking_pet_name',
-                'booking_service_type',
-                'request_type',
-                'note'
-            ], $search) && recordMatchesStatus($request, 'status', $statusFilter);
-        }));
     }
-} catch (Throwable $e) {
-    $fatalError = $e->getMessage();
 }
-
-$showMemberSection = in_array($sourceFilter, ['all', 'member'], true);
-$showRequestsSection = in_array($sourceFilter, ['all', 'requests'], true);
-$showPublicSection = in_array($sourceFilter, ['all', 'public'], true);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Booking Management | Doggie Dorian's Admin</title>
+    <title>Customize Walking Plan | Doggie Dorian's</title>
     <style>
-        :root{
-            --bg:#0a0a0f;
-            --panel:rgba(255,255,255,0.06);
-            --border:rgba(212,175,55,0.22);
-            --gold:#d4af37;
-            --gold-soft:#f3df9b;
-            --text:#f8f5ee;
-            --muted:#b8b1a3;
-            --success:#9fe0b1;
-            --danger:#ff9d9d;
-            --shadow:0 20px 50px rgba(0,0,0,0.35);
+        * {
+            box-sizing: border-box;
         }
-        *{box-sizing:border-box}
-        body{
-            margin:0;
-            font-family:Inter, Arial, Helvetica, sans-serif;
-            color:var(--text);
+
+        :root {
+            --bg: #0b0b0e;
+            --bg-soft: #10131a;
+            --panel: #151922;
+            --panel-2: #1b2130;
+            --line: rgba(255, 255, 255, 0.08);
+            --text: #f4f1ea;
+            --muted: #a6adbb;
+            --gold: #d4af37;
+            --gold-soft: rgba(212, 175, 55, 0.15);
+            --green: #1f8f5f;
+            --red: #b84c4c;
+            --shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+            --radius: 24px;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            color: var(--text);
             background:
-                radial-gradient(circle at top left, rgba(212,175,55,0.14), transparent 28%),
-                radial-gradient(circle at top right, rgba(255,255,255,0.05), transparent 24%),
-                linear-gradient(180deg, #08080c 0%, #111119 100%);
+                radial-gradient(circle at top left, rgba(212, 175, 55, 0.08), transparent 28%),
+                linear-gradient(180deg, #090a0d 0%, #0d1016 100%);
         }
-        .admin-shell{display:grid;grid-template-columns:280px 1fr;min-height:100vh}
-        .sidebar{
-            border-right:1px solid var(--border);
-            background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));
-            padding:28px 20px;
-            position:sticky;
-            top:0;
-            height:100vh;
-            backdrop-filter:blur(10px);
+
+        .page {
+            min-height: 100vh;
+            padding: 38px 18px;
         }
-        .brand{font-size:28px;font-weight:800;letter-spacing:-0.5px;line-height:1.1;margin-bottom:10px}
-        .brand span{color:var(--gold)}
-        .tag{color:var(--muted);font-size:13px;line-height:1.6;margin-bottom:26px}
-        .nav a{
-            display:block;text-decoration:none;color:var(--text);padding:14px 16px;margin-bottom:10px;
-            border-radius:16px;background:rgba(255,255,255,0.03);border:1px solid transparent;
-            transition:.2s ease;font-weight:600;
+
+        .wrap {
+            max-width: 1180px;
+            margin: 0 auto;
         }
-        .nav a:hover,.nav a.active{
-            border-color:var(--border);
-            background:linear-gradient(180deg, rgba(212,175,55,0.12), rgba(255,255,255,0.03));
-            transform:translateY(-1px);
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 18px;
+            margin-bottom: 26px;
         }
-        .main{padding:34px}
-        .hero{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin-bottom:28px;flex-wrap:wrap}
-        .hero h1{margin:0 0 8px;font-size:40px;line-height:1;letter-spacing:-1px}
-        .hero p{margin:0;color:var(--muted);font-size:15px;max-width:760px}
-        .status-message{
-            border-radius:16px;padding:14px 16px;margin-bottom:18px;font-size:14px
+
+        .heading h1 {
+            margin: 0 0 10px;
+            font-size: 38px;
+            line-height: 1.05;
         }
-        .status-message.success{
-            background:rgba(159,224,177,0.10);
-            border:1px solid rgba(159,224,177,0.30);
-            color:var(--success);
+
+        .heading p {
+            margin: 0;
+            color: var(--muted);
+            max-width: 760px;
+            font-size: 15px;
+            line-height: 1.6;
         }
-        .status-message.error{
-            background:rgba(255,157,157,0.10);
-            border:1px solid rgba(255,157,157,0.30);
-            color:var(--danger);
+
+        .top-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
         }
-        .section-card{
-            background:var(--panel);
-            border:1px solid var(--border);
-            border-radius:24px;
-            padding:22px;
-            box-shadow:var(--shadow);
-            margin-bottom:24px;
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            padding: 12px 16px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            font-weight: 700;
+            font-size: 14px;
+            transition: 0.2s ease;
+            cursor: pointer;
         }
-        .section-card h2{
-            margin:0 0 8px;
-            font-size:28px;
-            letter-spacing:-0.4px;
+
+        .btn-primary {
+            background: var(--gold);
+            color: #111;
+            border-color: transparent;
         }
-        .section-card p{
-            margin:0 0 18px;
-            color:var(--muted);
-            font-size:14px;
-            line-height:1.6;
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            filter: brightness(1.04);
         }
-        .filter-bar{
-            display:grid;
-            grid-template-columns: 1.3fr 0.8fr 0.8fr auto;
-            gap:12px;
-            margin-bottom:24px;
+
+        .btn-secondary {
+            background: var(--panel-2);
+            color: var(--text);
         }
-        .filter-bar input,
-        .filter-bar select{
-            min-height:46px;
-            padding:12px 14px;
-            border-radius:14px;
-            border:1px solid rgba(255,255,255,0.10);
-            background:rgba(255,255,255,0.04);
-            color:var(--text);
-            font:inherit;
+
+        .btn-secondary:hover {
+            background: #242b38;
         }
-        .records{
-            display:grid;
-            gap:18px;
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 24px;
         }
-        .record-card{
-            background:rgba(255,255,255,0.03);
-            border:1px solid rgba(255,255,255,0.08);
-            border-radius:22px;
-            padding:18px;
+
+        .panel {
+            background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.015));
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 26px;
         }
-        .record-head{
-            display:flex;
-            justify-content:space-between;
-            align-items:flex-start;
-            gap:16px;
-            flex-wrap:wrap;
-            margin-bottom:14px;
+
+        .panel h2 {
+            margin: 0 0 18px;
+            font-size: 22px;
         }
-        .record-title{
-            font-size:22px;
-            font-weight:800;
-            letter-spacing:-0.3px;
-            margin-bottom:6px;
+
+        .panel p.subtext {
+            margin: -4px 0 18px;
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.6;
         }
-        .record-sub{
-            color:var(--muted);
-            font-size:14px;
+
+        .alert {
+            margin-bottom: 18px;
+            padding: 14px 16px;
+            border-radius: 14px;
+            border: 1px solid var(--line);
+            font-size: 14px;
         }
-        .status-badge{
-            display:inline-flex;
-            align-items:center;
-            gap:8px;
-            padding:10px 12px;
-            border-radius:999px;
-            font-size:12px;
-            font-weight:700;
-            text-transform:uppercase;
-            letter-spacing:1px;
-            border:1px solid rgba(255,255,255,0.12);
+
+        .alert-success {
+            background: rgba(31, 143, 95, 0.14);
+            color: #a4e5c2;
+            border-color: rgba(31, 143, 95, 0.3);
         }
-        .status-positive{
-            background:rgba(159,224,177,0.10);
-            color:var(--success);
-            border-color:rgba(159,224,177,0.24);
+
+        .alert-error {
+            background: rgba(184, 76, 76, 0.14);
+            color: #f1b7b7;
+            border-color: rgba(184, 76, 76, 0.3);
         }
-        .status-neutral{
-            background:rgba(212,175,55,0.10);
-            color:var(--gold-soft);
-            border-color:rgba(212,175,55,0.24);
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
         }
-        .status-negative{
-            background:rgba(255,157,157,0.10);
-            color:var(--danger);
-            border-color:rgba(255,157,157,0.24);
+
+        .field {
+            display: block;
         }
-        .status-default{
-            background:rgba(255,255,255,0.06);
-            color:var(--text);
-            border-color:rgba(255,255,255,0.12);
+
+        .field-full {
+            grid-column: 1 / -1;
         }
-        .details-grid{
-            display:grid;
-            grid-template-columns:repeat(4, minmax(0,1fr));
-            gap:12px;
-            margin-bottom:16px;
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
         }
-        .detail-box{
-            border-radius:16px;
-            padding:14px;
-            background:rgba(255,255,255,0.03);
-            border:1px solid rgba(255,255,255,0.08);
+
+        select,
+        input,
+        textarea {
+            width: 100%;
+            border: 1px solid var(--line);
+            background: var(--panel-2);
+            color: var(--text);
+            border-radius: 14px;
+            padding: 14px 15px;
+            outline: none;
+            font-size: 15px;
         }
-        .detail-box strong{
-            display:block;
-            color:var(--gold-soft);
-            margin-bottom:6px;
-            font-size:13px;
+
+        select:focus,
+        input:focus,
+        textarea:focus {
+            border-color: rgba(212, 175, 55, 0.42);
+            box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.08);
         }
-        .detail-box span{
-            color:var(--muted);
-            font-size:14px;
-            line-height:1.5;
+
+        textarea {
+            min-height: 120px;
+            resize: vertical;
         }
-        .request-note{
-            border-radius:18px;
-            padding:16px;
-            background:rgba(212,175,55,0.08);
-            border:1px solid rgba(212,175,55,0.16);
-            margin-bottom:16px;
+
+        .note-box {
+            margin-top: 16px;
+            padding: 14px 16px;
+            background: rgba(212, 175, 55, 0.08);
+            border: 1px solid rgba(212, 175, 55, 0.18);
+            border-radius: 16px;
+            color: #efe2ae;
+            font-size: 13px;
+            line-height: 1.6;
         }
-        .request-note strong{
-            display:block;
-            color:var(--text);
-            margin-bottom:8px;
-            font-size:14px;
+
+        .summary-card {
+            display: grid;
+            gap: 16px;
         }
-        .request-note p{
-            margin:0;
-            color:var(--muted);
-            line-height:1.6;
-            font-size:14px;
+
+        .summary-hero {
+            padding: 18px;
+            border-radius: 20px;
+            background:
+                radial-gradient(circle at top left, rgba(212, 175, 55, 0.14), transparent 45%),
+                linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.015));
+            border: 1px solid var(--line);
         }
-        .actions{
-            display:flex;
-            gap:12px;
-            flex-wrap:wrap;
-            align-items:center;
+
+        .summary-hero h3 {
+            margin: 0 0 8px;
+            font-size: 22px;
         }
-        .inline-form{
-            display:flex;
-            gap:10px;
-            flex-wrap:wrap;
-            align-items:center;
+
+        .summary-hero p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.6;
+            font-size: 14px;
         }
-        .inline-form select{
-            min-height:44px;
-            padding:10px 12px;
-            border-radius:12px;
-            border:1px solid rgba(255,255,255,0.10);
-            background:rgba(255,255,255,0.04);
-            color:var(--text);
+
+        .summary-list {
+            display: grid;
+            gap: 12px;
         }
-        .btn{
-            display:inline-flex;
-            align-items:center;
-            justify-content:center;
-            text-decoration:none;
-            border:none;
-            cursor:pointer;
-            padding:12px 16px;
-            border-radius:14px;
-            font-weight:800;
-            min-height:44px;
-            transition:.2s ease;
+
+        .summary-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: var(--panel-2);
+            border: 1px solid var(--line);
         }
-        .btn:hover{transform:translateY(-1px)}
-        .btn-primary{
-            color:#111;
-            background:linear-gradient(180deg, #f0d77a, var(--gold));
-            box-shadow:var(--shadow);
+
+        .summary-label {
+            color: var(--muted);
+            font-size: 13px;
         }
-        .btn-secondary{
-            color:var(--text);
-            background:rgba(255,255,255,0.05);
-            border:1px solid var(--border);
+
+        .summary-value {
+            font-size: 18px;
+            font-weight: 700;
+            text-align: right;
         }
-        .empty-state{
-            border:1px dashed rgba(255,255,255,0.14);
-            border-radius:24px;
-            padding:28px;
-            text-align:center;
-            color:var(--muted);
-            background:rgba(255,255,255,0.03);
+
+        .summary-total {
+            background: rgba(212, 175, 55, 0.08);
+            border-color: rgba(212, 175, 55, 0.22);
         }
-        .error-box{
-            border:1px solid rgba(255,0,0,0.25);
-            background:rgba(255,0,0,0.08);
-            padding:16px 18px;
-            border-radius:16px;
-            color:#ffd1d1;
-            white-space:pre-wrap;
-            word-break:break-word;
+
+        .summary-total .summary-value {
+            color: var(--gold);
+            font-size: 24px;
         }
-        @media (max-width: 1180px){
-            .details-grid{grid-template-columns:repeat(2, minmax(0,1fr))}
-            .filter-bar{grid-template-columns:1fr 1fr}
+
+        .summary-footnote {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.6;
+            margin-top: 4px;
         }
-        @media (max-width: 860px){
-            .admin-shell{grid-template-columns:1fr}
-            .sidebar{position:relative;height:auto;border-right:none;border-bottom:1px solid var(--border)}
-            .main{padding:20px}
-            .hero h1{font-size:32px}
-            .details-grid{grid-template-columns:1fr}
-            .filter-bar{grid-template-columns:1fr}
+
+        .submit-wrap {
+            margin-top: 22px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .empty-dogs {
+            padding: 18px;
+            border-radius: 18px;
+            background: rgba(184, 76, 76, 0.08);
+            border: 1px solid rgba(184, 76, 76, 0.22);
+            color: #efc0c0;
+            line-height: 1.6;
+        }
+
+        @media (max-width: 980px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .topbar {
+                flex-direction: column;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .heading h1 {
+                font-size: 30px;
+            }
+
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .panel {
+                padding: 20px;
+                border-radius: 20px;
+            }
+
+            .page {
+                padding: 20px 12px;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="admin-shell">
-        <aside class="sidebar">
-            <div class="brand">Doggie <span>Dorian’s</span></div>
-            <div class="tag">Premium admin control panel for bookings, revenue, memberships, walkers, and client management.</div>
+<div class="page">
+    <div class="wrap">
+        <div class="topbar">
+            <div class="heading">
+                <h1>Customize Your Walking Plan</h1>
+                <p>
+                    Build a monthly walking plan based on your dog’s needs. Member pricing is applied automatically,
+                    and discounted rates are unlocked for qualifying higher-volume monthly plans.
+                </p>
+            </div>
 
-            <nav class="nav">
-                <a href="admin-dashboard.php">Dashboard</a>
-                <a href="admin-bookings.php" class="active">Booking Management</a>
-                <a href="admin-revenue.php">Revenue Dashboard</a>
-                <a href="admin-members.php">Members</a>
-                <a href="book-walk.php">Preview Public Booking Form</a>
-                <a href="admin-logout.php">Logout</a>
-            </nav>
-        </aside>
+            <div class="top-actions">
+                <a href="dashboard.php" class="btn btn-secondary">Back to Dashboard</a>
+            </div>
+        </div>
 
-        <main class="main">
-            <?php if ($fatalError !== ''): ?>
-                <div class="error-box">
-                    <strong>System error:</strong><br>
-                    <?php echo htmlspecialchars($fatalError, ENT_QUOTES, 'UTF-8'); ?>
-                </div>
-            <?php else: ?>
-                <section class="hero">
-                    <div>
-                        <h1>Booking Management</h1>
-                        <p>Manage member bookings, public booking inquiries, and change requests from one premium operations page.</p>
+        <div class="grid">
+            <section class="panel">
+                <h2>Create Your Plan</h2>
+                <p class="subtext">
+                    Select your dog, choose the walk length you want, and decide how many walks you would like each month.
+                </p>
+
+                <?php if ($success !== ''): ?>
+                    <div class="alert alert-success"><?php echo h($success); ?></div>
+                <?php endif; ?>
+
+                <?php if ($error !== ''): ?>
+                    <div class="alert alert-error"><?php echo h($error); ?></div>
+                <?php endif; ?>
+
+                <?php if (empty($dogs)): ?>
+                    <div class="empty-dogs">
+                        You do not have any dogs on your account yet. Please add a dog first before creating a custom walking plan.
                     </div>
-                </section>
+                <?php else: ?>
+                    <form method="POST" id="walkingPlanForm">
+                        <div class="form-grid">
+                            <div class="field">
+                                <label for="dog_id">Select Dog</label>
+                                <select name="dog_id" id="dog_id" required>
+                                    <option value="">Choose your dog</option>
+                                    <?php foreach ($dogs as $dog): ?>
+                                        <option value="<?php echo (int) $dog['id']; ?>" <?php echo $selectedDogId === (string) $dog['id'] ? 'selected' : ''; ?>>
+                                            <?php echo h((string) $dog['name']); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
 
-                <?php if ($successMessage !== ''): ?>
-                    <div class="status-message success"><?php echo htmlspecialchars($successMessage, ENT_QUOTES, 'UTF-8'); ?></div>
-                <?php endif; ?>
+                            <div class="field">
+                                <label for="duration">Walk Duration</label>
+                                <select name="duration" id="duration" required>
+                                    <option value="15" <?php echo $selectedDuration === '15' ? 'selected' : ''; ?>>15 Minutes</option>
+                                    <option value="20" <?php echo $selectedDuration === '20' ? 'selected' : ''; ?>>20 Minutes</option>
+                                    <option value="30" <?php echo $selectedDuration === '30' ? 'selected' : ''; ?>>30 Minutes</option>
+                                    <option value="45" <?php echo $selectedDuration === '45' ? 'selected' : ''; ?>>45 Minutes</option>
+                                    <option value="60" <?php echo $selectedDuration === '60' ? 'selected' : ''; ?>>60 Minutes</option>
+                                </select>
+                            </div>
 
-                <?php if ($errorMessage !== ''): ?>
-                    <div class="status-message error"><?php echo htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8'); ?></div>
-                <?php endif; ?>
+                            <div class="field">
+                                <label for="walks_per_month">Walks Per Month</label>
+                                <input
+                                    type="number"
+                                    id="walks_per_month"
+                                    name="walks_per_month"
+                                    min="1"
+                                    max="60"
+                                    value="<?php echo h($selectedWalks); ?>"
+                                    required
+                                >
+                            </div>
 
-                <section class="section-card">
-                    <h2>Search & Filters</h2>
-                    <p>Search by client, dog, service, note, phone, or email and narrow results by status or source.</p>
+                            <div class="field">
+                                <label for="pricing_status">Pricing Tier</label>
+                                <input type="text" id="pricing_status" value="" readonly>
+                            </div>
 
-                    <form method="get" class="filter-bar">
-                        <input
-                            type="text"
-                            name="search"
-                            placeholder="Search client, dog, service, email, phone..."
-                            value="<?php echo htmlspecialchars((string) ($_GET['search'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"
-                        >
+                            <div class="field field-full">
+                                <label for="notes">Notes</label>
+                                <textarea
+                                    name="notes"
+                                    id="notes"
+                                    placeholder="Add any scheduling notes, preferences, or anything you want us to know."
+                                ><?php echo h($notes); ?></textarea>
+                            </div>
+                        </div>
 
-                        <select name="status">
-                            <option value="">All Statuses</option>
-                            <?php
-                            $statusOptions = ['new', 'requested', 'pending', 'scheduled', 'confirmed', 'completed', 'approved', 'declined', 'cancelled'];
-                            foreach ($statusOptions as $statusOption):
-                            ?>
-                                <option value="<?php echo htmlspecialchars($statusOption, ENT_QUOTES, 'UTF-8'); ?>" <?php echo $statusFilter === $statusOption ? 'selected' : ''; ?>>
-                                    <?php echo htmlspecialchars(ucfirst($statusOption), ENT_QUOTES, 'UTF-8'); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
+                        <div class="note-box">
+                            Plans with fewer than 12 walks per month use standard member pricing.
+                            Plans with 12 or more monthly walks unlock discounted pricing for 30, 45, and 60 minute walks.
+                        </div>
 
-                        <select name="source">
-                            <option value="all" <?php echo $sourceFilter === 'all' ? 'selected' : ''; ?>>All Sources</option>
-                            <option value="member" <?php echo $sourceFilter === 'member' ? 'selected' : ''; ?>>Member Bookings</option>
-                            <option value="requests" <?php echo $sourceFilter === 'requests' ? 'selected' : ''; ?>>Change Requests</option>
-                            <option value="public" <?php echo $sourceFilter === 'public' ? 'selected' : ''; ?>>Public Bookings</option>
-                        </select>
-
-                        <button type="submit" class="btn btn-primary">Apply Filters</button>
+                        <div class="submit-wrap">
+                            <button type="submit" class="btn btn-primary">Save My Walking Plan</button>
+                            <a href="dashboard.php" class="btn btn-secondary">Cancel</a>
+                        </div>
                     </form>
-                </section>
-
-                <?php if ($showMemberSection): ?>
-                <section class="section-card">
-                    <h2>Member Bookings</h2>
-                    <p>Update member booking statuses and keep ongoing care organized.</p>
-
-                    <?php if (!empty($memberBookings)): ?>
-                        <div class="records">
-                            <?php foreach ($memberBookings as $booking): ?>
-                                <article class="record-card">
-                                    <div class="record-head">
-                                        <div>
-                                            <div class="record-title">
-                                                <?php echo htmlspecialchars(formatServiceName((string) ($booking['service_type'] ?? 'Service')), ENT_QUOTES, 'UTF-8'); ?>
-                                            </div>
-                                            <div class="record-sub">
-                                                Member:
-                                                <?php echo htmlspecialchars((string) (($booking['member_full_name'] ?? '') !== '' ? $booking['member_full_name'] : ('User #' . ($booking['user_id'] ?? 'Unknown'))), ENT_QUOTES, 'UTF-8'); ?>
-                                                · Booking #<?php echo (int) ($booking['id'] ?? 0); ?>
-                                            </div>
-                                        </div>
-
-                                        <span class="status-badge <?php echo htmlspecialchars(formatStatusClass((string) ($booking['status'] ?? 'Unknown')), ENT_QUOTES, 'UTF-8'); ?>">
-                                            <?php echo htmlspecialchars((string) ($booking['status'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8'); ?>
-                                        </span>
-                                    </div>
-
-                                    <div class="details-grid">
-                                        <div class="detail-box">
-                                            <strong>Pet</strong>
-                                            <span><?php echo htmlspecialchars((string) (trim((string) ($booking['booking_pet_name'] ?? '')) !== '' ? $booking['booking_pet_name'] : 'Pet not specified'), ENT_QUOTES, 'UTF-8'); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Date</strong>
-                                            <span><?php echo formatDisplayDate($booking['service_date'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Time</strong>
-                                            <span><?php echo formatDisplayTime($booking['service_time'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Price</strong>
-                                            <span><?php echo formatMoney($booking['price'] ?? null); ?></span>
-                                        </div>
-                                    </div>
-
-                                    <div class="actions">
-                                        <form method="post" class="inline-form">
-                                            <input type="hidden" name="action_type" value="update_member_booking_status">
-                                            <input type="hidden" name="booking_id" value="<?php echo (int) ($booking['id'] ?? 0); ?>">
-                                            <select name="new_status">
-                                                <?php
-                                                $bookingStatuses = ['Requested', 'Pending', 'Scheduled', 'Confirmed', 'Completed', 'Cancelled'];
-                                                $currentStatus = (string) ($booking['status'] ?? 'Requested');
-                                                foreach ($bookingStatuses as $statusOption):
-                                                ?>
-                                                    <option value="<?php echo htmlspecialchars($statusOption, ENT_QUOTES, 'UTF-8'); ?>" <?php echo $currentStatus === $statusOption ? 'selected' : ''; ?>>
-                                                        <?php echo htmlspecialchars($statusOption, ENT_QUOTES, 'UTF-8'); ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                            <button type="submit" class="btn btn-primary">Update Status</button>
-                                        </form>
-                                    </div>
-                                </article>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php else: ?>
-                        <div class="empty-state">No member bookings matched your filters.</div>
-                    <?php endif; ?>
-                </section>
                 <?php endif; ?>
+            </section>
 
-                <?php if ($showRequestsSection): ?>
-                <section class="section-card">
-                    <h2>Booking Change Requests</h2>
-                    <p>Review and action cancellation and reschedule requests without leaving the booking manager.</p>
+            <aside class="panel">
+                <div class="summary-card">
+                    <div class="summary-hero">
+                        <h3>Monthly Plan Summary</h3>
+                        <p>
+                            Your plan total updates automatically based on your selected walk duration and
+                            the number of walks you want each month.
+                        </p>
+                    </div>
 
-                    <?php if (!empty($changeRequests)): ?>
-                        <div class="records">
-                            <?php foreach ($changeRequests as $request): ?>
-                                <article class="record-card">
-                                    <div class="record-head">
-                                        <div>
-                                            <div class="record-title">
-                                                <?php echo htmlspecialchars(formatRequestType((string) ($request['request_type'] ?? 'Request')), ENT_QUOTES, 'UTF-8'); ?>
-                                            </div>
-                                            <div class="record-sub">
-                                                Member:
-                                                <?php echo htmlspecialchars((string) (($request['member_full_name'] ?? '') !== '' ? $request['member_full_name'] : ('User #' . ($request['user_id'] ?? 'Unknown'))), ENT_QUOTES, 'UTF-8'); ?>
-                                                · Booking #<?php echo (int) ($request['booking_id'] ?? 0); ?>
-                                            </div>
-                                        </div>
-
-                                        <span class="status-badge <?php echo htmlspecialchars(formatStatusClass((string) ($request['status'] ?? 'Unknown')), ENT_QUOTES, 'UTF-8'); ?>">
-                                            <?php echo htmlspecialchars((string) ($request['status'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8'); ?>
-                                        </span>
-                                    </div>
-
-                                    <div class="details-grid">
-                                        <div class="detail-box">
-                                            <strong>Service</strong>
-                                            <span><?php echo htmlspecialchars(formatServiceName((string) ($request['booking_service_type'] ?? 'Service')), ENT_QUOTES, 'UTF-8'); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Pet</strong>
-                                            <span><?php echo htmlspecialchars((string) (($request['booking_pet_name'] ?? '') !== '' ? $request['booking_pet_name'] : 'Pet not specified'), ENT_QUOTES, 'UTF-8'); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Current Date</strong>
-                                            <span><?php echo formatDisplayDate($request['current_service_date'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Current Time</strong>
-                                            <span><?php echo formatDisplayTime($request['current_service_time'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Requested New Date</strong>
-                                            <span><?php echo formatDisplayDate($request['requested_service_date'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Requested New Time</strong>
-                                            <span><?php echo formatDisplayTime($request['requested_service_time'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Booking Status</strong>
-                                            <span><?php echo htmlspecialchars((string) ($request['booking_status'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8'); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Created</strong>
-                                            <span><?php echo formatDisplayDateTime($request['created_at'] ?? ''); ?></span>
-                                        </div>
-                                    </div>
-
-                                    <div class="request-note">
-                                        <strong>Member Note</strong>
-                                        <p><?php echo nl2br(htmlspecialchars((string) ($request['note'] ?? ''), ENT_QUOTES, 'UTF-8')); ?></p>
-                                    </div>
-
-                                    <div class="actions">
-                                        <?php if (strtolower((string) ($request['status'] ?? '')) === 'pending'): ?>
-                                            <form method="post" style="display:inline-flex;">
-                                                <input type="hidden" name="action_type" value="review_change_request">
-                                                <input type="hidden" name="request_id" value="<?php echo (int) ($request['id'] ?? 0); ?>">
-                                                <input type="hidden" name="admin_action" value="approve">
-                                                <button type="submit" class="btn btn-primary">Approve & Update Booking</button>
-                                            </form>
-
-                                            <form method="post" style="display:inline-flex;">
-                                                <input type="hidden" name="action_type" value="review_change_request">
-                                                <input type="hidden" name="request_id" value="<?php echo (int) ($request['id'] ?? 0); ?>">
-                                                <input type="hidden" name="admin_action" value="decline">
-                                                <button type="submit" class="btn btn-secondary">Decline</button>
-                                            </form>
-                                        <?php else: ?>
-                                            <div class="empty-state" style="padding:14px 18px; text-align:left;">
-                                                This request has already been reviewed.
-                                            </div>
-                                        <?php endif; ?>
-                                    </div>
-                                </article>
-                            <?php endforeach; ?>
+                    <div class="summary-list">
+                        <div class="summary-item">
+                            <div>
+                                <div class="summary-label">Standard Member Rate</div>
+                            </div>
+                            <div class="summary-value" id="standardRateDisplay">
+                                $<?php echo number_format($standardRate, 2); ?>
+                            </div>
                         </div>
-                    <?php else: ?>
-                        <div class="empty-state">No booking change requests matched your filters.</div>
-                    <?php endif; ?>
-                </section>
-                <?php endif; ?>
 
-                <?php if ($showPublicSection): ?>
-                <section class="section-card">
-                    <h2>Public Booking Requests</h2>
-                    <p>Review and update non-member booking inquiries from the public booking form.</p>
-
-                    <?php if (!empty($publicBookings)): ?>
-                        <div class="records">
-                            <?php foreach ($publicBookings as $booking): ?>
-                                <article class="record-card">
-                                    <div class="record-head">
-                                        <div>
-                                            <div class="record-title">
-                                                <?php echo htmlspecialchars(formatServiceName((string) ($booking['service_type'] ?? 'Service')), ENT_QUOTES, 'UTF-8'); ?>
-                                            </div>
-                                            <div class="record-sub">
-                                                Client:
-                                                <?php echo htmlspecialchars((string) ($booking['full_name'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8'); ?>
-                                                · Request #<?php echo (int) ($booking['id'] ?? 0); ?>
-                                            </div>
-                                        </div>
-
-                                        <span class="status-badge <?php echo htmlspecialchars(formatStatusClass((string) ($booking['status'] ?? 'Unknown')), ENT_QUOTES, 'UTF-8'); ?>">
-                                            <?php echo htmlspecialchars((string) ($booking['status'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8'); ?>
-                                        </span>
-                                    </div>
-
-                                    <div class="details-grid">
-                                        <div class="detail-box">
-                                            <strong>Dog</strong>
-                                            <span><?php echo htmlspecialchars((string) ($booking['pet_name'] ?? 'Not provided'), ENT_QUOTES, 'UTF-8'); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Preferred Date</strong>
-                                            <span><?php echo formatDisplayDate($booking['preferred_date'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Preferred Time</strong>
-                                            <span><?php echo formatDisplayTime($booking['preferred_time'] ?? ''); ?></span>
-                                        </div>
-
-                                        <div class="detail-box">
-                                            <strong>Phone</strong>
-                                            <span><?php echo htmlspecialchars((string) ($booking['phone'] ?? 'N/A'), ENT_QUOTES, 'UTF-8'); ?></span>
-                                        </div>
-                                    </div>
-
-                                    <div class="actions">
-                                        <form method="post" class="inline-form">
-                                            <input type="hidden" name="action_type" value="update_public_booking_status">
-                                            <input type="hidden" name="booking_id" value="<?php echo (int) ($booking['id'] ?? 0); ?>">
-                                            <select name="new_status">
-                                                <?php
-                                                $publicStatuses = ['New', 'Requested', 'Pending', 'Scheduled', 'Confirmed', 'Completed', 'Cancelled'];
-                                                $currentStatus = (string) ($booking['status'] ?? 'New');
-                                                foreach ($publicStatuses as $statusOption):
-                                                ?>
-                                                    <option value="<?php echo htmlspecialchars($statusOption, ENT_QUOTES, 'UTF-8'); ?>" <?php echo $currentStatus === $statusOption ? 'selected' : ''; ?>>
-                                                        <?php echo htmlspecialchars($statusOption, ENT_QUOTES, 'UTF-8'); ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                            <button type="submit" class="btn btn-primary">Update Status</button>
-                                        </form>
-                                    </div>
-                                </article>
-                            <?php endforeach; ?>
+                        <div class="summary-item">
+                            <div>
+                                <div class="summary-label">Your Rate Per Walk</div>
+                            </div>
+                            <div class="summary-value" id="ratePerWalkDisplay">
+                                $<?php echo number_format($ratePerWalk, 2); ?>
+                            </div>
                         </div>
-                    <?php else: ?>
-                        <div class="empty-state">No public booking requests matched your filters.</div>
-                    <?php endif; ?>
-                </section>
-                <?php endif; ?>
-            <?php endif; ?>
-        </main>
+
+                        <div class="summary-item">
+                            <div>
+                                <div class="summary-label">Walks Per Month</div>
+                            </div>
+                            <div class="summary-value" id="walksPerMonthDisplay">
+                                <?php echo (int) $selectedWalks; ?>
+                            </div>
+                        </div>
+
+                        <div class="summary-item">
+                            <div>
+                                <div class="summary-label">Monthly Savings</div>
+                            </div>
+                            <div class="summary-value" id="monthlySavingsDisplay">
+                                $<?php echo number_format(max(0, $monthlySavings), 2); ?>
+                            </div>
+                        </div>
+
+                        <div class="summary-item summary-total">
+                            <div>
+                                <div class="summary-label">Monthly Total</div>
+                            </div>
+                            <div class="summary-value" id="monthlyTotalDisplay">
+                                $<?php echo number_format($monthlyTotal, 2); ?>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="summary-footnote">
+                        Your submitted plan is saved to your account for review and future management inside the admin system.
+                    </div>
+                </div>
+            </aside>
+        </div>
     </div>
+</div>
+
+<script>
+(function () {
+    const durationEl = document.getElementById('duration');
+    const walksEl = document.getElementById('walks_per_month');
+    const ratePerWalkDisplay = document.getElementById('ratePerWalkDisplay');
+    const standardRateDisplay = document.getElementById('standardRateDisplay');
+    const walksPerMonthDisplay = document.getElementById('walksPerMonthDisplay');
+    const monthlySavingsDisplay = document.getElementById('monthlySavingsDisplay');
+    const monthlyTotalDisplay = document.getElementById('monthlyTotalDisplay');
+    const pricingStatus = document.getElementById('pricing_status');
+
+    if (!durationEl || !walksEl) {
+        return;
+    }
+
+    const standardMemberPricing = {
+        15: 18.00,
+        20: 20.00,
+        30: 25.00,
+        45: 30.00,
+        60: 34.00
+    };
+
+    function getRate(duration, walksPerMonth) {
+        if (walksPerMonth >= 12) {
+            if (duration === 30) return 22.50;
+            if (duration === 45) return 27.50;
+            if (duration === 60) return 31.50;
+        }
+
+        return standardMemberPricing[duration] || 0;
+    }
+
+    function formatMoney(amount) {
+        return '$' + Number(amount).toFixed(2);
+    }
+
+    function updatePricing() {
+        const duration = parseInt(durationEl.value || '30', 10);
+        const walksPerMonth = parseInt(walksEl.value || '0', 10);
+
+        const standardRate = standardMemberPricing[duration] || 0;
+        const rate = getRate(duration, walksPerMonth);
+        const total = rate * walksPerMonth;
+        const savings = Math.max(0, (standardRate - rate) * walksPerMonth);
+
+        standardRateDisplay.textContent = formatMoney(standardRate);
+        ratePerWalkDisplay.textContent = formatMoney(rate);
+        walksPerMonthDisplay.textContent = walksPerMonth > 0 ? walksPerMonth : 0;
+        monthlySavingsDisplay.textContent = formatMoney(savings);
+        monthlyTotalDisplay.textContent = formatMoney(total);
+
+        if (walksPerMonth >= 12 && (duration === 30 || duration === 45 || duration === 60)) {
+            pricingStatus.value = 'High-Volume Member Rate';
+        } else {
+            pricingStatus.value = 'Standard Member Rate';
+        }
+    }
+
+    durationEl.addEventListener('change', updatePricing);
+    walksEl.addEventListener('input', updatePricing);
+
+    updatePricing();
+})();
+</script>
 </body>
 </html>

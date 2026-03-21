@@ -3,24 +3,18 @@ declare(strict_types=1);
 
 function getDatabaseConnection(): PDO
 {
-    $possiblePaths = [
-        __DIR__ . '/data/members.sqlite',
-        __DIR__ . '/data/database.sqlite',
-        __DIR__ . '/database.sqlite',
-        __DIR__ . '/data/site.sqlite',
-        __DIR__ . '/members.sqlite',
-    ];
+    $dbPath = __DIR__ . '/data/members.sqlite';
 
-    foreach ($possiblePaths as $path) {
-        if (file_exists($path)) {
-            $pdo = new PDO('sqlite:' . $path);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-            return $pdo;
-        }
+    if (!file_exists($dbPath)) {
+        throw new RuntimeException('Database file not found at: ' . $dbPath);
     }
 
-    throw new RuntimeException(
-        'Database file not found. Checked: ' . implode(' | ', $possiblePaths)
-    );
+    $pdo = new PDO('sqlite:' . $dbPath);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    $pdo->exec('PRAGMA foreign_keys = ON;');
+
+    return $pdo;
 }
+
+$pdo = getDatabaseConnection();

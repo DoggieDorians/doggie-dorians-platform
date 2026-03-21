@@ -1,6 +1,6 @@
 <?php
 session_start();
-require_once __DIR__ . '/data/config/db.php';
+require_once __DIR__ . '/db.php';
 
 if (isset($_SESSION['user_id'])) {
     if (($_SESSION['role'] ?? 'member') === 'admin') {
@@ -12,37 +12,45 @@ if (isset($_SESSION['user_id'])) {
 }
 
 $error = '';
+$identifier = '';
+
+function h(?string $value): string
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
+    $identifier = trim((string) ($_POST['identifier'] ?? ''));
+    $password = (string) ($_POST['password'] ?? '');
 
-    if ($email === '' || $password === '') {
+    if ($identifier === '' || $password === '') {
         $error = 'Please enter your email and password.';
     } else {
         try {
             $stmt = $pdo->prepare("
-                SELECT id, full_name, email, password_hash, role, status
+                SELECT id, full_name, email, phone, password_hash, role, status
                 FROM users
-                WHERE email = ?
+                WHERE email = :identifier OR phone = :identifier
                 LIMIT 1
             ");
-            $stmt->execute([$email]);
-            $user = $stmt->fetch();
+            $stmt->execute(['identifier' => $identifier]);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$user) {
-                $error = 'No account was found with that email address.';
-            } elseif ($user['status'] !== 'active') {
+                $error = 'No account was found with that email or phone.';
+            } elseif (($user['status'] ?? '') !== 'active') {
                 $error = 'This account is not active. Please contact support.';
-            } elseif (!password_verify($password, $user['password_hash'])) {
+            } elseif (!password_verify($password, (string) ($user['password_hash'] ?? ''))) {
                 $error = 'Incorrect password. Please try again.';
             } else {
-                $_SESSION['user_id'] = $user['id'];
-                $_SESSION['full_name'] = $user['full_name'];
-                $_SESSION['email'] = $user['email'];
-                $_SESSION['role'] = $user['role'];
+                session_regenerate_id(true);
 
-                if ($user['role'] === 'admin') {
+                $_SESSION['user_id'] = (int) $user['id'];
+                $_SESSION['full_name'] = (string) ($user['full_name'] ?? 'Member');
+                $_SESSION['email'] = (string) ($user['email'] ?? '');
+                $_SESSION['role'] = (string) ($user['role'] ?? 'member');
+
+                if (($_SESSION['role'] ?? 'member') === 'admin') {
                     header('Location: admin.php');
                 } else {
                     header('Location: dashboard.php');
@@ -170,12 +178,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <p class="subtext">Log in to access your Doggie Dorian’s account.</p>
 
             <?php if ($error !== ''): ?>
-                <div class="message error"><?php echo htmlspecialchars($error); ?></div>
+                <div class="message error"><?php echo h($error); ?></div>
             <?php endif; ?>
 
             <form method="POST" action="">
-                <label for="email">Email Address</label>
-                <input type="email" id="email" name="email" required>
+                <label for="identifier">Email or Phone</label>
+                <input type="text" id="identifier" name="identifier" value="<?php echo h($identifier); ?>" required>
 
                 <label for="password">Password</label>
                 <input type="password" id="password" name="password" required>
