@@ -1,0 +1,369 @@
+:root {
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #f4efe7;
+  background: #0f0f10;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body,
+html,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: linear-gradient(180deg, #111214 0%, #17181b 100%);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* ================= APP SHELL ================= */
+
+.app-shell {
+  min-height: 100vh;
+  max-width: 520px;
+  margin: 0 auto;
+  background:
+    radial-gradient(circle at top, rgba(201, 169, 97, 0.12), transparent 28%),
+    linear-gradient(180deg, #111214 0%, #17181b 100%);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ================= AUTH ================= */
+
+.auth-shell {
+  justify-content: center;
+  padding: 24px;
+}
+
+.auth-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(201, 169, 97, 0.16);
+  border-radius: 24px;
+  padding: 24px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+}
+
+.brand-block {
+  margin-bottom: 20px;
+}
+
+.eyebrow {
+  color: #c9a961;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+}
+
+.auth-card h1,
+.hero-card h1,
+.center-screen h2,
+.top-header h2 {
+  margin: 0 0 10px;
+}
+
+.muted {
+  color: rgba(244, 239, 231, 0.72);
+  line-height: 1.5;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-form label {
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+  color: #f4efe7;
+}
+
+.auth-form input,
+.app-select,
+.app-textarea {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  padding: 14px 16px;
+  border-radius: 14px;
+  outline: none;
+}
+
+.auth-form input:focus,
+.app-select:focus,
+.app-textarea:focus {
+  border-color: rgba(201, 169, 97, 0.5);
+}
+
+/* ================= BUTTONS ================= */
+
+.primary-btn,
+.secondary-btn,
+.ghost-btn,
+.inline-btn,
+.nav-btn {
+  border: none;
+  border-radius: 14px;
+  padding: 13px 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.primary-btn {
+  background: linear-gradient(135deg, #c9a961 0%, #e5c987 100%);
+  color: #111214;
+  font-weight: 700;
+}
+
+.primary-btn:hover {
+  transform: translateY(-1px);
+  opacity: 0.95;
+}
+
+.secondary-btn {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.secondary-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ghost-btn,
+.inline-btn,
+.nav-btn {
+  background: transparent;
+  color: #f4efe7;
+}
+
+.inline-btn {
+  font-size: 13px;
+  color: #c9a961;
+}
+
+/* ================= STATES ================= */
+
+.error-box {
+  background: rgba(255, 77, 77, 0.12);
+  border: 1px solid rgba(255, 77, 77, 0.22);
+  color: #ffd2d2;
+  padding: 12px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+}
+
+.success-box {
+  background: rgba(71, 184, 129, 0.12);
+  border: 1px solid rgba(71, 184, 129, 0.22);
+  color: #b9f3d2;
+  padding: 12px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+}
+
+/* ================= HEADER ================= */
+
+.top-header {
+  padding: 20px 18px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ================= MAIN ================= */
+
+.main-content {
+  flex: 1;
+  padding: 10px 16px 90px;
+}
+
+.tab-screen {
+  display: grid;
+  gap: 16px;
+}
+
+/* ================= CARDS ================= */
+
+.hero-card,
+.panel-card,
+.stat-card,
+.booking-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(201, 169, 97, 0.12);
+  border-radius: 22px;
+  padding: 18px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+}
+
+.hero-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* ================= STATS ================= */
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.stat-card {
+  display: grid;
+  gap: 6px;
+}
+
+.stat-card strong {
+  font-size: 24px;
+}
+
+.stat-label {
+  color: rgba(244, 239, 231, 0.68);
+  font-size: 13px;
+}
+
+/* ================= BOOKINGS ================= */
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.booking-list {
+  display: grid;
+  gap: 12px;
+}
+
+.booking-card-top {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.booking-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.booking-meta span,
+.account-item span {
+  font-size: 12px;
+  color: rgba(244, 239, 231, 0.62);
+  text-transform: uppercase;
+}
+
+/* ================= STATUS ================= */
+
+.status-pill {
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.status-pending {
+  background: rgba(255, 179, 71, 0.16);
+  color: #ffd08a;
+}
+
+.status-confirmed,
+.status-approved,
+.status-active {
+  background: rgba(71, 184, 129, 0.16);
+  color: #9df0c5;
+}
+
+.status-completed {
+  background: rgba(96, 165, 250, 0.16);
+  color: #b9d8ff;
+}
+
+.status-cancelled {
+  background: rgba(255, 77, 77, 0.16);
+  color: #ffc0c0;
+}
+
+/* ================= ACCOUNT ================= */
+
+.account-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.account-item {
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 16px;
+}
+
+/* ================= NAV ================= */
+
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  width: 100%;
+  max-width: 520px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px 20px;
+  background: rgba(17, 18, 20, 0.92);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid rgba(201, 169, 97, 0.14);
+}
+
+.bottom-nav-four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.nav-btn {
+  padding: 14px 10px;
+  border-radius: 14px;
+  color: rgba(244, 239, 231, 0.72);
+}
+
+.nav-btn.active {
+  background: rgba(201, 169, 97, 0.14);
+  color: #f6deb1;
+}
+
+/* ================= LOADING ================= */
+
+.center-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
+.loader-circle {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: 4px solid rgba(201, 169, 97, 0.18);
+  border-top-color: #c9a961;
+  margin: 0 auto 18px;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

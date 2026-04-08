@@ -1,0 +1,6 @@
+{
+  "appId": "com.doggiedorians.app",
+  "appName": "Doggie Dorian's",
+  "webDir": "app/dist",
+  "bundledWebRuntime": false
+}
