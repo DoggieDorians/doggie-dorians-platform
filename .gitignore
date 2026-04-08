@@ -1,18 +1,26 @@
+# =========================
 # System
+# =========================
 .DS_Store
 Thumbs.db
 
-# VS Code / IDE
+# =========================
+# IDE / Editor
+# =========================
 .vscode/
 .idea/
 *.code-workspace
 
-# Environment / secrets
+# =========================
+# Environment / Secrets
+# =========================
 .env
 .env.*
 !.env.example
 
-# Database (IMPORTANT)
+# =========================
+# Database (CRITICAL)
+# =========================
 data/
 database/
 *.sqlite
@@ -20,17 +28,45 @@ database/
 *.sqlite-wal
 *.db
 
+# =========================
 # Node / React
+# =========================
 node_modules/
 app/node_modules/
 
-# Composer
+# =========================
+# Composer / PHP
+# =========================
 /vendor/
 
-# Build output
+# =========================
+# Build Output
+# =========================
 dist/
 app/dist/
 
-# Capacitor iOS build output
+# =========================
+# Capacitor iOS Build
+# =========================
 ios/App/App/public/
 ios/App/build/
+
+# =========================
+# Logs / Debug / Temp
+# =========================
+logs/
+*.log
+sftp.log
+
+# Debug / test files (VERY important to ignore)
+login-debug.php
+debug-db.php
+live-debug.php
+test-db.php
+root-test.php
+
+# =========================
+# OS / Misc
+# =========================
+*.swp
+*.swo
