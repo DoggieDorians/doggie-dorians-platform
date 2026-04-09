@@ -1,14 +1,20 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/includes/bootstrap.php';
+error_reporting(E_ALL);
+ini_set('display_errors', '0');
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 require_once __DIR__ . '/includes/member_config.php';
 require_once __DIR__ . '/includes/stripe-config.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
 function h($value): string
 {
-    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
 function money_fmt(float $amount): string
@@ -18,11 +24,11 @@ function money_fmt(float $amount): string
 
 $member = currentMember($pdo);
 
-if (!$member || (int) ($member['id'] ?? 0) <= 0) {
+if (!$member || (int)($member['id'] ?? 0) <= 0) {
     redirectTo('signup.php');
 }
 
-$sessionId = trim((string) ($_GET['session_id'] ?? ''));
+$sessionId = trim((string)($_GET['session_id'] ?? ''));
 
 if ($sessionId === '') {
     http_response_code(400);
@@ -50,15 +56,16 @@ try {
         throw new RuntimeException('Stripe session not found.');
     }
 
-    $paymentStatus = (string) ($session->payment_status ?? '');
-    $planId = (int) ($session->metadata->custom_plan_id ?? 0);
-    $memberId = (int) ($session->metadata->member_id ?? 0);
+    $paymentStatus = (string)($session->payment_status ?? '');
+    $planId = (int)($session->metadata->custom_plan_id ?? 0);
+    $memberId = (int)($session->metadata->member_id ?? 0);
+    $sessionPaymentIntentId = trim((string)($session->payment_intent ?? ''));
 
     if ($planId <= 0 || $memberId <= 0) {
         throw new RuntimeException('Invalid Stripe session metadata.');
     }
 
-    if ($memberId !== (int) $member['id']) {
+    if ($memberId !== (int)$member['id']) {
         throw new RuntimeException('This payment does not belong to the signed-in member.');
     }
 
@@ -84,8 +91,8 @@ try {
         throw new RuntimeException('Stripe has not marked this payment as paid.');
     }
 
-    $amountPaidCents = (int) ($session->amount_total ?? 0);
-    $expectedAmountCents = (int) round((float) ($plan['monthly_total'] ?? 0) * 100);
+    $amountPaidCents = (int)($session->amount_total ?? 0);
+    $expectedAmountCents = (int)round((float)($plan['monthly_total'] ?? 0) * 100);
 
     if ($expectedAmountCents > 0 && $amountPaidCents > 0 && $amountPaidCents !== $expectedAmountCents) {
         throw new RuntimeException('Paid amount does not match expected plan amount.');
@@ -108,13 +115,14 @@ try {
     }
 
     $verifiedPaid = true;
+
 } catch (\Throwable $e) {
     error_log('payment-success.php error: ' . $e->getMessage());
     $errorMessage = 'We could not verify this payment yet. Please contact support if this persists.';
 }
 
-$planName = (string) ($plan['plan_name'] ?? 'Custom Plan');
-$amountPaid = (float) ($plan['monthly_total'] ?? 0.00);
+$planName = (string)($plan['plan_name'] ?? 'Custom Plan');
+$amountPaid = (float)($plan['monthly_total'] ?? 0.00);
 ?>
 <!DOCTYPE html>
 <html lang="en">

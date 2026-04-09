@@ -1,7 +1,9 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/includes/security-headers.php';
+
+session_start();
 require_once __DIR__ . '/db.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -10,20 +12,20 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
-function h($value): string
+function h($value)
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirectTo(string $url): never
+function redirectTo($url)
 {
     header('Location: ' . $url);
     exit;
 }
 
-function hasTable(PDO $pdo, string $table): bool
+function hasTable(PDO $pdo, $table)
 {
-    static $cache = [];
+    static $cache = array();
 
     if (isset($cache[$table])) {
         return $cache[$table];
@@ -31,35 +33,39 @@ function hasTable(PDO $pdo, string $table): bool
 
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
-        $stmt->execute([':name' => $table]);
+        $stmt->execute(array(':name' => $table));
         $cache[$table] = (bool) $stmt->fetchColumn();
         return $cache[$table];
-    } catch (Throwable) {
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    } catch (Exception $e) {
         $cache[$table] = false;
         return false;
     }
 }
 
-function getTableColumns(PDO $pdo, string $table): array
+function getTableColumns(PDO $pdo, $table)
 {
-    static $cache = [];
+    static $cache = array();
 
     if (isset($cache[$table])) {
         return $cache[$table];
     }
 
     if (!hasTable($pdo, $table)) {
-        $cache[$table] = [];
-        return [];
+        $cache[$table] = array();
+        return array();
     }
 
     try {
         $safeTable = str_replace('"', '""', $table);
         $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
-        $columns = [];
+        $columns = array();
 
         if ($stmt) {
-            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $row) {
                 if (isset($row['name'])) {
                     $columns[] = (string) $row['name'];
                 }
@@ -68,13 +74,16 @@ function getTableColumns(PDO $pdo, string $table): array
 
         $cache[$table] = $columns;
         return $columns;
-    } catch (Throwable) {
-        $cache[$table] = [];
-        return [];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return array();
+    } catch (Exception $e) {
+        $cache[$table] = array();
+        return array();
     }
 }
 
-function firstExistingColumn(PDO $pdo, string $table, array $candidates): ?string
+function firstExistingColumn(PDO $pdo, $table, array $candidates)
 {
     $columns = getTableColumns($pdo, $table);
     foreach ($candidates as $candidate) {
@@ -85,16 +94,18 @@ function firstExistingColumn(PDO $pdo, string $table, array $candidates): ?strin
     return null;
 }
 
-function safeExecute(PDOStatement $stmt, array $params = []): bool
+function safeExecute(PDOStatement $stmt, array $params = array())
 {
     try {
         return $stmt->execute($params);
-    } catch (Throwable) {
+    } catch (Throwable $e) {
+        return false;
+    } catch (Exception $e) {
         return false;
     }
 }
 
-function currentUserRole(): string
+function currentUserRole()
 {
     $role = isset($_SESSION['role']) ? (string) $_SESSION['role'] : '';
 
@@ -113,9 +124,9 @@ function currentUserRole(): string
     return '';
 }
 
-function currentUserId(): int
+function currentUserId()
 {
-    foreach (['member_id', 'user_id', 'client_id', 'id'] as $key) {
+    foreach (array('user_id', 'member_id', 'client_id', 'id') as $key) {
         if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
             return (int) $_SESSION[$key];
         }
@@ -127,9 +138,9 @@ if (currentUserId() > 0 && currentUserRole() === 'member') {
     redirectTo('dashboard.php');
 }
 
-function verifyPasswordAgainstRow(array $row, string $password): bool
+function verifyPasswordAgainstRow(array $row, $password)
 {
-    foreach (['password', 'password_hash', 'hashed_password', 'pass_hash'] as $field) {
+    foreach (array('password', 'password_hash', 'hashed_password', 'pass_hash') as $field) {
         if (isset($row[$field]) && trim((string) $row[$field]) !== '') {
             $hash = (string) $row[$field];
 
@@ -146,27 +157,27 @@ function verifyPasswordAgainstRow(array $row, string $password): bool
     return false;
 }
 
-function findMemberByLogin(PDO $pdo, string $login): ?array
+function findMemberByLogin(PDO $pdo, $login)
 {
-    $login = trim($login);
+    $login = trim((string) $login);
     if ($login === '') {
         return null;
     }
 
-    $tables = ['users', 'members', 'client_profiles'];
+    $tables = array('users', 'members', 'client_profiles');
 
     foreach ($tables as $table) {
         if (!hasTable($pdo, $table)) {
             continue;
         }
 
-        $idCol = firstExistingColumn($pdo, $table, ['id', 'user_id', 'member_id', 'client_id']);
+        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
         if ($idCol === null) {
             continue;
         }
 
-        $loginFields = [];
-        foreach (['email', 'username', 'phone', 'phone_number'] as $candidate) {
+        $loginFields = array();
+        foreach (array('email', 'username', 'phone', 'phone_number') as $candidate) {
             if (in_array($candidate, getTableColumns($pdo, $table), true)) {
                 $loginFields[] = $candidate;
             }
@@ -176,14 +187,14 @@ function findMemberByLogin(PDO $pdo, string $login): ?array
             continue;
         }
 
-        $where = [];
-        $params = [':login' => $login];
+        $where = array();
+        $params = array(':login' => $login);
 
         foreach ($loginFields as $field) {
             $where[] = 'LOWER(COALESCE(' . $field . ', "")) = LOWER(:login)';
         }
 
-        $roleCol = firstExistingColumn($pdo, $table, ['role', 'user_role', 'account_type']);
+        $roleCol = firstExistingColumn($pdo, $table, array('role', 'user_role', 'account_type'));
         $sql = 'SELECT * FROM ' . $table . ' WHERE (' . implode(' OR ', $where) . ')';
 
         if ($roleCol !== null) {
@@ -208,7 +219,7 @@ function findMemberByLogin(PDO $pdo, string $login): ?array
     return null;
 }
 
-function valueFromRow(array $row, array $candidates, string $default = ''): string
+function valueFromRow(array $row, array $candidates, $default = '')
 {
     foreach ($candidates as $candidate) {
         if (isset($row[$candidate]) && trim((string) $row[$candidate]) !== '') {
@@ -223,8 +234,8 @@ $error = '';
 $formLogin = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $formLogin = trim((string) ($_POST['login'] ?? ''));
-    $password = (string) ($_POST['password'] ?? '');
+    $formLogin = trim((string) (isset($_POST['login']) ? $_POST['login'] : ''));
+    $password = (string) (isset($_POST['password']) ? $_POST['password'] : '');
 
     if ($formLogin === '' || $password === '') {
         $error = 'Please enter your email, username, or phone and your password.';
@@ -236,19 +247,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             session_regenerate_id(true);
 
-            $idCol = (string) ($user['_id_col'] ?? 'id');
+            $idCol = isset($user['_id_col']) ? (string) $user['_id_col'] : 'id';
             $userId = isset($user[$idCol]) ? (int) $user[$idCol] : 0;
 
-            $_SESSION['member_id'] = $userId;
             $_SESSION['user_id'] = $userId;
+            $_SESSION['member_id'] = $userId;
             $_SESSION['id'] = $userId;
             $_SESSION['role'] = 'member';
-            $_SESSION['user_role'] = 'member';
             $_SESSION['is_admin'] = false;
-            $_SESSION['name'] = valueFromRow($user, ['full_name', 'name', 'client_name', 'member_name', 'username'], 'Member');
-            $_SESSION['full_name'] = valueFromRow($user, ['full_name', 'name', 'client_name', 'member_name'], $_SESSION['name']);
-            $_SESSION['email'] = valueFromRow($user, ['email'], '');
-            $_SESSION['username'] = valueFromRow($user, ['username'], '');
+            $_SESSION['name'] = valueFromRow($user, array('full_name', 'name', 'client_name', 'member_name', 'username'), 'Member');
+            $_SESSION['full_name'] = valueFromRow($user, array('full_name', 'name', 'client_name', 'member_name'), $_SESSION['name']);
+            $_SESSION['email'] = valueFromRow($user, array('email'), '');
+            $_SESSION['username'] = valueFromRow($user, array('username'), '');
 
             $_SESSION['dashboard_flash'] = 'Welcome back.';
             redirectTo('dashboard.php');

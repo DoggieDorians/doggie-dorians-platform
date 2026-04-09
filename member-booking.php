@@ -1,13 +1,13 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/pricing.php';
 
-require_once __DIR__ . '/database/setup.php';
-
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit;
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    exit('Database connection is not available.');
 }
 
 function e(?string $value): string
@@ -15,31 +15,245 @@ function e(?string $value): string
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-$userId = (int) $_SESSION['user_id'];
-
-$userStmt = $pdo->prepare("
-    SELECT id, email
-    FROM users
-    WHERE id = :id
-    LIMIT 1
-");
-$userStmt->execute(['id' => $userId]);
-$user = $userStmt->fetch(PDO::FETCH_ASSOC);
-
-if (!$user) {
-    session_destroy();
-    header('Location: login.php');
+function redirect_to(string $url): never
+{
+    header('Location: ' . $url);
     exit;
 }
 
-$petsStmt = $pdo->prepare("
-    SELECT id, pet_name, breed, size
-    FROM pets
-    WHERE user_id = :user_id
-    ORDER BY pet_name ASC
-");
-$petsStmt->execute(['user_id' => $userId]);
-$pets = $petsStmt->fetchAll(PDO::FETCH_ASSOC);
+function current_user_role(): string
+{
+    $role = strtolower(trim((string) ($_SESSION['role'] ?? $_SESSION['user_role'] ?? '')));
+
+    if ($role !== '') {
+        return $role;
+    }
+
+    if (!empty($_SESSION['is_admin']) || !empty($_SESSION['admin_logged_in'])) {
+        return 'admin';
+    }
+
+    if (!empty($_SESSION['walker_id']) || !empty($_SESSION['staff_id']) || !empty($_SESSION['employee_id'])) {
+        return 'walker';
+    }
+
+    return 'member';
+}
+
+function current_user_id(): int
+{
+    foreach (['user_id', 'id', 'member_id', 'client_id'] as $key) {
+        if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
+            return (int) $_SESSION[$key];
+        }
+    }
+
+    return 0;
+}
+
+function table_exists(PDO $pdo, string $table): bool
+{
+    static $cache = [];
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
+        $stmt->execute([':name' => $table]);
+        return $cache[$table] = (bool) $stmt->fetchColumn();
+    } catch (Throwable) {
+        return $cache[$table] = false;
+    }
+}
+
+function get_table_columns(PDO $pdo, string $table): array
+{
+    static $cache = [];
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!table_exists($pdo, $table)) {
+        return $cache[$table] = [];
+    }
+
+    try {
+        $safeTable = str_replace('"', '""', $table);
+        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
+        $columns = [];
+
+        if ($stmt) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (isset($row['name'])) {
+                    $columns[] = (string) $row['name'];
+                }
+            }
+        }
+
+        return $cache[$table] = $columns;
+    } catch (Throwable) {
+        return $cache[$table] = [];
+    }
+}
+
+function first_existing_column(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function booking_table(PDO $pdo): ?string
+{
+    foreach (['bookings', 'walks'] as $candidate) {
+        if (table_exists($pdo, $candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function booking_table_map(PDO $pdo, string $table): array
+{
+    $columns = get_table_columns($pdo, $table);
+
+    return [
+        'user_id' => first_existing_column($columns, ['user_id', 'member_id', 'client_id']),
+        'pet_id' => first_existing_column($columns, ['pet_id', 'dog_id']),
+        'service_type' => first_existing_column($columns, ['service_type', 'type', 'booking_type', 'service']),
+        'service_date' => first_existing_column($columns, ['service_date', 'booking_date', 'walk_date', 'date', 'scheduled_date', 'start_date']),
+        'service_time' => first_existing_column($columns, ['service_time', 'booking_time', 'walk_time', 'time', 'scheduled_time', 'start_time']),
+        'duration_minutes' => first_existing_column($columns, ['duration_minutes', 'duration', 'minutes']),
+        'status' => first_existing_column($columns, ['status', 'booking_status', 'walk_status']),
+        'price' => first_existing_column($columns, ['price', 'total_price', 'amount']),
+        'notes' => first_existing_column($columns, ['client_notes', 'notes', 'special_instructions', 'instructions']),
+        'created_at' => first_existing_column($columns, ['created_at']),
+        'updated_at' => first_existing_column($columns, ['updated_at']),
+        'pricing_type' => first_existing_column($columns, ['pricing_type']),
+        'unit_price' => first_existing_column($columns, ['unit_price']),
+        'discount_label' => first_existing_column($columns, ['discount_label']),
+        'quantity' => first_existing_column($columns, ['quantity']),
+        'assigned_walker_id' => first_existing_column($columns, ['assigned_walker_id', 'walker_id']),
+        'walker_name' => first_existing_column($columns, ['walker_name']),
+        'status_updated_by' => first_existing_column($columns, ['status_updated_by']),
+        'status_updated_at' => first_existing_column($columns, ['status_updated_at']),
+        'is_instant_booking' => first_existing_column($columns, ['is_instant_booking']),
+    ];
+}
+
+function get_user_record(PDO $pdo, int $userId): ?array
+{
+    foreach (['users', 'members', 'client_profiles'] as $table) {
+        if (!table_exists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = get_table_columns($pdo, $table);
+        $idCol = first_existing_column($columns, ['id', 'user_id', 'member_id', 'client_id']);
+        if ($idCol === null) {
+            continue;
+        }
+
+        $select = [$idCol . ' AS record_id'];
+
+        foreach (['email', 'full_name', 'name', 'first_name', 'last_name'] as $field) {
+            if (in_array($field, $columns, true)) {
+                $select[] = $field;
+            }
+        }
+
+        $stmt = $pdo->prepare('SELECT ' . implode(', ', $select) . ' FROM ' . $table . ' WHERE ' . $idCol . ' = :id LIMIT 1');
+        $stmt->execute([':id' => $userId]);
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row !== false) {
+            return $row;
+        }
+    }
+
+    return null;
+}
+
+function get_pets_for_user(PDO $pdo, int $userId): array
+{
+    $results = [];
+
+    foreach (['pets', 'dogs'] as $table) {
+        if (!table_exists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = get_table_columns($pdo, $table);
+        $idCol = first_existing_column($columns, ['id', 'pet_id', 'dog_id']);
+        $ownerCol = first_existing_column($columns, ['user_id', 'member_id', 'owner_id', 'client_id']);
+        $nameCol = first_existing_column($columns, ['pet_name', 'dog_name', 'name']);
+        $breedCol = first_existing_column($columns, ['breed']);
+        $sizeCol = first_existing_column($columns, ['size']);
+
+        if ($idCol === null || $ownerCol === null || $nameCol === null) {
+            continue;
+        }
+
+        $sql = "SELECT {$idCol} AS pet_id, {$nameCol} AS pet_name";
+        $sql .= $breedCol !== null ? ", {$breedCol} AS breed" : ", '' AS breed";
+        $sql .= $sizeCol !== null ? ", {$sizeCol} AS size" : ", '' AS size";
+        $sql .= " FROM {$table} WHERE {$ownerCol} = :user_id ORDER BY {$nameCol} ASC";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([':user_id' => $userId]);
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if ($rows) {
+            foreach ($rows as $row) {
+                $results[] = [
+                    'pet_id' => (int) ($row['pet_id'] ?? 0),
+                    'pet_name' => (string) ($row['pet_name'] ?? ''),
+                    'breed' => (string) ($row['breed'] ?? ''),
+                    'size' => strtolower(trim((string) ($row['size'] ?? ''))),
+                ];
+            }
+            break;
+        }
+    }
+
+    return $results;
+}
+
+function member_price_for_service(string $serviceType, int $durationMinutes, string $dogSize): float
+{
+    $pricing = dd_pricing_matrix();
+
+    return match ($serviceType) {
+        'walk' => (float) ($pricing['walk']['member'][$durationMinutes] ?? 0),
+        'daycare' => (float) ($pricing['daycare']['member']['base_rate'] ?? 0),
+        'boarding' => (float) ($pricing['boarding']['member'][$dogSize] ?? 0),
+        default => 0.0,
+    };
+}
+
+$userId = current_user_id();
+$role = current_user_role();
+
+if ($userId <= 0 || in_array($role, ['admin', 'walker', 'staff', 'employee'], true)) {
+    redirect_to('login.php');
+}
+
+$user = get_user_record($pdo, $userId);
+if (!$user) {
+    $_SESSION = [];
+    session_destroy();
+    redirect_to('login.php');
+}
+
+$pets = get_pets_for_user($pdo, $userId);
 
 $errors = [];
 $success = '';
@@ -50,38 +264,26 @@ $form = [
     'service_date' => '',
     'service_time' => '',
     'duration_minutes' => '30',
-    'price' => '25.00',
     'notes' => '',
 ];
 
-$memberWalkRates = [
-    15 => 18.00,
-    20 => 20.00,
-    30 => 25.00,
-    45 => 30.00,
-    60 => 34.00,
-];
-
-$daycareRate = 55.00;
-$boardingRates = [
-    'Small' => 80.00,
-    'Medium' => 100.00,
-    'Large' => 120.00,
-];
+$memberWalkRates = dd_pricing_matrix()['walk']['member'];
+$memberDaycareBase = (float) dd_pricing_matrix()['daycare']['member']['base_rate'];
+$memberBoardingRates = dd_pricing_matrix()['boarding']['member'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $form['pet_id'] = trim((string) ($_POST['pet_id'] ?? ''));
-    $form['service_type'] = trim((string) ($_POST['service_type'] ?? 'walk'));
+    $form['service_type'] = strtolower(trim((string) ($_POST['service_type'] ?? 'walk')));
     $form['service_date'] = trim((string) ($_POST['service_date'] ?? ''));
     $form['service_time'] = trim((string) ($_POST['service_time'] ?? ''));
-    $form['duration_minutes'] = trim((string) ($_POST['duration_minutes'] ?? ''));
+    $form['duration_minutes'] = trim((string) ($_POST['duration_minutes'] ?? '30'));
     $form['notes'] = trim((string) ($_POST['notes'] ?? ''));
 
     $petId = (int) $form['pet_id'];
     $serviceType = $form['service_type'];
     $serviceDate = $form['service_date'];
     $serviceTime = $form['service_time'];
-    $durationMinutes = $form['duration_minutes'] !== '' ? (int) $form['duration_minutes'] : 0;
+    $durationMinutes = (int) $form['duration_minutes'];
 
     if ($petId <= 0) {
         $errors[] = 'Please select a pet.';
@@ -101,7 +303,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $selectedPet = null;
     foreach ($pets as $pet) {
-        if ((int) $pet['id'] === $petId) {
+        if ((int) $pet['pet_id'] === $petId) {
             $selectedPet = $pet;
             break;
         }
@@ -111,81 +313,147 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'Selected pet was not found under your account.';
     }
 
-    $price = 0.00;
-
-    if ($serviceType === 'walk') {
-        if (!array_key_exists($durationMinutes, $memberWalkRates)) {
-            $errors[] = 'Please select a valid walk duration.';
-        } else {
-            $price = $memberWalkRates[$durationMinutes];
-        }
-    } elseif ($serviceType === 'daycare') {
-        $durationMinutes = 480;
-        $price = $daycareRate;
-    } elseif ($serviceType === 'boarding') {
-        $durationMinutes = 1440;
-        $petSize = ucfirst(strtolower((string) ($selectedPet['size'] ?? 'Small')));
-        if (!array_key_exists($petSize, $boardingRates)) {
-            $petSize = 'Small';
-        }
-        $price = $boardingRates[$petSize];
+    $dogSize = $selectedPet['size'] ?? 'small';
+    if (!in_array($dogSize, ['small', 'medium', 'large'], true)) {
+        $dogSize = 'small';
     }
 
-    $form['price'] = number_format($price, 2, '.', '');
+    if ($serviceType === 'walk' && !array_key_exists($durationMinutes, $memberWalkRates)) {
+        $errors[] = 'Please select a valid walk duration.';
+    }
 
-    if (!$errors) {
-        $insertStmt = $pdo->prepare("
-            INSERT INTO bookings (
-                user_id,
-                pet_id,
-                assigned_walker_id,
-                service_type,
-                service_date,
-                service_time,
-                duration_minutes,
-                status,
-                price,
-                walker_name,
-                status_updated_by,
-                status_updated_at
-            ) VALUES (
-                :user_id,
-                :pet_id,
-                NULL,
-                :service_type,
-                :service_date,
-                :service_time,
-                :duration_minutes,
-                'pending',
-                :price,
-                NULL,
-                'member',
-                CURRENT_TIMESTAMP
-            )
-        ");
+    if ($serviceType === 'daycare') {
+        $durationMinutes = (int) (dd_pricing_matrix()['daycare']['member']['hours'] ?? 6) * 60;
+    }
 
-        $insertStmt->execute([
-            'user_id' => $userId,
-            'pet_id' => $petId,
-            'service_type' => $serviceType,
-            'service_date' => $serviceDate,
-            'service_time' => $serviceTime,
-            'duration_minutes' => $durationMinutes,
-            'price' => $price,
-        ]);
+    if ($serviceType === 'boarding') {
+        $durationMinutes = 1440;
+    }
 
-        $success = 'Booking request submitted successfully.';
-        $form = [
-            'pet_id' => '',
-            'service_type' => 'walk',
-            'service_date' => '',
-            'service_time' => '',
-            'duration_minutes' => '30',
-            'price' => '25.00',
-            'notes' => '',
-        ];
+    $price = member_price_for_service($serviceType, $durationMinutes, $dogSize);
+
+    if ($price <= 0) {
+        $errors[] = 'Could not calculate pricing for this booking.';
+    }
+
+    $table = booking_table($pdo);
+    if ($table === null) {
+        $errors[] = 'No booking table was found in the database.';
+    }
+
+    if (!$errors && $table !== null) {
+        $map = booking_table_map($pdo, $table);
+        $insertData = [];
+
+        if ($map['user_id'] !== null) {
+            $insertData[$map['user_id']] = $userId;
+        }
+        if ($map['pet_id'] !== null) {
+            $insertData[$map['pet_id']] = $petId;
+        }
+        if ($map['service_type'] !== null) {
+            $insertData[$map['service_type']] = $serviceType;
+        }
+        if ($map['service_date'] !== null) {
+            $insertData[$map['service_date']] = $serviceDate;
+        }
+        if ($map['service_time'] !== null) {
+            $insertData[$map['service_time']] = $serviceTime;
+        }
+        if ($map['duration_minutes'] !== null) {
+            $insertData[$map['duration_minutes']] = $durationMinutes;
+        }
+        if ($map['status'] !== null) {
+            $insertData[$map['status']] = 'pending';
+        }
+        if ($map['price'] !== null) {
+            $insertData[$map['price']] = $price;
+        }
+        if ($map['notes'] !== null) {
+            $insertData[$map['notes']] = $form['notes'];
+        }
+        if ($map['created_at'] !== null) {
+            $insertData[$map['created_at']] = date('Y-m-d H:i:s');
+        }
+        if ($map['updated_at'] !== null) {
+            $insertData[$map['updated_at']] = date('Y-m-d H:i:s');
+        }
+        if ($map['pricing_type'] !== null) {
+            $insertData[$map['pricing_type']] = 'member';
+        }
+        if ($map['unit_price'] !== null) {
+            $insertData[$map['unit_price']] = $price;
+        }
+        if ($map['discount_label'] !== null) {
+            $insertData[$map['discount_label']] = 'standard_member';
+        }
+        if ($map['quantity'] !== null) {
+            $insertData[$map['quantity']] = 1;
+        }
+        if ($map['assigned_walker_id'] !== null) {
+            $insertData[$map['assigned_walker_id']] = null;
+        }
+        if ($map['walker_name'] !== null) {
+            $insertData[$map['walker_name']] = null;
+        }
+        if ($map['status_updated_by'] !== null) {
+            $insertData[$map['status_updated_by']] = 'member';
+        }
+        if ($map['status_updated_at'] !== null) {
+            $insertData[$map['status_updated_at']] = date('Y-m-d H:i:s');
+        }
+        if ($map['is_instant_booking'] !== null) {
+            $insertData[$map['is_instant_booking']] = 0;
+        }
+
+        if (empty($insertData)) {
+            $errors[] = 'Booking table mapping could not be built safely.';
+        } else {
+            $fields = array_keys($insertData);
+            $placeholders = array_map(static fn(string $field): string => ':' . $field, $fields);
+            $params = [];
+
+            foreach ($insertData as $field => $value) {
+                $params[':' . $field] = $value;
+            }
+
+            $sql = 'INSERT INTO ' . $table . ' (' . implode(', ', $fields) . ') VALUES (' . implode(', ', $placeholders) . ')';
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+
+            $success = 'Booking request submitted successfully.';
+            $form = [
+                'pet_id' => '',
+                'service_type' => 'walk',
+                'service_date' => '',
+                'service_time' => '',
+                'duration_minutes' => '30',
+                'notes' => '',
+            ];
+        }
     }
 }
+
+$currentServiceType = $form['service_type'];
+$currentDuration = (int) $form['duration_minutes'];
+$currentPetId = (int) $form['pet_id'];
+$currentDogSize = 'small';
+
+foreach ($pets as $pet) {
+    if ((int) $pet['pet_id'] === $currentPetId) {
+        $candidateSize = strtolower(trim((string) ($pet['size'] ?? 'small')));
+        if (in_array($candidateSize, ['small', 'medium', 'large'], true)) {
+            $currentDogSize = $candidateSize;
+        }
+        break;
+    }
+}
+
+$currentPrice = member_price_for_service(
+    $currentServiceType,
+    $currentServiceType === 'walk' ? max(15, $currentDuration) : ($currentServiceType === 'daycare' ? 360 : 1440),
+    $currentDogSize
+);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -437,7 +705,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="eyebrow">Doggie Dorian’s Member</div>
         <h1>Book a Service</h1>
         <div class="subtext">
-          Submit a member booking request using the same coordinated booking system now used by the admin dashboard.
+          Submit a member booking request using live member pricing from your central pricing engine.
         </div>
       </div>
 
@@ -447,37 +715,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="panel">
       <div class="panel-inner">
         <?php if ($success !== ''): ?>
-          <div class="alert success"><?php echo e($success); ?></div>
+          <div class="alert success"><?= e($success) ?></div>
         <?php endif; ?>
 
         <?php if ($errors): ?>
-          <div class="alert error">
-            <?php foreach ($errors as $error): ?>
-              <div><?php echo e($error); ?></div>
-            <?php endforeach; ?>
-          </div>
+          <div class="alert error"><?= e(implode(' ', $errors)) ?></div>
         <?php endif; ?>
 
-        <?php if (!$pets): ?>
+        <?php if (empty($pets)): ?>
           <div class="empty-box">
-            You need to add a pet before creating a booking.
+            No pets were found on your account yet. Please add your dog first, then come back here to book service.
             <br><br>
-            <a href="add-pet.php">Add a Pet</a>
+            <a href="add-pet.php">Add a pet →</a>
           </div>
         <?php else: ?>
-          <form method="post" id="member-booking-form">
+          <form method="post" action="">
             <div class="grid">
               <div class="field">
                 <label for="pet_id">Pet</label>
                 <select name="pet_id" id="pet_id" required>
-                  <option value="">Select pet</option>
+                  <option value="">Select your pet</option>
                   <?php foreach ($pets as $pet): ?>
                     <option
-                      value="<?php echo (int) $pet['id']; ?>"
-                      data-size="<?php echo e((string) ($pet['size'] ?? 'Small')); ?>"
-                      <?php echo ((string) $pet['id'] === $form['pet_id']) ? 'selected' : ''; ?>
+                      value="<?= (int) $pet['pet_id'] ?>"
+                      data-size="<?= e($pet['size'] !== '' ? $pet['size'] : 'small') ?>"
+                      <?= (int) $form['pet_id'] === (int) $pet['pet_id'] ? 'selected' : '' ?>
                     >
-                      <?php echo e($pet['pet_name'] . (!empty($pet['breed']) ? ' — ' . $pet['breed'] : '')); ?>
+                      <?= e($pet['pet_name']) ?><?= $pet['breed'] !== '' ? ' • ' . e($pet['breed']) : '' ?>
                     </option>
                   <?php endforeach; ?>
                 </select>
@@ -486,42 +750,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               <div class="field">
                 <label for="service_type">Service</label>
                 <select name="service_type" id="service_type" required>
-                  <option value="walk" <?php echo $form['service_type'] === 'walk' ? 'selected' : ''; ?>>Walk</option>
-                  <option value="daycare" <?php echo $form['service_type'] === 'daycare' ? 'selected' : ''; ?>>Daycare</option>
-                  <option value="boarding" <?php echo $form['service_type'] === 'boarding' ? 'selected' : ''; ?>>Boarding</option>
+                  <option value="walk" <?= $form['service_type'] === 'walk' ? 'selected' : '' ?>>Walk</option>
+                  <option value="daycare" <?= $form['service_type'] === 'daycare' ? 'selected' : '' ?>>Daycare</option>
+                  <option value="boarding" <?= $form['service_type'] === 'boarding' ? 'selected' : '' ?>>Boarding</option>
                 </select>
-              </div>
-
-              <div class="field" id="duration-field">
-                <label for="duration_minutes">Walk Duration</label>
-                <select name="duration_minutes" id="duration_minutes">
-                  <option value="15" <?php echo $form['duration_minutes'] === '15' ? 'selected' : ''; ?>>15 min — $18</option>
-                  <option value="20" <?php echo $form['duration_minutes'] === '20' ? 'selected' : ''; ?>>20 min — $20</option>
-                  <option value="30" <?php echo $form['duration_minutes'] === '30' ? 'selected' : ''; ?>>30 min — $25</option>
-                  <option value="45" <?php echo $form['duration_minutes'] === '45' ? 'selected' : ''; ?>>45 min — $30</option>
-                  <option value="60" <?php echo $form['duration_minutes'] === '60' ? 'selected' : ''; ?>>60 min — $34</option>
-                </select>
-              </div>
-
-              <div class="field">
-                <label>Estimated Price</label>
-                <div class="price-box" id="price-box">$<?php echo e($form['price']); ?></div>
               </div>
 
               <div class="field">
                 <label for="service_date">Service Date</label>
-                <input type="date" name="service_date" id="service_date" value="<?php echo e($form['service_date']); ?>" required>
+                <input type="date" name="service_date" id="service_date" value="<?= e($form['service_date']) ?>" required>
               </div>
 
               <div class="field">
                 <label for="service_time">Service Time</label>
-                <input type="time" name="service_time" id="service_time" value="<?php echo e($form['service_time']); ?>" required>
+                <input type="time" name="service_time" id="service_time" value="<?= e($form['service_time']) ?>" required>
+              </div>
+
+              <div class="field" id="durationField">
+                <label for="duration_minutes">Walk Duration</label>
+                <select name="duration_minutes" id="duration_minutes">
+                  <option value="15" <?= $form['duration_minutes'] === '15' ? 'selected' : '' ?>>15 Minutes</option>
+                  <option value="20" <?= $form['duration_minutes'] === '20' ? 'selected' : '' ?>>20 Minutes</option>
+                  <option value="30" <?= $form['duration_minutes'] === '30' ? 'selected' : '' ?>>30 Minutes</option>
+                  <option value="45" <?= $form['duration_minutes'] === '45' ? 'selected' : '' ?>>45 Minutes</option>
+                  <option value="60" <?= $form['duration_minutes'] === '60' ? 'selected' : '' ?>>60 Minutes</option>
+                </select>
+                <div class="helper">Shown only for walks. Daycare and boarding use service-based pricing.</div>
+              </div>
+
+              <div class="field">
+                <label>Estimated Member Price</label>
+                <div class="price-box" id="priceBox">$<?= number_format($currentPrice, 2) ?></div>
               </div>
 
               <div class="field full">
                 <label for="notes">Notes</label>
-                <textarea name="notes" id="notes" placeholder="Optional notes for your booking request..."><?php echo e($form['notes']); ?></textarea>
-                <div class="helper">Notes are currently for your reference on the form and can be wired into a notes field next.</div>
+                <textarea name="notes" id="notes" placeholder="Anything important we should know for this booking."><?= e($form['notes']) ?></textarea>
               </div>
             </div>
 
@@ -537,59 +801,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   <script>
     (function () {
-      const serviceType = document.getElementById('service_type');
-      const duration = document.getElementById('duration_minutes');
-      const petSelect = document.getElementById('pet_id');
-      const durationField = document.getElementById('duration-field');
-      const priceBox = document.getElementById('price-box');
+      const walkRates = {
+        15: <?= json_encode((float) ($memberWalkRates[15] ?? 0)) ?>,
+        20: <?= json_encode((float) ($memberWalkRates[20] ?? 0)) ?>,
+        30: <?= json_encode((float) ($memberWalkRates[30] ?? 0)) ?>,
+        45: <?= json_encode((float) ($memberWalkRates[45] ?? 0)) ?>,
+        60: <?= json_encode((float) ($memberWalkRates[60] ?? 0)) ?>
+      };
 
-      if (!serviceType || !duration || !petSelect || !durationField || !priceBox) {
-        return;
+      const daycarePrice = <?= json_encode((float) $memberDaycareBase) ?>;
+      const boardingRates = {
+        small: <?= json_encode((float) ($memberBoardingRates['small'] ?? 0)) ?>,
+        medium: <?= json_encode((float) ($memberBoardingRates['medium'] ?? 0)) ?>,
+        large: <?= json_encode((float) ($memberBoardingRates['large'] ?? 0)) ?>
+      };
+
+      const petSelect = document.getElementById('pet_id');
+      const serviceSelect = document.getElementById('service_type');
+      const durationSelect = document.getElementById('duration_minutes');
+      const durationField = document.getElementById('durationField');
+      const priceBox = document.getElementById('priceBox');
+
+      function selectedDogSize() {
+        const option = petSelect.options[petSelect.selectedIndex];
+        const size = option ? String(option.dataset.size || 'small').toLowerCase() : 'small';
+        return ['small', 'medium', 'large'].includes(size) ? size : 'small';
       }
 
-      const walkRates = {
-        15: 18.00,
-        20: 20.00,
-        30: 25.00,
-        45: 30.00,
-        60: 34.00
-      };
-
-      const daycareRate = 55.00;
-      const boardingRates = {
-        Small: 80.00,
-        Medium: 100.00,
-        Large: 120.00
-      };
-
-      function getSelectedPetSize() {
-        const option = petSelect.options[petSelect.selectedIndex];
-        if (!option) return 'Small';
-        return (option.dataset.size || 'Small').trim();
+      function updateVisibility() {
+        const service = serviceSelect.value;
+        durationField.style.display = service === 'walk' ? 'block' : 'none';
       }
 
       function updatePrice() {
-        const type = serviceType.value;
-        let price = 0;
+        const service = serviceSelect.value;
+        const duration = parseInt(durationSelect.value || '30', 10);
+        const dogSize = selectedDogSize();
 
-        if (type === 'walk') {
-          durationField.style.display = '';
-          price = walkRates[duration.value] || 0;
-        } else if (type === 'daycare') {
-          durationField.style.display = 'none';
-          price = daycareRate;
-        } else if (type === 'boarding') {
-          durationField.style.display = 'none';
-          const size = getSelectedPetSize();
-          price = boardingRates[size] || boardingRates.Small;
+        let amount = 0;
+
+        if (service === 'walk') {
+          amount = walkRates[duration] || 0;
+        } else if (service === 'daycare') {
+          amount = daycarePrice;
+        } else if (service === 'boarding') {
+          amount = boardingRates[dogSize] || boardingRates.small || 0;
         }
 
-        priceBox.textContent = '$' + Number(price).toFixed(2);
+        priceBox.textContent = '$' + amount.toFixed(2);
+        updateVisibility();
       }
 
-      serviceType.addEventListener('change', updatePrice);
-      duration.addEventListener('change', updatePrice);
       petSelect.addEventListener('change', updatePrice);
+      serviceSelect.addEventListener('change', updatePrice);
+      durationSelect.addEventListener('change', updatePrice);
 
       updatePrice();
     })();

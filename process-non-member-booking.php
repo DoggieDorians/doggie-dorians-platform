@@ -1,9 +1,8 @@
 <?php
 declare(strict_types=1);
 
-session_start();
-
-require_once __DIR__ . '/database/setup.php';
+require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/includes/pricing.php';
 
 function redirect_with_flash(string $type, string $message, array $formData = []): void
@@ -25,7 +24,7 @@ function normalize_service_type(string $value): string
         'daycare', 'day care' => 'daycare',
         'boarding', 'board' => 'boarding',
         'drop-in', 'drop in', 'drop_in' => 'drop_in',
-        'sitting', 'in-home sitting', 'in_home_sitting' => 'sitting', // ✅ ADDED
+        'sitting', 'in-home sitting', 'in_home_sitting' => 'sitting',
         default => '',
     };
 }
@@ -47,17 +46,11 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Collect form data
-|--------------------------------------------------------------------------
-*/
 $formData = $_POST;
-
 $errors = [];
 
-$serviceType = normalize_service_type($formData['service_type'] ?? '');
-$dogSize = normalize_dog_size($formData['dog_size'] ?? '');
+$serviceType = normalize_service_type((string) ($formData['service_type'] ?? ''));
+$dogSize = normalize_dog_size((string) ($formData['dog_size'] ?? ''));
 
 $dateStart = trim((string) ($formData['date_start'] ?? ''));
 $dateEnd = trim((string) ($formData['date_end'] ?? ''));
@@ -67,21 +60,32 @@ $dropInHours = (int) ($formData['drop_in_hours'] ?? 1);
 $dropInAddWalk = isset($formData['drop_in_add_walk']);
 $daycareProvideFood = isset($formData['daycare_provide_food']);
 $daycareExtraWalks = (int) ($formData['daycare_extra_walks'] ?? 0);
-
-// ✅ NEW
 $sittingExtraWalks = (int) ($formData['sitting_extra_walks'] ?? 0);
 
-/*
-|--------------------------------------------------------------------------
-| Validation
-|--------------------------------------------------------------------------
-*/
-if (empty($formData['full_name'])) $errors[] = 'Full name required.';
-if (empty($formData['email'])) $errors[] = 'Email required.';
-if (empty($formData['phone'])) $errors[] = 'Phone required.';
-if (empty($formData['dog_name'])) $errors[] = 'Dog name required.';
-if ($serviceType === '') $errors[] = 'Invalid service type.';
+$fullName = trim((string) ($formData['full_name'] ?? ''));
+$email = trim((string) ($formData['email'] ?? ''));
+$phone = trim((string) ($formData['phone'] ?? ''));
+$dogName = trim((string) ($formData['dog_name'] ?? ''));
+$preferredWalkTime = trim((string) ($formData['preferred_walk_time'] ?? ''));
+$feedingSchedule = trim((string) ($formData['feeding_schedule'] ?? ''));
+$preferredContact = trim((string) ($formData['preferred_contact'] ?? ''));
+$notes = trim((string) ($formData['notes'] ?? ''));
 
+if ($fullName === '') {
+    $errors[] = 'Full name required.';
+}
+if ($email === '') {
+    $errors[] = 'Email required.';
+}
+if ($phone === '') {
+    $errors[] = 'Phone required.';
+}
+if ($dogName === '') {
+    $errors[] = 'Dog name required.';
+}
+if ($serviceType === '') {
+    $errors[] = 'Invalid service type.';
+}
 if ($dateStart === '') {
     $errors[] = 'Start date required.';
 }
@@ -94,7 +98,7 @@ if ($serviceType === 'boarding' && $dogSize === '') {
     $errors[] = 'Dog size required for boarding.';
 }
 
-if ($serviceType === 'walk' && !in_array($walkDuration, [15,20,30,45,60])) {
+if ($serviceType === 'walk' && !in_array($walkDuration, [15, 20, 30, 45, 60], true)) {
     $errors[] = 'Invalid walk duration.';
 }
 
@@ -102,105 +106,108 @@ if ($errors) {
     redirect_with_flash('error', implode(' ', $errors), $formData);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Pricing logic (UPDATED)
-|--------------------------------------------------------------------------
-*/
 try {
     if ($serviceType === 'walk') {
         $pricing = dd_get_service_pricing('walk', false, [
-            'duration_minutes' => $walkDuration
+            'duration_minutes' => $walkDuration,
         ]);
-    }
-
-    elseif ($serviceType === 'drop_in') {
+    } elseif ($serviceType === 'drop_in') {
         $pricing = dd_get_service_pricing('drop_in', false, [
             'quantity' => $dropInHours,
-            'add_walk' => $dropInAddWalk
+            'add_walk' => $dropInAddWalk,
         ]);
-    }
-
-    elseif ($serviceType === 'daycare') {
+    } elseif ($serviceType === 'daycare') {
         $pricing = dd_get_service_pricing('daycare', false, [
             'provide_food' => $daycareProvideFood,
-            'extra_walks' => $daycareExtraWalks
+            'extra_walks' => $daycareExtraWalks,
         ]);
-    }
-
-    // ✅ NEW BLOCK (CRITICAL)
-    elseif ($serviceType === 'sitting') {
+    } elseif ($serviceType === 'sitting') {
         $pricing = dd_get_service_pricing('sitting', false, [
-            'extra_walks' => $sittingExtraWalks
+            'extra_walks' => $sittingExtraWalks,
         ]);
-    }
-
-    elseif ($serviceType === 'boarding') {
+    } elseif ($serviceType === 'boarding') {
         $nights = dd_calculate_boarding_nights($dateStart, $dateEnd);
 
         $pricing = dd_get_service_pricing('boarding', false, [
             'dog_size' => $dogSize,
-            'quantity' => $nights
+            'quantity' => $nights,
         ]);
-    }
-
-    else {
+    } else {
         throw new Exception('Invalid service type.');
     }
-
 } catch (Throwable $e) {
     redirect_with_flash('error', $e->getMessage(), $formData);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Save booking
-|--------------------------------------------------------------------------
-*/
-$stmt = $pdo->prepare("
-    INSERT INTO public_booking_requests (
-        full_name, email, phone,
-        dog_name, dog_size,
-        service_type,
-        date_start, date_end,
-        walk_duration,
-        estimated_price,
-        unit_price,
-        quantity,
-        pricing_type,
-        discount_label,
-        status
-    ) VALUES (
-        :full_name, :email, :phone,
-        :dog_name, :dog_size,
-        :service_type,
-        :date_start, :date_end,
-        :walk_duration,
-        :estimated_price,
-        :unit_price,
-        :quantity,
-        :pricing_type,
-        :discount_label,
-        'pending'
-    )
-");
+try {
+    $stmt = $pdo->prepare("
+        INSERT INTO non_member_bookings (
+            full_name,
+            phone,
+            email,
+            service_type,
+            dog_name,
+            dog_size,
+            walk_duration,
+            preferred_walk_time,
+            date_start,
+            date_end,
+            feeding_schedule,
+            preferred_contact,
+            notes,
+            estimated_price,
+            status,
+            pricing_type,
+            unit_price,
+            discount_label,
+            quantity
+        ) VALUES (
+            :full_name,
+            :phone,
+            :email,
+            :service_type,
+            :dog_name,
+            :dog_size,
+            :walk_duration,
+            :preferred_walk_time,
+            :date_start,
+            :date_end,
+            :feeding_schedule,
+            :preferred_contact,
+            :notes,
+            :estimated_price,
+            :status,
+            :pricing_type,
+            :unit_price,
+            :discount_label,
+            :quantity
+        )
+    ");
 
-$stmt->execute([
-    ':full_name' => $formData['full_name'],
-    ':email' => $formData['email'],
-    ':phone' => $formData['phone'],
-    ':dog_name' => $formData['dog_name'],
-    ':dog_size' => $dogSize ?: null,
-    ':service_type' => $serviceType,
-    ':date_start' => $dateStart,
-    ':date_end' => $dateEnd ?: null,
-    ':walk_duration' => $walkDuration ?: null,
-    ':estimated_price' => $pricing['total_price'],
-    ':unit_price' => $pricing['unit_price'],
-    ':quantity' => $pricing['quantity'],
-    ':pricing_type' => $pricing['pricing_type'],
-    ':discount_label' => $pricing['discount_label'],
-]);
+    $stmt->execute([
+        ':full_name' => $fullName,
+        ':phone' => $phone,
+        ':email' => $email,
+        ':service_type' => $serviceType,
+        ':dog_name' => $dogName,
+        ':dog_size' => $dogSize !== '' ? $dogSize : null,
+        ':walk_duration' => $walkDuration > 0 ? $walkDuration : null,
+        ':preferred_walk_time' => $preferredWalkTime !== '' ? $preferredWalkTime : null,
+        ':date_start' => $dateStart,
+        ':date_end' => $dateEnd !== '' ? $dateEnd : null,
+        ':feeding_schedule' => $feedingSchedule !== '' ? $feedingSchedule : null,
+        ':preferred_contact' => $preferredContact !== '' ? $preferredContact : null,
+        ':notes' => $notes !== '' ? $notes : null,
+        ':estimated_price' => (float) $pricing['total_price'],
+        ':status' => 'Requested',
+        ':pricing_type' => (string) $pricing['pricing_type'],
+        ':unit_price' => (float) $pricing['unit_price'],
+        ':discount_label' => (string) $pricing['discount_label'],
+        ':quantity' => (int) $pricing['quantity'],
+    ]);
+} catch (Throwable $e) {
+    redirect_with_flash('error', 'Unable to save booking right now. Please try again.', $formData);
+}
 
 $_SESSION['nonmember_flash_type'] = 'success';
 $_SESSION['nonmember_flash_message'] = 'Booking submitted successfully.';
