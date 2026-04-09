@@ -417,9 +417,27 @@ function lookupReferralOwnerName(PDO $pdo, $referralCode)
 function memberServiceConfig()
 {
     return array(
-        'drop_in' => dd_get_drop_in_config(true),
-        'daycare' => dd_get_daycare_config(true),
-        'sitting' => dd_get_sitting_config(true),
+        'drop_in' => array(
+            'hourly_rate' => 25.00,
+            'walk_add_on' => 7.00,
+            'max_hours' => 2,
+            'walk_duration_minutes' => 30,
+        ),
+        'daycare' => array(
+            'base_rate' => 55.00,
+            'hours' => 6,
+            'food_fee' => 5.00,
+            'included_walks' => 1,
+            'walk_duration_minutes' => 30,
+            'additional_walk_rate' => 10.00,
+        ),
+        'sitting' => array(
+            'base_rate' => 120.00,
+            'hours' => 4,
+            'included_walks' => 1,
+            'walk_duration_minutes' => 30,
+            'additional_walk_rate' => 10.00,
+        ),
     );
 }
 
@@ -445,10 +463,32 @@ function calculateMemberBookingPricing(array $input)
     }
 
     if ($serviceType === 'daycare') {
-        return dd_get_service_pricing('daycare', true, array(
-            'provide_food' => $daycareProvideFood,
-            'extra_walks' => $daycareExtraWalks,
-        ));
+        $basePrice = (float) $config['daycare']['base_rate'];
+        $foodFee = $daycareProvideFood ? (float) $config['daycare']['food_fee'] : 0.00;
+        $extraWalkCost = $daycareExtraWalks * (float) $config['daycare']['additional_walk_rate'];
+        $totalPrice = $basePrice + $foodFee + $extraWalkCost;
+
+        return array(
+            'service_type' => 'daycare',
+            'pricing_type' => 'member',
+            'discount_label' => 'member_daycare_6hr_custom',
+            'quantity' => 1,
+            'unit_label' => 'session',
+            'unit_price' => $basePrice,
+            'total_price' => $totalPrice,
+            'duration' => (int) $config['daycare']['hours'] * 60,
+            'dog_size' => $petSize !== '' ? $petSize : null,
+            'pricing_breakdown' => array(
+                'base_price' => $basePrice,
+                'food_fee' => $foodFee,
+                'included_walks' => (int) $config['daycare']['included_walks'],
+                'included_walk_duration_minutes' => (int) $config['daycare']['walk_duration_minutes'],
+                'extra_walks' => $daycareExtraWalks,
+                'extra_walk_rate' => (float) $config['daycare']['additional_walk_rate'],
+                'extra_walk_cost' => $extraWalkCost,
+                'session_hours' => (int) $config['daycare']['hours'],
+            ),
+        );
     }
 
     if ($serviceType === 'boarding') {
@@ -461,16 +501,56 @@ function calculateMemberBookingPricing(array $input)
     }
 
     if ($serviceType === 'drop-in') {
-        return dd_get_service_pricing('drop_in', true, array(
+        $dropInHours = max(1, min((int) $config['drop_in']['max_hours'], $dropInHours));
+        $basePrice = $dropInHours * (float) $config['drop_in']['hourly_rate'];
+        $walkFee = $dropInAddWalk ? (float) $config['drop_in']['walk_add_on'] : 0.00;
+        $totalPrice = $basePrice + $walkFee;
+
+        return array(
+            'service_type' => 'drop-in',
+            'pricing_type' => 'member',
+            'discount_label' => 'member_dropin_hourly_custom',
             'quantity' => $dropInHours,
-            'add_walk' => $dropInAddWalk,
-        ));
+            'unit_label' => 'hour',
+            'unit_price' => (float) $config['drop_in']['hourly_rate'],
+            'total_price' => $totalPrice,
+            'duration' => $dropInHours * 60,
+            'dog_size' => $petSize !== '' ? $petSize : null,
+            'pricing_breakdown' => array(
+                'base_price' => $basePrice,
+                'hours' => $dropInHours,
+                'walk_added' => $dropInAddWalk ? 1 : 0,
+                'walk_duration_minutes' => (int) $config['drop_in']['walk_duration_minutes'],
+                'walk_fee' => $walkFee,
+            ),
+        );
     }
 
     if ($serviceType === 'sitting') {
-        return dd_get_service_pricing('sitting', true, array(
-            'extra_walks' => $sittingExtraWalks,
-        ));
+        $basePrice = (float) $config['sitting']['base_rate'];
+        $extraWalkCost = $sittingExtraWalks * (float) $config['sitting']['additional_walk_rate'];
+        $totalPrice = $basePrice + $extraWalkCost;
+
+        return array(
+            'service_type' => 'sitting',
+            'pricing_type' => 'member',
+            'discount_label' => 'member_in_home_sitting_custom',
+            'quantity' => 1,
+            'unit_label' => 'session',
+            'unit_price' => $basePrice,
+            'total_price' => $totalPrice,
+            'duration' => (int) $config['sitting']['hours'] * 60,
+            'dog_size' => $petSize !== '' ? $petSize : null,
+            'pricing_breakdown' => array(
+                'base_price' => $basePrice,
+                'included_walks' => (int) $config['sitting']['included_walks'],
+                'included_walk_duration_minutes' => (int) $config['sitting']['walk_duration_minutes'],
+                'extra_walks' => $sittingExtraWalks,
+                'extra_walk_rate' => (float) $config['sitting']['additional_walk_rate'],
+                'extra_walk_cost' => $extraWalkCost,
+                'session_hours' => (int) $config['sitting']['hours'],
+            ),
+        );
     }
 
     throw new InvalidArgumentException('Invalid service type selected.');
@@ -489,6 +569,422 @@ function serializeBookingMeta(array $meta)
     }
 
     return json_encode($clean, JSON_UNESCAPED_SLASHES);
+}
+
+function normalizeTimeForSql($time)
+{
+    $time = trim((string) $time);
+
+    if ($time === '') {
+        return '';
+    }
+
+    $formats = array('H:i:s', 'H:i', 'g:i A', 'g:iA', 'h:i A', 'h:iA');
+
+    foreach ($formats as $format) {
+        $dt = DateTime::createFromFormat($format, $time);
+        if ($dt instanceof DateTime) {
+            return $dt->format('H:i:s');
+        }
+    }
+
+    $ts = strtotime($time);
+    if ($ts !== false) {
+        return date('H:i:s', $ts);
+    }
+
+    return '';
+}
+
+function combineDateAndTime($date, $time)
+{
+    $date = trim((string) $date);
+    $time = normalizeTimeForSql($time);
+
+    if ($date === '' || $time === '') {
+        return null;
+    }
+
+    $dt = DateTime::createFromFormat('Y-m-d H:i:s', $date . ' ' . $time);
+    return $dt instanceof DateTime ? $dt : null;
+}
+
+function bookingEndDateForCapacity($serviceType, $serviceDate, $endDate)
+{
+    $serviceType = normalizeServiceTypeLocal($serviceType);
+
+    if ($serviceType === 'boarding') {
+        $cleanEndDate = trim((string) $endDate);
+        if ($cleanEndDate !== '') {
+            return $cleanEndDate;
+        }
+    }
+
+    return trim((string) $serviceDate);
+}
+
+function getRequestedDateRangeForCapacity($serviceType, $serviceDate, $endDate)
+{
+    $start = trim((string) $serviceDate);
+    $end = bookingEndDateForCapacity($serviceType, $serviceDate, $endDate);
+
+    if ($start === '') {
+        return array('', '');
+    }
+
+    if ($end === '') {
+        $end = $start;
+    }
+
+    if ($end < $start) {
+        $end = $start;
+    }
+
+    return array($start, $end);
+}
+
+function dayOfWeekForDate($date)
+{
+    $ts = strtotime((string) $date);
+    if ($ts === false) {
+        return null;
+    }
+
+    return (int) date('w', $ts);
+}
+
+function capacityBlockingStatuses()
+{
+    return array(
+        'pending',
+        'available',
+        'accepted',
+        'assigned',
+        'confirmed',
+        'in_progress',
+        'in progress',
+        'active',
+        'walking',
+        'started',
+    );
+}
+
+function normalizedStatusCountsForCapacity($status)
+{
+    $status = strtolower(trim((string) $status));
+
+    if ($status === 'in progress') {
+        return 'in_progress';
+    }
+
+    return $status;
+}
+
+function getActiveWalkerFallbackCapacity(PDO $pdo)
+{
+    if (!hasTable($pdo, 'walkers')) {
+        return 0;
+    }
+
+    $columns = getTableColumns($pdo, 'walkers');
+    if (empty($columns)) {
+        return 0;
+    }
+
+    try {
+        if (in_array('is_active', $columns, true)) {
+            $stmt = $pdo->query("SELECT COUNT(*) FROM walkers WHERE COALESCE(is_active, 0) = 1");
+        } else {
+            $stmt = $pdo->query("SELECT COUNT(*) FROM walkers");
+        }
+
+        return max(0, (int) $stmt->fetchColumn());
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function walkerAvailabilityHasAnyRows(PDO $pdo)
+{
+    if (!hasTable($pdo, 'walker_availability')) {
+        return false;
+    }
+
+    try {
+        $stmt = $pdo->query("SELECT COUNT(*) FROM walker_availability WHERE COALESCE(is_active, 1) = 1");
+        return ((int) $stmt->fetchColumn()) > 0;
+    } catch (Throwable $e) {
+        return false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function getAvailableWalkerCapacity(PDO $pdo, $serviceDate, $serviceTime, $durationMinutes)
+{
+    $durationMinutes = max(1, (int) $durationMinutes);
+
+    if (!walkerAvailabilityHasAnyRows($pdo)) {
+        return getActiveWalkerFallbackCapacity($pdo);
+    }
+
+    $dayOfWeek = dayOfWeekForDate($serviceDate);
+    $startTime = normalizeTimeForSql($serviceTime);
+
+    if ($dayOfWeek === null || $startTime === '') {
+        return 0;
+    }
+
+    $startDateTime = combineDateAndTime($serviceDate, $startTime);
+    if (!$startDateTime instanceof DateTime) {
+        return 0;
+    }
+
+    $endDateTime = clone $startDateTime;
+    $endDateTime->modify('+' . $durationMinutes . ' minutes');
+
+    $requestStart = $startDateTime->format('H:i:s');
+    $requestEnd = $endDateTime->format('H:i:s');
+
+    try {
+        $sql = "
+            SELECT COUNT(DISTINCT wa.walker_id)
+            FROM walker_availability wa
+            INNER JOIN walkers w ON w.id = wa.walker_id
+            WHERE wa.day_of_week = :day_of_week
+              AND COALESCE(wa.is_active, 1) = 1
+              AND COALESCE(w.is_active, 1) = 1
+              AND wa.start_time < :request_end
+              AND wa.end_time > :request_start
+        ";
+
+        $stmt = $pdo->prepare($sql);
+        $ok = $stmt->execute(array(
+            ':day_of_week' => $dayOfWeek,
+            ':request_start' => $requestStart,
+            ':request_end' => $requestEnd,
+        ));
+
+        if (!$ok) {
+            return 0;
+        }
+
+        return max(0, (int) $stmt->fetchColumn());
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function countOverlappingMemberBookings(PDO $pdo, $serviceDate, $endDate, $serviceTime, $durationMinutes)
+{
+    $table = bookingTable($pdo);
+    if ($table === null) {
+        return 0;
+    }
+
+    $columns = getTableColumns($pdo, $table);
+    if (empty($columns)) {
+        return 0;
+    }
+
+    $serviceDateCol = firstExistingColumn($pdo, $table, array('service_date', 'booking_date', 'walk_date', 'date', 'scheduled_date', 'start_date'));
+    $serviceTimeCol = firstExistingColumn($pdo, $table, array('service_time', 'booking_time', 'walk_time', 'time', 'scheduled_time', 'start_time'));
+    $durationCol = firstExistingColumn($pdo, $table, array('duration_minutes', 'duration', 'minutes'));
+    $statusCol = firstExistingColumn($pdo, $table, array('status', 'booking_status', 'service_status', 'walk_status'));
+    $endDateCol = firstExistingColumn($pdo, $table, array('end_date', 'check_out_date'));
+
+    if ($serviceDateCol === null || $serviceTimeCol === null || $durationCol === null || $statusCol === null) {
+        return 0;
+    }
+
+    list($requestStartDate, $requestEndDate) = getRequestedDateRangeForCapacity('walk', $serviceDate, $endDate);
+    $requestStartTime = normalizeTimeForSql($serviceTime);
+
+    if ($requestStartDate === '' || $requestStartTime === '') {
+        return 0;
+    }
+
+    $requestStart = combineDateAndTime($requestStartDate, $requestStartTime);
+    if (!$requestStart instanceof DateTime) {
+        return 0;
+    }
+
+    $requestEnd = clone $requestStart;
+    $requestEnd->modify('+' . max(1, (int) $durationMinutes) . ' minutes');
+
+    try {
+        $dateSql = $endDateCol !== null
+            ? "COALESCE(NULLIF({$endDateCol}, ''), {$serviceDateCol}) >= :request_start_date AND {$serviceDateCol} <= :request_end_date"
+            : "{$serviceDateCol} = :request_start_date";
+
+        $stmt = $pdo->prepare("
+            SELECT {$serviceDateCol} AS service_date_value,
+                   {$serviceTimeCol} AS service_time_value,
+                   {$durationCol} AS duration_value,
+                   {$statusCol} AS status_value
+            FROM {$table}
+            WHERE {$dateSql}
+        ");
+
+        $params = array(
+            ':request_start_date' => $requestStartDate,
+            ':request_end_date' => $requestEndDate,
+        );
+
+        if (!$stmt->execute($params)) {
+            return 0;
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $count = 0;
+
+        foreach ($rows as $row) {
+            $status = normalizedStatusCountsForCapacity(isset($row['status_value']) ? $row['status_value'] : '');
+            if (!in_array($status, capacityBlockingStatuses(), true)) {
+                continue;
+            }
+
+            $rowDate = trim((string) (isset($row['service_date_value']) ? $row['service_date_value'] : ''));
+            $rowTime = normalizeTimeForSql(isset($row['service_time_value']) ? $row['service_time_value'] : '');
+            $rowDuration = max(1, (int) (isset($row['duration_value']) ? $row['duration_value'] : 0));
+
+            $rowStart = combineDateAndTime($rowDate, $rowTime);
+            if (!$rowStart instanceof DateTime) {
+                continue;
+            }
+
+            $rowEnd = clone $rowStart;
+            $rowEnd->modify('+' . $rowDuration . ' minutes');
+
+            if ($rowStart < $requestEnd && $rowEnd > $requestStart) {
+                $count++;
+            }
+        }
+
+        return $count;
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function countOverlappingNonMemberBookings(PDO $pdo, $serviceDate, $endDate, $serviceTime, $durationMinutes)
+{
+    if (!hasTable($pdo, 'non_member_bookings')) {
+        return 0;
+    }
+
+    $table = 'non_member_bookings';
+    $columns = getTableColumns($pdo, $table);
+    if (empty($columns)) {
+        return 0;
+    }
+
+    $dateStartCol = firstExistingColumn($pdo, $table, array('date_start', 'service_date', 'booking_date', 'start_date'));
+    $dateEndCol = firstExistingColumn($pdo, $table, array('date_end', 'end_date', 'check_out_date'));
+    $timeCol = firstExistingColumn($pdo, $table, array('preferred_walk_time', 'service_time', 'preferred_time', 'time', 'start_time'));
+    $durationCol = firstExistingColumn($pdo, $table, array('walk_duration', 'duration_minutes', 'duration'));
+    $statusCol = firstExistingColumn($pdo, $table, array('status'));
+
+    if ($dateStartCol === null || $timeCol === null || $statusCol === null) {
+        return 0;
+    }
+
+    list($requestStartDate, $requestEndDate) = getRequestedDateRangeForCapacity('walk', $serviceDate, $endDate);
+    $requestStartTime = normalizeTimeForSql($serviceTime);
+
+    if ($requestStartDate === '' || $requestStartTime === '') {
+        return 0;
+    }
+
+    $requestStart = combineDateAndTime($requestStartDate, $requestStartTime);
+    if (!$requestStart instanceof DateTime) {
+        return 0;
+    }
+
+    $requestEnd = clone $requestStart;
+    $requestEnd->modify('+' . max(1, (int) $durationMinutes) . ' minutes');
+
+    try {
+        $dateSql = $dateEndCol !== null
+            ? "COALESCE(NULLIF({$dateEndCol}, ''), {$dateStartCol}) >= :request_start_date AND {$dateStartCol} <= :request_end_date"
+            : "{$dateStartCol} = :request_start_date";
+
+        $selectDuration = $durationCol !== null ? "{$durationCol} AS duration_value" : "30 AS duration_value";
+
+        $stmt = $pdo->prepare("
+            SELECT {$dateStartCol} AS service_date_value,
+                   {$timeCol} AS service_time_value,
+                   {$selectDuration},
+                   {$statusCol} AS status_value
+            FROM {$table}
+            WHERE {$dateSql}
+        ");
+
+        $params = array(
+            ':request_start_date' => $requestStartDate,
+            ':request_end_date' => $requestEndDate,
+        );
+
+        if (!$stmt->execute($params)) {
+            return 0;
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $count = 0;
+
+        foreach ($rows as $row) {
+            $status = normalizedStatusCountsForCapacity(isset($row['status_value']) ? $row['status_value'] : '');
+            if (!in_array($status, capacityBlockingStatuses(), true)) {
+                continue;
+            }
+
+            $rowDate = trim((string) (isset($row['service_date_value']) ? $row['service_date_value'] : ''));
+            $rowTime = normalizeTimeForSql(isset($row['service_time_value']) ? $row['service_time_value'] : '');
+            $rowDuration = max(1, (int) (isset($row['duration_value']) ? $row['duration_value'] : 30));
+
+            $rowStart = combineDateAndTime($rowDate, $rowTime);
+            if (!$rowStart instanceof DateTime) {
+                continue;
+            }
+
+            $rowEnd = clone $rowStart;
+            $rowEnd->modify('+' . $rowDuration . ' minutes');
+
+            if ($rowStart < $requestEnd && $rowEnd > $requestStart) {
+                $count++;
+            }
+        }
+
+        return $count;
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function getBookingCapacitySnapshot(PDO $pdo, $serviceDate, $endDate, $serviceTime, $durationMinutes)
+{
+    $capacity = getAvailableWalkerCapacity($pdo, $serviceDate, $serviceTime, $durationMinutes);
+    $memberOverlapCount = countOverlappingMemberBookings($pdo, $serviceDate, $endDate, $serviceTime, $durationMinutes);
+    $nonMemberOverlapCount = countOverlappingNonMemberBookings($pdo, $serviceDate, $endDate, $serviceTime, $durationMinutes);
+    $bookedCount = $memberOverlapCount + $nonMemberOverlapCount;
+
+    return array(
+        'capacity' => $capacity,
+        'member_overlap_count' => $memberOverlapCount,
+        'non_member_overlap_count' => $nonMemberOverlapCount,
+        'booked_count' => $bookedCount,
+        'remaining_capacity' => max(0, $capacity - $bookedCount),
+        'is_available' => ($capacity > 0 && $bookedCount < $capacity),
+        'used_fallback_capacity' => !walkerAvailabilityHasAnyRows($pdo),
+    );
 }
 
 function insertBooking(PDO $pdo, array $payload)
@@ -521,6 +1017,30 @@ function insertBooking(PDO $pdo, array $payload)
     $quantity = isset($payload['quantity']) ? (int) $payload['quantity'] : 1;
     $unitPrice = isset($payload['unit_price']) ? (float) $payload['unit_price'] : $price;
     $bookingMeta = isset($payload['booking_meta']) && is_array($payload['booking_meta']) ? $payload['booking_meta'] : array();
+
+    $capacitySnapshot = getBookingCapacitySnapshot(
+        $pdo,
+        $serviceDate,
+        $endDate,
+        $serviceTime,
+        $duration
+    );
+
+    if (!$capacitySnapshot['is_available']) {
+        return array(
+            'ok' => false,
+            'message' => 'That time slot is no longer available. Please choose another time.',
+            'booking_id' => 0,
+        );
+    }
+
+    $bookingMeta['capacity_total'] = (int) $capacitySnapshot['capacity'];
+    $bookingMeta['capacity_booked'] = (int) $capacitySnapshot['booked_count'];
+    $bookingMeta['capacity_remaining_after_booking'] = max(0, (int) $capacitySnapshot['remaining_capacity'] - 1);
+    $bookingMeta['capacity_member_overlap_count'] = (int) $capacitySnapshot['member_overlap_count'];
+    $bookingMeta['capacity_non_member_overlap_count'] = (int) $capacitySnapshot['non_member_overlap_count'];
+    $bookingMeta['capacity_used_fallback_walkers'] = $capacitySnapshot['used_fallback_capacity'] ? 1 : 0;
+
     $metaJson = !empty($bookingMeta) ? serializeBookingMeta($bookingMeta) : '';
 
     $fullNotes = $notes;
@@ -618,1266 +1138,68 @@ function insertBooking(PDO $pdo, array $payload)
         return array('ok' => false, 'message' => 'No compatible booking columns were found.', 'booking_id' => 0);
     }
 
-    $fields = array_keys($data);
-    $placeholders = array();
-    $params = array();
+    try {
+        $pdo->beginTransaction();
 
-    foreach ($fields as $field) {
-        $placeholders[] = ':' . $field;
-        $params[':' . $field] = $data[$field];
-    }
+        $recheckSnapshot = getBookingCapacitySnapshot(
+            $pdo,
+            $serviceDate,
+            $endDate,
+            $serviceTime,
+            $duration
+        );
 
-    $sql = 'INSERT INTO ' . $table . ' (' . implode(', ', $fields) . ') VALUES (' . implode(', ', $placeholders) . ')';
-    $stmt = $pdo->prepare($sql);
+        if (!$recheckSnapshot['is_available']) {
+            $pdo->rollBack();
+            return array(
+                'ok' => false,
+                'message' => 'That time slot was just taken. Please choose another time.',
+                'booking_id' => 0,
+            );
+        }
 
-    if (!safeExecute($stmt, $params)) {
+        $fields = array_keys($data);
+        $placeholders = array();
+        $params = array();
+
+        foreach ($fields as $field) {
+            $placeholders[] = ':' . $field;
+            $params[':' . $field] = $data[$field];
+        }
+
+        $sql = 'INSERT INTO ' . $table . ' (' . implode(', ', $fields) . ') VALUES (' . implode(', ', $placeholders) . ')';
+        $stmt = $pdo->prepare($sql);
+
+        if (!safeExecute($stmt, $params)) {
+            $pdo->rollBack();
+            return array('ok' => false, 'message' => 'The booking could not be saved.', 'booking_id' => 0);
+        }
+
+        $bookingId = (int) $pdo->lastInsertId();
+        if ($bookingId <= 0) {
+            $idCol = firstExistingColumn($pdo, $table, array('id', 'booking_id', 'walk_id'));
+            if ($idCol !== null) {
+                $lookupStmt = $pdo->prepare("SELECT {$idCol} FROM {$table} ORDER BY {$idCol} DESC LIMIT 1");
+                if (safeExecute($lookupStmt)) {
+                    $bookingId = (int) $lookupStmt->fetchColumn();
+                }
+            }
+        }
+
+        $pdo->commit();
+
+        return array('ok' => true, 'message' => 'Booking created successfully.', 'booking_id' => $bookingId);
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        return array('ok' => false, 'message' => 'The booking could not be saved.', 'booking_id' => 0);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
         return array('ok' => false, 'message' => 'The booking could not be saved.', 'booking_id' => 0);
     }
-
-    $bookingId = (int) $pdo->lastInsertId();
-    if ($bookingId <= 0) {
-        $idCol = firstExistingColumn($pdo, $table, array('id', 'booking_id', 'walk_id'));
-        if ($idCol !== null) {
-            $lookupStmt = $pdo->prepare("SELECT {$idCol} FROM {$table} ORDER BY {$idCol} DESC LIMIT 1");
-            if (safeExecute($lookupStmt)) {
-                $bookingId = (int) $lookupStmt->fetchColumn();
-            }
-        }
-    }
-
-    return array('ok' => true, 'message' => 'Booking created successfully.', 'booking_id' => $bookingId);
 }
-
-if (!isLoggedInMember()) {
-    redirectTo('login.php');
-}
-
-$userId = currentUserId();
-$clientName = getUserDisplayName($pdo, $userId);
-$pets = getPetsForUser($pdo, $userId);
-$memberConfig = memberServiceConfig();
-
-$formData = array(
-    'service_type' => normalizeServiceTypeLocal(isset($_GET['service']) ? $_GET['service'] : 'walk'),
-    'pet_id' => '',
-    'service_date' => '',
-    'end_date' => '',
-    'service_time' => '',
-    'duration_minutes' => '30',
-    'drop_in_hours' => '1',
-    'drop_in_add_walk' => '0',
-    'daycare_provide_food' => '0',
-    'daycare_extra_walks' => '0',
-    'sitting_extra_walks' => '0',
-    'notes' => '',
-    'referral_code' => normalizeReferralCodeLocal(isset($_GET['ref']) ? $_GET['ref'] : ''),
-);
-
-$error = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $formData['service_type'] = normalizeServiceTypeLocal(isset($_POST['service_type']) ? $_POST['service_type'] : 'walk');
-    $formData['pet_id'] = trim((string) (isset($_POST['pet_id']) ? $_POST['pet_id'] : ''));
-    $formData['service_date'] = trim((string) (isset($_POST['service_date']) ? $_POST['service_date'] : ''));
-    $formData['end_date'] = trim((string) (isset($_POST['end_date']) ? $_POST['end_date'] : ''));
-    $formData['service_time'] = trim((string) (isset($_POST['service_time']) ? $_POST['service_time'] : ''));
-    $formData['duration_minutes'] = trim((string) (isset($_POST['duration_minutes']) ? $_POST['duration_minutes'] : '30'));
-    $formData['drop_in_hours'] = trim((string) (isset($_POST['drop_in_hours']) ? $_POST['drop_in_hours'] : '1'));
-    $formData['drop_in_add_walk'] = isset($_POST['drop_in_add_walk']) ? '1' : '0';
-    $formData['daycare_provide_food'] = isset($_POST['daycare_provide_food']) ? '1' : '0';
-    $formData['daycare_extra_walks'] = trim((string) (isset($_POST['daycare_extra_walks']) ? $_POST['daycare_extra_walks'] : '0'));
-    $formData['sitting_extra_walks'] = trim((string) (isset($_POST['sitting_extra_walks']) ? $_POST['sitting_extra_walks'] : '0'));
-    $formData['notes'] = trim((string) (isset($_POST['notes']) ? $_POST['notes'] : ''));
-    $formData['referral_code'] = normalizeReferralCodeLocal(isset($_POST['referral_code']) ? $_POST['referral_code'] : '');
-
-    $petId = (int) $formData['pet_id'];
-    $serviceType = $formData['service_type'];
-    $serviceDate = $formData['service_date'];
-    $endDate = $formData['end_date'];
-    $serviceTime = $formData['service_time'];
-    $duration = (int) $formData['duration_minutes'];
-    $dropInHours = (int) $formData['drop_in_hours'];
-    $daycareExtraWalks = max(0, (int) $formData['daycare_extra_walks']);
-    $sittingExtraWalks = max(0, (int) $formData['sitting_extra_walks']);
-    $notes = $formData['notes'];
-    $referralCode = $formData['referral_code'];
-
-    $selectedPet = null;
-    foreach ($pets as $pet) {
-        if ((int) $pet['pet_id'] === $petId) {
-            $selectedPet = $pet;
-            break;
-        }
-    }
-
-    if ($selectedPet === null) {
-        $error = 'Please choose a valid pet.';
-    } elseif ($serviceDate === '') {
-        $error = 'Please choose a service date.';
-    } elseif ($serviceType === 'boarding' && $endDate === '') {
-        $error = 'Please choose a check-out date for boarding.';
-    } elseif (!in_array($serviceType, array('boarding'), true) && $serviceTime === '') {
-        $error = 'Please choose a service time.';
-    } elseif ($serviceType === 'walk' && $duration <= 0) {
-        $error = 'Please choose a valid walk duration.';
-    } elseif ($serviceType === 'drop-in' && !in_array($dropInHours, array(1, 2), true)) {
-        $error = 'Drop-ins can only be booked for 1 or 2 hours.';
-    } else {
-        try {
-            $pricingInput = array(
-                'service_type' => $serviceType,
-                'pet_size' => isset($selectedPet['size']) ? $selectedPet['size'] : '',
-                'duration_minutes' => $duration,
-                'start_date' => $serviceDate,
-                'end_date' => $endDate !== '' ? $endDate : $serviceDate,
-                'drop_in_hours' => $dropInHours,
-                'drop_in_add_walk' => ($formData['drop_in_add_walk'] === '1'),
-                'daycare_provide_food' => ($formData['daycare_provide_food'] === '1'),
-                'daycare_extra_walks' => $daycareExtraWalks,
-                'sitting_extra_walks' => $sittingExtraWalks,
-            );
-
-            $pricingResult = calculateMemberBookingPricing($pricingInput);
-            $price = (float) $pricingResult['total_price'];
-
-            $bookingMeta = array(
-                'service_type' => $serviceType,
-                'member_pricing' => 1,
-            );
-
-            if ($serviceType === 'drop-in') {
-                $bookingMeta['drop_in_hours'] = $dropInHours;
-                $bookingMeta['drop_in_add_walk'] = ($formData['drop_in_add_walk'] === '1');
-                $bookingMeta['drop_in_walk_duration_minutes'] = $memberConfig['drop_in']['walk_duration_minutes'];
-            } elseif ($serviceType === 'daycare') {
-                $bookingMeta['daycare_hours'] = $memberConfig['daycare']['hours'];
-                $bookingMeta['daycare_provide_food'] = ($formData['daycare_provide_food'] === '1');
-                $bookingMeta['daycare_included_walks'] = $memberConfig['daycare']['included_walks'];
-                $bookingMeta['daycare_included_walk_duration_minutes'] = $memberConfig['daycare']['included_walk_duration_minutes'];
-                $bookingMeta['daycare_extra_walks'] = $daycareExtraWalks;
-            } elseif ($serviceType === 'sitting') {
-                $bookingMeta['sitting_hours'] = $memberConfig['sitting']['hours'];
-                $bookingMeta['sitting_included_walks'] = $memberConfig['sitting']['included_walks'];
-                $bookingMeta['sitting_included_walk_duration_minutes'] = $memberConfig['sitting']['included_walk_duration_minutes'];
-                $bookingMeta['sitting_extra_walks'] = $sittingExtraWalks;
-            }
-
-            $insert = insertBooking($pdo, array(
-                'user_id' => $userId,
-                'pet_id' => $petId,
-                'pet_name' => (string) $selectedPet['pet_name'],
-                'client_name' => $clientName,
-                'service_type' => $serviceType,
-                'service_date' => $serviceDate,
-                'end_date' => $endDate,
-                'service_time' => $serviceTime,
-                'duration_minutes' => (int) $pricingResult['duration'],
-                'notes' => $notes,
-                'price' => $price,
-                'pricing_type' => (string) $pricingResult['pricing_type'],
-                'discount_label' => (string) $pricingResult['discount_label'],
-                'quantity' => (int) $pricingResult['quantity'],
-                'unit_price' => (float) $pricingResult['unit_price'],
-                'referral_code' => $referralCode,
-                'booking_meta' => $bookingMeta,
-            ));
-
-            if (!$insert['ok']) {
-                $error = $insert['message'];
-            } else {
-                $bookingId = (int) $insert['booking_id'];
-
-                if (
-                    $bookingId > 0
-                    && $referralCode !== ''
-                    && function_exists('attachReferralToBooking')
-                ) {
-                    try {
-                        attachReferralToBooking(
-                            $pdo,
-                            $bookingId,
-                            $userId,
-                            $referralCode,
-                            $serviceType,
-                            $price
-                        );
-                    } catch (Throwable $e) {
-                    } catch (Exception $e) {
-                    }
-                }
-
-                if ($bookingId > 0) {
-                    $message = 'Your ' . serviceLabel($serviceType) . ' booking has been created and is pending confirmation.';
-                    if ($referralCode !== '') {
-                        $message .= ' Referral code ' . $referralCode . ' was applied.';
-                    }
-
-                    writeNotification(
-                        $pdo,
-                        $userId,
-                        $bookingId,
-                        'Booking Created',
-                        $message
-                    );
-                }
-
-                $_SESSION['dashboard_flash'] = 'Your ' . serviceLabel($serviceType) . ' booking request was submitted successfully.';
-                redirectTo('my-bookings.php');
-            }
-        } catch (Throwable $e) {
-            $error = $e->getMessage();
-        } catch (Exception $e) {
-            $error = $e->getMessage();
-        }
-    }
-}
-
-$previewPrice = 0.00;
-$previewLabel = 'Live member pricing updates automatically as you change selections.';
-$previewSummaryLines = array();
-
-try {
-    $previewPetSize = '';
-    if ($formData['pet_id'] !== '') {
-        foreach ($pets as $pet) {
-            if ((string) $pet['pet_id'] === $formData['pet_id']) {
-                $previewPetSize = isset($pet['size']) ? (string) $pet['size'] : '';
-                break;
-            }
-        }
-    }
-
-    $previewPricing = calculateMemberBookingPricing(array(
-        'service_type' => $formData['service_type'],
-        'pet_size' => $previewPetSize,
-        'duration_minutes' => (int) $formData['duration_minutes'],
-        'start_date' => $formData['service_date'] !== '' ? $formData['service_date'] : date('Y-m-d'),
-        'end_date' => $formData['end_date'] !== '' ? $formData['end_date'] : ($formData['service_date'] !== '' ? $formData['service_date'] : date('Y-m-d')),
-        'drop_in_hours' => (int) $formData['drop_in_hours'],
-        'drop_in_add_walk' => ($formData['drop_in_add_walk'] === '1'),
-        'daycare_provide_food' => ($formData['daycare_provide_food'] === '1'),
-        'daycare_extra_walks' => (int) $formData['daycare_extra_walks'],
-        'sitting_extra_walks' => (int) $formData['sitting_extra_walks'],
-    ));
-
-    $previewPrice = (float) $previewPricing['total_price'];
-
-    if ($formData['service_type'] === 'walk') {
-        $previewLabel = 'Member walk pricing based on your selected duration.';
-        $previewSummaryLines[] = 'Walk length: ' . (int) $formData['duration_minutes'] . ' minutes';
-    } elseif ($formData['service_type'] === 'drop-in') {
-        $hours = max(1, min(2, (int) $formData['drop_in_hours']));
-        $previewLabel = 'Drop-ins are billed hourly and capped at 2 hours.';
-        $previewSummaryLines[] = $hours . ' hour drop-in at ' . dd_format_money((float) $memberConfig['drop_in']['hourly_rate']) . ' per hour';
-        if ($formData['drop_in_add_walk'] === '1') {
-            $previewSummaryLines[] = 'Includes 1 add-on ' . (int) $memberConfig['drop_in']['walk_duration_minutes'] . '-minute walk for ' . dd_format_money((float) $memberConfig['drop_in']['walk_add_on']);
-        }
-    } elseif ($formData['service_type'] === 'daycare') {
-        $previewLabel = '6-hour daycare includes 1 complimentary 30-minute walk.';
-        $previewSummaryLines[] = '6-hour daycare session: ' . dd_format_money((float) $memberConfig['daycare']['base_rate']);
-        if ($formData['daycare_provide_food'] === '1') {
-            $previewSummaryLines[] = 'Food provided by Doggie Dorian’s: +' . dd_format_money((float) $memberConfig['daycare']['food_fee']);
-        } else {
-            $previewSummaryLines[] = 'Pet parent provides food: no food fee';
-        }
-        $extraWalks = max(0, (int) $formData['daycare_extra_walks']);
-        if ($extraWalks > 0) {
-            $previewSummaryLines[] = $extraWalks . ' additional 30-minute walk(s) at ' . dd_format_money((float) $memberConfig['daycare']['additional_walk_rate']) . ' each';
-        }
-    } elseif ($formData['service_type'] === 'sitting') {
-        $previewLabel = 'In-home sitting includes 1 complimentary 30-minute walk.';
-        $previewSummaryLines[] = 'Up to ' . (int) $memberConfig['sitting']['hours'] . ' hours in your home';
-        $previewSummaryLines[] = 'Base session: ' . dd_format_money((float) $memberConfig['sitting']['base_rate']);
-        $extraWalks = max(0, (int) $formData['sitting_extra_walks']);
-        if ($extraWalks > 0) {
-            $previewSummaryLines[] = $extraWalks . ' additional 30-minute walk(s) at ' . dd_format_money((float) $memberConfig['sitting']['additional_walk_rate']) . ' each';
-        }
-    } elseif ($formData['service_type'] === 'boarding') {
-        $previewLabel = 'Boarding is priced by dog size and number of nights.';
-        if ($previewPetSize === '') {
-            $previewSummaryLines[] = 'Select a pet to preview the most accurate size-based boarding rate.';
-        } else {
-            $previewSummaryLines[] = 'Boarding uses member nightly pricing for ' . $previewPetSize . ' dogs.';
-        }
-        $previewSummaryLines[] = '5+ nights automatically receive the extended-stay member rate.';
-    }
-} catch (Throwable $e) {
-    $previewPrice = 0.00;
-}
-
-$referralOwnerName = lookupReferralOwnerName($pdo, $formData['referral_code']);
-$pageTitle = 'Book Premium Care';
-$pageEyebrow = 'Member Booking';
-$pricingMatrix = dd_pricing_matrix();
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?php echo h($pageTitle); ?> | Doggie Dorian’s</title>
-    <meta name="description" content="Book premium pet care services with Doggie Dorian’s.">
-    <style>
-        * { box-sizing: border-box; }
-
-        :root {
-            --bg: #09090d;
-            --panel: rgba(255,255,255,0.06);
-            --panel-2: rgba(255,255,255,0.04);
-            --stroke: rgba(255,255,255,0.10);
-            --text: #f4f1ea;
-            --muted: rgba(244,241,234,0.68);
-            --gold: #e2c48d;
-            --gold-deep: #b9975b;
-            --success: #d7f1dd;
-            --success-bg: rgba(125,206,141,0.14);
-            --success-stroke: rgba(125,206,141,0.26);
-            --danger: #ffd5d5;
-            --danger-bg: rgba(214,123,123,0.14);
-            --danger-stroke: rgba(214,123,123,0.30);
-        }
-
-        body {
-            margin: 0;
-            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background:
-                radial-gradient(circle at top left, rgba(185,151,91,0.12), transparent 32%),
-                radial-gradient(circle at top right, rgba(226,196,141,0.08), transparent 28%),
-                var(--bg);
-            color: var(--text);
-        }
-
-        a {
-            color: inherit;
-            text-decoration: none;
-        }
-
-        .page {
-            max-width: 1180px;
-            margin: 0 auto;
-            padding: 28px 18px 80px;
-        }
-
-        .topbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 16px;
-            flex-wrap: wrap;
-            margin-bottom: 24px;
-        }
-
-        .brand {
-            font-size: 1.55rem;
-            font-weight: 900;
-            letter-spacing: .04em;
-        }
-
-        .top-links {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        .top-link {
-            padding: 10px 14px;
-            border-radius: 999px;
-            background: var(--panel);
-            border: 1px solid rgba(255,255,255,0.08);
-            font-weight: 700;
-            transition: .18s ease;
-        }
-
-        .top-link:hover {
-            transform: translateY(-1px);
-            background: rgba(255,255,255,0.08);
-        }
-
-        .hero {
-            display: grid;
-            grid-template-columns: 1.15fr .85fr;
-            gap: 20px;
-            margin-bottom: 22px;
-        }
-
-        .card {
-            background: linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.03));
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 26px;
-            padding: 22px;
-            box-shadow: 0 24px 64px rgba(0,0,0,0.30);
-            backdrop-filter: blur(8px);
-        }
-
-        .eyebrow {
-            color: #c6b28b;
-            text-transform: uppercase;
-            letter-spacing: .14em;
-            font-size: .75rem;
-            font-weight: 800;
-            margin-bottom: 10px;
-        }
-
-        h1 {
-            margin: 0 0 10px;
-            font-size: 2.1rem;
-            line-height: 1.06;
-        }
-
-        .sub {
-            color: var(--muted);
-            line-height: 1.6;
-        }
-
-        .flash-error {
-            margin-bottom: 18px;
-            padding: 14px 18px;
-            border-radius: 16px;
-            font-weight: 700;
-            background: var(--danger-bg);
-            border: 1px solid var(--danger-stroke);
-            color: var(--danger);
-        }
-
-        .referral-banner {
-            margin: 16px 0 0;
-            padding: 14px 16px;
-            border-radius: 16px;
-            background: rgba(198,178,139,0.12);
-            border: 1px solid rgba(198,178,139,0.25);
-            color: #f3e5c7;
-            font-weight: 700;
-            line-height: 1.55;
-        }
-
-        form {
-            display: grid;
-            gap: 16px;
-            margin-top: 20px;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 16px;
-        }
-
-        .stack {
-            display: grid;
-            gap: 16px;
-        }
-
-        .field-shell {
-            padding: 14px;
-            border-radius: 18px;
-            background: var(--panel-2);
-            border: 1px solid rgba(255,255,255,0.06);
-        }
-
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-size: .78rem;
-            text-transform: uppercase;
-            letter-spacing: .12em;
-            color: rgba(244,241,234,0.58);
-            font-weight: 800;
-        }
-
-        select, input, textarea {
-            width: 100%;
-            border-radius: 14px;
-            border: 1px solid var(--stroke);
-            background: rgba(0,0,0,0.28);
-            color: #fff;
-            padding: 13px 14px;
-            font: inherit;
-            outline: none;
-            transition: border-color .16s ease, box-shadow .16s ease;
-        }
-
-        select:focus, input:focus, textarea:focus {
-            border-color: rgba(226,196,141,0.58);
-            box-shadow: 0 0 0 4px rgba(226,196,141,0.10);
-        }
-
-        textarea {
-            min-height: 120px;
-            resize: vertical;
-        }
-
-        .submit-row {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            margin-top: 6px;
-        }
-
-        button {
-            border: none;
-            cursor: pointer;
-            border-radius: 14px;
-            padding: 13px 18px;
-            font-weight: 800;
-            font-size: .95rem;
-        }
-
-        .btn-primary {
-            background: linear-gradient(135deg, var(--gold), var(--gold-deep));
-            color: #0b0b10;
-            box-shadow: 0 12px 30px rgba(185,151,91,0.22);
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-1px);
-        }
-
-        .feature-list {
-            display: grid;
-            gap: 12px;
-            margin-top: 16px;
-        }
-
-        .feature {
-            padding: 16px;
-            border-radius: 18px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .feature strong {
-            display: block;
-            margin-bottom: 6px;
-        }
-
-        .price-preview {
-            margin-top: 16px;
-            padding: 18px;
-            border-radius: 20px;
-            background: rgba(198,178,139,0.12);
-            border: 1px solid rgba(198,178,139,0.25);
-        }
-
-        .price-label {
-            font-size: .78rem;
-            text-transform: uppercase;
-            letter-spacing: .12em;
-            color: rgba(244,241,234,0.62);
-            font-weight: 800;
-            margin-bottom: 8px;
-        }
-
-        .price-value {
-            font-size: 2.15rem;
-            font-weight: 900;
-        }
-
-        .muted {
-            color: rgba(244,241,234,0.64);
-        }
-
-        .live-badge {
-            display: inline-block;
-            margin-top: 10px;
-            padding: 8px 12px;
-            border-radius: 999px;
-            background: var(--success-bg);
-            border: 1px solid var(--success-stroke);
-            color: var(--success);
-            font-weight: 700;
-            font-size: .85rem;
-        }
-
-        .helper-note {
-            color: rgba(244,241,234,0.60);
-            font-size: .85rem;
-            line-height: 1.5;
-            margin-top: 8px;
-        }
-
-        .section-note {
-            color: rgba(244,241,234,0.70);
-            font-size: .9rem;
-            line-height: 1.6;
-            margin-top: 4px;
-        }
-
-        .service-addon-box {
-            display: grid;
-            gap: 12px;
-            padding: 16px;
-            border-radius: 20px;
-            background: rgba(255,255,255,0.045);
-            border: 1px solid rgba(255,255,255,0.07);
-        }
-
-        .addon-title {
-            font-size: .82rem;
-            text-transform: uppercase;
-            letter-spacing: .12em;
-            color: #c6b28b;
-            font-weight: 800;
-        }
-
-        .checkbox-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 12px 14px;
-            border-radius: 16px;
-            background: rgba(0,0,0,0.20);
-            border: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .checkbox-row input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
-            margin: 0;
-            padding: 0;
-            border-radius: 6px;
-            accent-color: #d7bb82;
-            box-shadow: none;
-        }
-
-        .checkbox-copy {
-            display: grid;
-            gap: 4px;
-        }
-
-        .checkbox-copy strong {
-            font-size: .95rem;
-        }
-
-        .checkbox-copy span {
-            color: var(--muted);
-            font-size: .88rem;
-        }
-
-        .summary-list {
-            margin: 12px 0 0;
-            padding-left: 18px;
-            color: rgba(244,241,234,0.80);
-            line-height: 1.6;
-        }
-
-        .summary-list li + li {
-            margin-top: 5px;
-        }
-
-        .pill-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-top: 10px;
-        }
-
-        .pill {
-            display: inline-flex;
-            align-items: center;
-            padding: 8px 12px;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.08);
-            font-size: .86rem;
-            font-weight: 700;
-            color: rgba(244,241,234,0.84);
-        }
-
-        .hidden {
-            display: none !important;
-        }
-
-        @media (max-width: 980px) {
-            .hero,
-            .grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        @media (max-width: 640px) {
-            .page {
-                padding: 20px 12px 60px;
-            }
-
-            h1 {
-                font-size: 1.7rem;
-            }
-
-            .card {
-                padding: 18px;
-                border-radius: 22px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="page">
-        <div class="topbar">
-            <div class="brand">Doggie Dorian’s</div>
-            <div class="top-links">
-                <a class="top-link" href="dashboard.php">Dashboard</a>
-                <a class="top-link" href="my-bookings.php">My Bookings</a>
-                <a class="top-link" href="ambassadors.php">Ambassadors</a>
-                <a class="top-link" href="logout.php">Logout</a>
-            </div>
-        </div>
-
-        <?php if ($error !== ''): ?>
-            <div class="flash-error"><?php echo h($error); ?></div>
-        <?php endif; ?>
-
-        <section class="hero">
-            <div class="card">
-                <div class="eyebrow"><?php echo h($pageEyebrow); ?></div>
-                <h1><?php echo h($pageTitle); ?></h1>
-                <div class="sub">
-                    Use one member booking page for walks, drop-ins, daycare, in-home sitting, and boarding.
-                </div>
-
-                <?php if ($formData['referral_code'] !== ''): ?>
-                    <div class="referral-banner">
-                        Referral code <strong><?php echo h($formData['referral_code']); ?></strong> is attached to this booking.
-                        <?php if ($referralOwnerName !== ''): ?>
-                            This code belongs to <strong><?php echo h($referralOwnerName); ?></strong>.
-                        <?php endif; ?>
-                    </div>
-                <?php endif; ?>
-
-                <form method="post" action="book-service.php<?php echo $formData['service_type'] === 'walk' ? '?service=walk' : ''; ?>" novalidate>
-                    <div class="grid">
-                        <div class="field-shell">
-                            <label for="service_type">Service Type</label>
-                            <select name="service_type" id="service_type" required>
-                                <option value="walk" <?php echo $formData['service_type'] === 'walk' ? 'selected' : ''; ?>>Walk</option>
-                                <option value="boarding" <?php echo $formData['service_type'] === 'boarding' ? 'selected' : ''; ?>>Boarding</option>
-                                <option value="daycare" <?php echo $formData['service_type'] === 'daycare' ? 'selected' : ''; ?>>Daycare</option>
-                                <option value="sitting" <?php echo $formData['service_type'] === 'sitting' ? 'selected' : ''; ?>>In-Home Sitting</option>
-                                <option value="drop-in" <?php echo $formData['service_type'] === 'drop-in' ? 'selected' : ''; ?>>Drop-In</option>
-                            </select>
-                        </div>
-
-                        <div class="field-shell">
-                            <label for="pet_id">Choose Pet</label>
-                            <select name="pet_id" id="pet_id" required>
-                                <option value="">Select your pet</option>
-                                <?php foreach ($pets as $pet): ?>
-                                    <option
-                                        value="<?php echo (int) $pet['pet_id']; ?>"
-                                        data-pet-size="<?php echo h(strtolower(isset($pet['size']) ? $pet['size'] : '')); ?>"
-                                        <?php echo (string) $pet['pet_id'] === $formData['pet_id'] ? 'selected' : ''; ?>
-                                    >
-                                        <?php echo h($pet['pet_name']); ?><?php echo $pet['breed'] !== '' ? ' · ' . h($pet['breed']) : ''; ?><?php echo $pet['size'] !== '' ? ' · ' . h($pet['size']) : ''; ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="grid">
-                        <div class="field-shell">
-                            <label for="service_date" id="start-date-label">Service Date</label>
-                            <input type="date" id="service_date" name="service_date" value="<?php echo old('service_date', $formData); ?>" required>
-                        </div>
-
-                        <div class="field-shell" id="end-date-group">
-                            <label for="end_date" id="end-date-label">End Date</label>
-                            <input type="date" id="end_date" name="end_date" value="<?php echo old('end_date', $formData); ?>">
-                            <div class="helper-note" id="end-date-helper"></div>
-                        </div>
-                    </div>
-
-                    <div class="grid">
-                        <div class="field-shell" id="time-group">
-                            <label for="service_time" id="time-label">Preferred Time</label>
-                            <input type="time" id="service_time" name="service_time" value="<?php echo old('service_time', $formData); ?>">
-                        </div>
-
-                        <div class="field-shell" id="duration-group">
-                            <label for="duration_minutes">Walk Duration</label>
-                            <select name="duration_minutes" id="duration_minutes">
-                                <option value="15" <?php echo $formData['duration_minutes'] === '15' ? 'selected' : ''; ?>>15 minutes</option>
-                                <option value="20" <?php echo $formData['duration_minutes'] === '20' ? 'selected' : ''; ?>>20 minutes</option>
-                                <option value="30" <?php echo $formData['duration_minutes'] === '30' ? 'selected' : ''; ?>>30 minutes</option>
-                                <option value="45" <?php echo $formData['duration_minutes'] === '45' ? 'selected' : ''; ?>>45 minutes</option>
-                                <option value="60" <?php echo $formData['duration_minutes'] === '60' ? 'selected' : ''; ?>>60 minutes</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="stack" id="dropin-options">
-                        <div class="service-addon-box">
-                            <div class="addon-title">Drop-In Options</div>
-                            <div class="grid">
-                                <div class="field-shell">
-                                    <label for="drop_in_hours">Drop-In Length</label>
-                                    <select name="drop_in_hours" id="drop_in_hours">
-                                        <option value="1" <?php echo $formData['drop_in_hours'] === '1' ? 'selected' : ''; ?>>1 hour · <?php echo dd_format_money((float) $memberConfig['drop_in']['hourly_rate']); ?></option>
-                                        <option value="2" <?php echo $formData['drop_in_hours'] === '2' ? 'selected' : ''; ?>>2 hours · <?php echo dd_format_money((float) $memberConfig['drop_in']['hourly_rate'] * 2); ?></option>
-                                    </select>
-                                    <div class="helper-note">Drop-ins are capped at 2 hours. Anything longer should be booked as daycare.</div>
-                                </div>
-
-                                <div class="field-shell">
-                                    <div class="checkbox-row" style="height: 100%;">
-                                        <input type="checkbox" id="drop_in_add_walk" name="drop_in_add_walk" value="1" <?php echo $formData['drop_in_add_walk'] === '1' ? 'checked' : ''; ?>>
-                                        <div class="checkbox-copy">
-                                            <strong>Add a 30-minute walk</strong>
-                                            <span>Member add-on: <?php echo dd_format_money((float) $memberConfig['drop_in']['walk_add_on']); ?></span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="stack" id="daycare-options">
-                        <div class="service-addon-box">
-                            <div class="addon-title">Daycare Options</div>
-                            <div class="section-note">
-                                6-hour daycare includes 1 complimentary 30-minute walk.
-                            </div>
-
-                            <div class="grid">
-                                <div class="field-shell">
-                                    <div class="checkbox-row" style="height: 100%;">
-                                        <input type="checkbox" id="daycare_provide_food" name="daycare_provide_food" value="1" <?php echo $formData['daycare_provide_food'] === '1' ? 'checked' : ''; ?>>
-                                        <div class="checkbox-copy">
-                                            <strong>Have us provide food</strong>
-                                            <span>Add <?php echo dd_format_money((float) $memberConfig['daycare']['food_fee']); ?> if you want us to provide the meal.</span>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="field-shell">
-                                    <label for="daycare_extra_walks">Additional 30-Minute Walks</label>
-                                    <select name="daycare_extra_walks" id="daycare_extra_walks">
-                                        <?php for ($i = 0; $i <= 4; $i++): ?>
-                                            <option value="<?php echo $i; ?>" <?php echo $formData['daycare_extra_walks'] === (string) $i ? 'selected' : ''; ?>>
-                                                <?php echo $i; ?><?php echo $i === 0 ? ' extra walks' : ' extra walk' . ($i === 1 ? '' : 's'); ?>
-                                            </option>
-                                        <?php endfor; ?>
-                                    </select>
-                                    <div class="helper-note">Each extra 30-minute walk is <?php echo dd_format_money((float) $memberConfig['daycare']['additional_walk_rate']); ?> for members.</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="stack" id="sitting-options">
-                        <div class="service-addon-box">
-                            <div class="addon-title">In-Home Sitting Options</div>
-                            <div class="section-note">
-                                Up to <?php echo (int) $memberConfig['sitting']['hours']; ?> hours in your home and includes 1 complimentary 30-minute walk.
-                            </div>
-
-                            <div class="field-shell">
-                                <label for="sitting_extra_walks">Additional 30-Minute Walks</label>
-                                <select name="sitting_extra_walks" id="sitting_extra_walks">
-                                    <?php for ($i = 0; $i <= 4; $i++): ?>
-                                        <option value="<?php echo $i; ?>" <?php echo $formData['sitting_extra_walks'] === (string) $i ? 'selected' : ''; ?>>
-                                            <?php echo $i; ?><?php echo $i === 0 ? ' extra walks' : ' extra walk' . ($i === 1 ? '' : 's'); ?>
-                                        </option>
-                                    <?php endfor; ?>
-                                </select>
-                                <div class="helper-note">Each extra 30-minute walk is <?php echo dd_format_money((float) $memberConfig['sitting']['additional_walk_rate']); ?> for members.</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="grid">
-                        <div class="field-shell">
-                            <label for="referral_code">Referral / Ambassador Code</label>
-                            <input
-                                type="text"
-                                id="referral_code"
-                                name="referral_code"
-                                maxlength="50"
-                                placeholder="Optional code"
-                                value="<?php echo old('referral_code', $formData); ?>"
-                            >
-                        </div>
-
-                        <div class="field-shell">
-                            <label>Booking Status</label>
-                            <div class="pill-row">
-                                <div class="pill">Member pricing active</div>
-                                <div class="pill">Single service hub</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="field-shell">
-                        <label for="notes">Care Notes</label>
-                        <textarea id="notes" name="notes" placeholder="Feeding notes, leash preferences, access notes, behavior notes, or anything else important..."><?php echo old('notes', $formData); ?></textarea>
-                    </div>
-
-                    <div class="submit-row">
-                        <button type="submit" class="btn-primary">Request Booking</button>
-                        <a class="top-link" href="my-bookings.php">Back to My Bookings</a>
-                    </div>
-                </form>
-            </div>
-
-            <div class="card">
-                <div class="eyebrow">Booking Overview</div>
-
-                <div class="price-preview">
-                    <div class="price-label">Live Member Price</div>
-                    <div class="price-value" id="live-price"><?php echo dd_format_money((float) $previewPrice); ?></div>
-                    <div class="live-badge" id="live-price-note"><?php echo h($previewLabel); ?></div>
-                    <ul class="summary-list" id="live-summary-list">
-                        <?php foreach ($previewSummaryLines as $line): ?>
-                            <li><?php echo h($line); ?></li>
-                        <?php endforeach; ?>
-                    </ul>
-                </div>
-
-                <div class="feature-list">
-                    <div class="feature">
-                        <strong>Walk pricing</strong>
-                        15 min <?php echo dd_format_money((float) $pricingMatrix['walk']['member'][15]); ?> ·
-                        20 min <?php echo dd_format_money((float) $pricingMatrix['walk']['member'][20]); ?> ·
-                        30 min <?php echo dd_format_money((float) $pricingMatrix['walk']['member'][30]); ?> ·
-                        45 min <?php echo dd_format_money((float) $pricingMatrix['walk']['member'][45]); ?> ·
-                        60 min <?php echo dd_format_money((float) $pricingMatrix['walk']['member'][60]); ?>
-                    </div>
-
-                    <div class="feature">
-                        <strong>Member drop-ins</strong>
-                        <?php echo dd_format_money((float) $memberConfig['drop_in']['hourly_rate']); ?>/hour, capped at 2 hours, with an optional 30-minute walk add-on for <?php echo dd_format_money((float) $memberConfig['drop_in']['walk_add_on']); ?>.
-                    </div>
-
-                    <div class="feature">
-                        <strong>Member daycare</strong>
-                        <?php echo dd_format_money((float) $memberConfig['daycare']['base_rate']); ?> for 6 hours, includes 1 complimentary 30-minute walk, plus <?php echo dd_format_money((float) $memberConfig['daycare']['food_fee']); ?> if we provide food.
-                    </div>
-
-                    <div class="feature">
-                        <strong>In-home sitting</strong>
-                        <?php echo dd_format_money((float) $memberConfig['sitting']['base_rate']); ?> for up to <?php echo (int) $memberConfig['sitting']['hours']; ?> hours in your apartment/home and includes 1 complimentary 30-minute walk.
-                    </div>
-
-                    <div class="feature">
-                        <strong>Boarding</strong>
-                        Boarding is priced by dog size and automatically applies the 5+ night member rate when eligible.
-                    </div>
-
-                    <div class="feature muted">
-                        This is the single member booking page for all service types.
-                    </div>
-                </div>
-            </div>
-        </section>
-    </div>
-
-    <script>
-        (function () {
-            var pricingMatrix = <?php echo json_encode($pricingMatrix); ?>;
-            var memberConfig = <?php echo json_encode($memberConfig); ?>;
-
-            var serviceField = document.getElementById('service_type');
-            var petField = document.getElementById('pet_id');
-            var startDateField = document.getElementById('service_date');
-            var endDateField = document.getElementById('end_date');
-            var timeField = document.getElementById('service_time');
-            var durationField = document.getElementById('duration_minutes');
-            var dropInHoursField = document.getElementById('drop_in_hours');
-            var dropInAddWalkField = document.getElementById('drop_in_add_walk');
-            var daycareProvideFoodField = document.getElementById('daycare_provide_food');
-            var daycareExtraWalksField = document.getElementById('daycare_extra_walks');
-            var sittingExtraWalksField = document.getElementById('sitting_extra_walks');
-
-            var livePrice = document.getElementById('live-price');
-            var liveNote = document.getElementById('live-price-note');
-            var liveSummaryList = document.getElementById('live-summary-list');
-
-            var startDateLabel = document.getElementById('start-date-label');
-            var endDateLabel = document.getElementById('end-date-label');
-            var endDateGroup = document.getElementById('end-date-group');
-            var endDateHelper = document.getElementById('end-date-helper');
-            var timeGroup = document.getElementById('time-group');
-            var timeLabel = document.getElementById('time-label');
-            var durationGroup = document.getElementById('duration-group');
-
-            var dropInOptions = document.getElementById('dropin-options');
-            var daycareOptions = document.getElementById('daycare-options');
-            var sittingOptions = document.getElementById('sitting-options');
-
-            if (!serviceField || !petField || !startDateField || !endDateField || !timeField || !durationField || !livePrice) {
-                return;
-            }
-
-            function getSelectedPetSize() {
-                var option = petField.options[petField.selectedIndex];
-                if (!option) {
-                    return '';
-                }
-
-                return String(option.getAttribute('data-pet-size') || '').toLowerCase();
-            }
-
-            function nightsBetween(start, end) {
-                if (!start || !end) {
-                    return 0;
-                }
-
-                var startDate = new Date(start + 'T00:00:00');
-                var endDate = new Date(end + 'T00:00:00');
-
-                if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || endDate <= startDate) {
-                    return 0;
-                }
-
-                var diff = endDate.getTime() - startDate.getTime();
-                return Math.floor(diff / 86400000);
-            }
-
-            function formatMoney(amount) {
-                return '$' + Number(amount || 0).toFixed(2);
-            }
-
-            function getPricingPreview() {
-                var service = serviceField.value || 'walk';
-                var petSize = getSelectedPetSize();
-                var duration = String(durationField.value || '30');
-                var startDate = startDateField.value || '';
-                var endDate = endDateField.value || '';
-                var response = {
-                    total: 0,
-                    note: 'Live member pricing updates automatically as you change selections.',
-                    lines: []
-                };
-
-                if (service === 'walk') {
-                    var walkPrice = pricingMatrix.walk.member[duration] || pricingMatrix.walk.member['30'] || 25;
-                    response.total = Number(walkPrice);
-                    response.note = 'Member walk pricing based on your selected duration.';
-                    response.lines.push('Walk length: ' + parseInt(duration, 10) + ' minutes');
-                    return response;
-                }
-
-                if (service === 'daycare') {
-                    var base = Number(memberConfig.daycare.base_rate || 55);
-                    var foodFee = daycareProvideFoodField && daycareProvideFoodField.checked ? Number(memberConfig.daycare.food_fee || 5) : 0;
-                    var extraWalks = daycareExtraWalksField ? parseInt(daycareExtraWalksField.value || '0', 10) : 0;
-                    if (isNaN(extraWalks) || extraWalks < 0) {
-                        extraWalks = 0;
-                    }
-                    var extraWalkCost = extraWalks * Number(memberConfig.daycare.additional_walk_rate || 10);
-                    response.total = base + foodFee + extraWalkCost;
-                    response.note = '6-hour daycare includes 1 complimentary 30-minute walk.';
-                    response.lines.push('Base daycare: ' + formatMoney(base));
-                    response.lines.push(daycareProvideFoodField && daycareProvideFoodField.checked ? 'Food provided by Doggie Dorian’s: +' + formatMoney(foodFee) : 'Pet parent provides food: no food fee');
-                    if (extraWalks > 0) {
-                        response.lines.push(extraWalks + ' extra 30-minute walk(s) at ' + formatMoney(memberConfig.daycare.additional_walk_rate) + ' each');
-                    }
-                    return response;
-                }
-
-                if (service === 'boarding') {
-                    if (!petSize || !pricingMatrix.boarding.member[petSize]) {
-                        response.total = Number(pricingMatrix.boarding.member.medium || 90);
-                        response.note = 'Boarding is priced by dog size and number of nights.';
-                        response.lines.push('Select a pet to preview the most accurate size-based boarding rate.');
-                        response.lines.push('5+ nights automatically receive the extended-stay member rate.');
-                        return response;
-                    }
-
-                    var boardingNights = nightsBetween(startDate, endDate);
-                    if (boardingNights <= 0) {
-                        boardingNights = 1;
-                    }
-
-                    if (boardingNights >= 5) {
-                        response.total = Number(pricingMatrix.boarding.member_5plus[petSize]) * boardingNights;
-                        response.note = '5+ night member boarding rate applied.';
-                    } else {
-                        response.total = Number(pricingMatrix.boarding.member[petSize]) * boardingNights;
-                        response.note = 'Boarding is priced by dog size and number of nights.';
-                    }
-
-                    response.lines.push(boardingNights + ' night(s)');
-                    response.lines.push('Pet size: ' + petSize);
-                    if (boardingNights >= 5) {
-                        response.lines.push('Extended-stay member rate included.');
-                    }
-                    return response;
-                }
-
-                if (service === 'drop-in') {
-                    var hours = dropInHoursField ? parseInt(dropInHoursField.value || '1', 10) : 1;
-                    if (isNaN(hours) || hours < 1) {
-                        hours = 1;
-                    }
-                    if (hours > 2) {
-                        hours = 2;
-                    }
-
-                    var dropBase = hours * Number(memberConfig.drop_in.hourly_rate || 25);
-                    var walkFee = dropInAddWalkField && dropInAddWalkField.checked ? Number(memberConfig.drop_in.walk_add_on || 7) : 0;
-                    response.total = dropBase + walkFee;
-                    response.note = 'Drop-ins are hourly and capped at 2 hours.';
-                    response.lines.push(hours + ' hour drop-in at ' + formatMoney(memberConfig.drop_in.hourly_rate) + ' per hour');
-                    if (dropInAddWalkField && dropInAddWalkField.checked) {
-                        response.lines.push('Includes 1 add-on 30-minute walk for ' + formatMoney(memberConfig.drop_in.walk_add_on));
-                    }
-                    return response;
-                }
-
-                if (service === 'sitting') {
-                    var sittingBase = Number(memberConfig.sitting.base_rate || 120);
-                    var sittingExtraWalks = sittingExtraWalksField ? parseInt(sittingExtraWalksField.value || '0', 10) : 0;
-                    if (isNaN(sittingExtraWalks) || sittingExtraWalks < 0) {
-                        sittingExtraWalks = 0;
-                    }
-                    var sittingExtraCost = sittingExtraWalks * Number(memberConfig.sitting.additional_walk_rate || 10);
-                    response.total = sittingBase + sittingExtraCost;
-                    response.note = 'In-home sitting includes 1 complimentary 30-minute walk.';
-                    response.lines.push('Up to ' + Number(memberConfig.sitting.hours || 4) + ' hours in your home');
-                    response.lines.push('Base session: ' + formatMoney(sittingBase));
-                    if (sittingExtraWalks > 0) {
-                        response.lines.push(sittingExtraWalks + ' extra 30-minute walk(s) at ' + formatMoney(memberConfig.sitting.additional_walk_rate) + ' each');
-                    }
-                    return response;
-                }
-
-                return response;
-            }
-
-            function renderSummaryLines(lines) {
-                if (!liveSummaryList) {
-                    return;
-                }
-
-                liveSummaryList.innerHTML = '';
-
-                if (!lines || !lines.length) {
-                    return;
-                }
-
-                lines.forEach(function (line) {
-                    var li = document.createElement('li');
-                    li.textContent = line;
-                    liveSummaryList.appendChild(li);
-                });
-            }
-
-            function updateFieldVisibility() {
-                var service = serviceField.value || 'walk';
-
-                dropInOptions.classList.add('hidden');
-                daycareOptions.classList.add('hidden');
-                sittingOptions.classList.add('hidden');
-
-                if (service === 'walk') {
-                    startDateLabel.textContent = 'Service Date';
-                    endDateGroup.classList.add('hidden');
-                    endDateField.required = false;
-                    endDateHelper.textContent = '';
-                    timeGroup.classList.remove('hidden');
-                    timeLabel.textContent = 'Preferred Time';
-                    timeField.required = true;
-                    durationGroup.classList.remove('hidden');
-                    durationField.required = true;
-                    return;
-                }
-
-                if (service === 'daycare') {
-                    startDateLabel.textContent = 'Service Date';
-                    endDateGroup.classList.add('hidden');
-                    endDateField.required = false;
-                    endDateHelper.textContent = '';
-                    timeGroup.classList.remove('hidden');
-                    timeLabel.textContent = 'Preferred Drop-Off Time';
-                    timeField.required = true;
-                    durationGroup.classList.add('hidden');
-                    durationField.required = false;
-                    daycareOptions.classList.remove('hidden');
-                    return;
-                }
-
-                if (service === 'boarding') {
-                    startDateLabel.textContent = 'Check-In Date';
-                    endDateGroup.classList.remove('hidden');
-                    endDateLabel.textContent = 'Check-Out Date';
-                    endDateHelper.textContent = 'Boarding is priced by dog size and number of nights. 5+ nights automatically receive the extended-stay member rate.';
-                    endDateField.required = true;
-                    timeGroup.classList.remove('hidden');
-                    timeLabel.textContent = 'Preferred Check-In Time';
-                    timeField.required = false;
-                    durationGroup.classList.add('hidden');
-                    durationField.required = false;
-                    return;
-                }
-
-                if (service === 'drop-in') {
-                    startDateLabel.textContent = 'Service Date';
-                    endDateGroup.classList.add('hidden');
-                    endDateField.required = false;
-                    endDateHelper.textContent = '';
-                    timeGroup.classList.remove('hidden');
-                    timeLabel.textContent = 'Preferred Time';
-                    timeField.required = true;
-                    durationGroup.classList.add('hidden');
-                    durationField.required = false;
-                    dropInOptions.classList.remove('hidden');
-                    return;
-                }
-
-                if (service === 'sitting') {
-                    startDateLabel.textContent = 'Service Date';
-                    endDateGroup.classList.add('hidden');
-                    endDateField.required = false;
-                    endDateHelper.textContent = '';
-                    timeGroup.classList.remove('hidden');
-                    timeLabel.textContent = 'Preferred Start Time';
-                    timeField.required = true;
-                    durationGroup.classList.add('hidden');
-                    durationField.required = false;
-                    sittingOptions.classList.remove('hidden');
-                    return;
-                }
-            }
-
-            function renderPrice() {
-                var preview = getPricingPreview();
-
-                livePrice.textContent = formatMoney(preview.total || 0);
-
-                if (liveNote) {
-                    liveNote.textContent = preview.note || '';
-                }
-
-                renderSummaryLines(preview.lines || []);
-            }
-
-            function handleChange() {
-                updateFieldVisibility();
-                renderPrice();
-            }
-
-            [
-                serviceField,
-                petField,
-                startDateField,
-                endDateField,
-                timeField,
-                durationField,
-                dropInHoursField,
-                dropInAddWalkField,
-                daycareProvideFoodField,
-                daycareExtraWalksField,
-                sittingExtraWalksField
-            ].forEach(function (field) {
-                if (!field) {
-                    return;
-                }
-                field.addEventListener('change', handleChange);
-                field.addEventListener('input', handleChange);
-            });
-
-            handleChange();
-        })();
-    </script>
-</body>
-</html>

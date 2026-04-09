@@ -1,7 +1,11 @@
 <?php
 declare(strict_types=1);
 
+// Secure session settings must be applied before session_start()
 if (session_status() === PHP_SESSION_NONE) {
+    ini_set('session.cookie_secure', '1');
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.cookie_samesite', 'Lax');
     session_start();
 }
 
