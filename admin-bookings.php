@@ -251,8 +251,17 @@ function formatDateTimeDisplay($value)
         return '—';
     }
 
-    $ts = strtotime($value);
-    return $ts !== false ? date('F j, Y \a\t g:i A', $ts) : $value;
+    try {
+        $dateTime = new DateTime($value, new DateTimeZone('UTC'));
+        $dateTime->setTimezone(new DateTimeZone('America/New_York'));
+        return $dateTime->format('F j, Y \a\t g:i A T');
+    } catch (Throwable $e) {
+        $ts = strtotime($value);
+        return $ts !== false ? date('F j, Y \a\t g:i A', $ts) : $value;
+    } catch (Exception $e) {
+        $ts = strtotime($value);
+        return $ts !== false ? date('F j, Y \a\t g:i A', $ts) : $value;
+    }
 }
 
 function formatMoney($value)
@@ -337,11 +346,11 @@ function fetchPublicBookings(PDO $pdo)
             'email' => (string) valueFromRow($row, array('email'), ''),
             'phone' => (string) valueFromRow($row, array('phone'), ''),
             'service_type' => normalizeServiceType((string) valueFromRow($row, array('service_type', 'service'), 'service')),
-            'service_date' => (string) valueFromRow($row, array('service_date', 'date'), ''),
-            'service_time' => (string) valueFromRow($row, array('service_time', 'time'), ''),
-            'pet_name' => (string) valueFromRow($row, array('pet_name'), ''),
+            'service_date' => (string) valueFromRow($row, array('service_date', 'date', 'date_start'), ''),
+            'service_time' => (string) valueFromRow($row, array('service_time', 'time', 'preferred_walk_time'), ''),
+            'pet_name' => (string) valueFromRow($row, array('pet_name', 'dog_name'), ''),
             'pet_breed' => (string) valueFromRow($row, array('pet_breed', 'breed'), ''),
-            'pet_size' => (string) valueFromRow($row, array('pet_size', 'size'), ''),
+            'pet_size' => (string) valueFromRow($row, array('pet_size', 'size', 'dog_size'), ''),
             'price' => '',
             'status' => normalizePublicStatus((string) valueFromRow($row, array('status'), 'new')),
             'notes' => (string) valueFromRow($row, array('notes'), ''),
@@ -999,8 +1008,14 @@ foreach ($publicBookings as $booking) {
 
                                     <div class="btn-row" style="align-items:end;">
                                         <button type="submit" class="btn btn-gold">Save Status</button>
+
                                         <?php if (isset($booking['email']) && trim((string) $booking['email']) !== ''): ?>
-                                            <a class="btn btn-light" href="mailto:<?php echo h($booking['email']); ?>">Email Client</a>
+                                            <form method="post" action="process-admin-non-member-booking-update.php">
+                                                <input type="hidden" name="action" value="send_email">
+                                                <input type="hidden" name="id" value="<?php echo (int) $booking['id']; ?>">
+                                                <input type="hidden" name="return_url" value="admin-bookings.php?view=<?php echo h($view); ?>">
+                                                <button type="submit" class="btn btn-light">Email Client</button>
+                                            </form>
                                         <?php endif; ?>
                                     </div>
                                 </div>

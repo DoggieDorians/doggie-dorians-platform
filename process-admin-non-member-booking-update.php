@@ -108,6 +108,15 @@ function add_column_if_missing(PDO $pdo, string $tableName, string $columnName, 
     return $existingColumns;
 }
 
+function send_client_email(string $toEmail, string $subject, string $message): bool
+{
+    $headers = "From: Doggie Dorian's <noreply@dorianspetcare.com>\r\n";
+    $headers .= "Reply-To: noreply@dorianspetcare.com\r\n";
+    $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
+
+    return mail($toEmail, $subject, $message, $headers);
+}
+
 function ensure_non_member_bookings_table(PDO $pdo): void
 {
     if (!table_exists($pdo, 'non_member_bookings')) {
@@ -223,7 +232,7 @@ if (!in_array($newStatus, $allowedStatuses, true)) {
 |--------------------------------------------------------------------------
 */
 $stmt = $pdoConnection->prepare("
-    SELECT id, booking_reference, status
+    SELECT id, booking_reference, status, email, full_name
     FROM non_member_bookings
     WHERE id = :id
       AND COALESCE(booking_source, 'non-member') = 'non-member'
@@ -265,6 +274,20 @@ try {
         ':status' => $newStatus,
         ':id' => $bookingId,
     ]);
+
+    $clientEmail = trim((string) ($booking['email'] ?? ''));
+    $clientName = trim((string) ($booking['full_name'] ?? 'Client'));
+
+    if ($clientEmail !== '') {
+        $subject = "Your Booking Update - Doggie Dorian's";
+
+        $message = "Hi " . $clientName . ",\n\n";
+        $message .= "Your booking status has been updated to: " . $newStatus . ".\n\n";
+        $message .= "If you have any questions, feel free to reply to this email.\n\n";
+        $message .= "— Doggie Dorian's";
+
+        send_client_email($clientEmail, $subject, $message);
+    }
 
     redirect_to_booking(
         $bookingId,
