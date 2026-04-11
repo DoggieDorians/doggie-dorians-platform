@@ -80,3 +80,5 @@ data/members.sqlite
 *.sqlite3
 sftp.json
 .vscode/sftp.json
+
+backups/
