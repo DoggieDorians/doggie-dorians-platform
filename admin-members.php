@@ -165,6 +165,96 @@ function formatDateTimeDisplay($value)
     return date('F j, Y \a\t g:i A', $ts);
 }
 
+function dd_plan_catalog()
+{
+    return array(
+        'founder_walk_club' => 'Founder Walk Club',
+        'founder_care_club' => 'Founder Care Club',
+        'founder_elite_club' => 'Founder Elite Club',
+    );
+}
+
+function dd_plan_name_from_membership(PDO $pdo, $planId)
+{
+    if ((int) $planId <= 0 || !hasTable($pdo, 'membership_plans')) {
+        return '';
+    }
+
+    $planIdCol = firstExistingColumn($pdo, 'membership_plans', array('id', 'plan_id'));
+    $slugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
+    $nameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
+
+    if ($planIdCol === null) {
+        return '';
+    }
+
+    $row = safeFetchOne(
+        $pdo,
+        'SELECT * FROM membership_plans WHERE ' . $planIdCol . ' = :plan_id LIMIT 1',
+        array(':plan_id' => (int) $planId)
+    );
+
+    if (!$row) {
+        return '';
+    }
+
+    if ($nameCol !== null && !empty($row[$nameCol])) {
+        return (string) $row[$nameCol];
+    }
+
+    if ($slugCol !== null && !empty($row[$slugCol])) {
+        $slug = strtolower(trim((string) $row[$slugCol]));
+        $catalog = dd_plan_catalog();
+        if (isset($catalog[$slug])) {
+            return $catalog[$slug];
+        }
+
+        return ucwords(str_replace(array('_', '-'), ' ', $slug));
+    }
+
+    return '';
+}
+
+function dd_membership_name_for_member(PDO $pdo, $memberId, $fallback = '')
+{
+    if ((int) $memberId <= 0) {
+        return (string) $fallback;
+    }
+
+    if (!hasTable($pdo, 'member_memberships')) {
+        return (string) $fallback;
+    }
+
+    $memberCol = firstExistingColumn($pdo, 'member_memberships', array('member_id', 'user_id'));
+    $planCol = firstExistingColumn($pdo, 'member_memberships', array('plan_id'));
+    $orderCol = firstExistingColumn($pdo, 'member_memberships', array('created_at', 'updated_at', 'id'));
+
+    if ($memberCol === null || $planCol === null) {
+        return (string) $fallback;
+    }
+
+    if ($orderCol === null) {
+        $orderCol = 'id';
+    }
+
+    $membershipRow = safeFetchOne(
+        $pdo,
+        'SELECT * FROM member_memberships WHERE ' . $memberCol . ' = :member_id ORDER BY ' . $orderCol . ' DESC, id DESC LIMIT 1',
+        array(':member_id' => (int) $memberId)
+    );
+
+    if (!$membershipRow) {
+        return (string) $fallback;
+    }
+
+    $planName = dd_plan_name_from_membership($pdo, (int) ($membershipRow[$planCol] ?? 0));
+    if ($planName !== '') {
+        return $planName;
+    }
+
+    return (string) $fallback;
+}
+
 function fetchMembers(PDO $pdo)
 {
     $possibleTables = array('users', 'members', 'client_profiles');
@@ -237,6 +327,16 @@ function fetchMembers(PDO $pdo)
 
         $rows = safeFetchAll($pdo, $sql);
         if (!empty($rows)) {
+            foreach ($rows as &$row) {
+                $fallbackMembership = valueFromRow($row, array('membership_type'));
+                $row['membership_type'] = dd_membership_name_for_member(
+                    $pdo,
+                    (int) valueFromRow($row, array('member_id'), '0'),
+                    $fallbackMembership
+                );
+            }
+            unset($row);
+
             return $rows;
         }
     }
@@ -272,6 +372,7 @@ if ($search !== '') {
 $withPhone = 0;
 $withEmail = 0;
 $recentSignups = 0;
+$membersWithMembership = 0;
 $thirtyDaysAgo = strtotime('-30 days');
 
 foreach ($members as $member) {
@@ -280,6 +381,9 @@ foreach ($members as $member) {
     }
     if (trim(valueFromRow($member, array('email'))) !== '') {
         $withEmail++;
+    }
+    if (trim(valueFromRow($member, array('membership_type'))) !== '') {
+        $membersWithMembership++;
     }
 
     $createdAt = valueFromRow($member, array('created_at'));
@@ -393,7 +497,7 @@ foreach ($members as $member) {
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 15px;
             margin-top: 20px;
         }
@@ -613,6 +717,11 @@ foreach ($members as $member) {
             <div class="stat-card">
                 <div class="label">With Phone</div>
                 <div class="big"><?php echo (int) $withPhone; ?></div>
+            </div>
+
+            <div class="stat-card">
+                <div class="label">With Membership</div>
+                <div class="big"><?php echo (int) $membersWithMembership; ?></div>
             </div>
         </div>
 

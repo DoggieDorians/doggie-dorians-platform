@@ -1,9 +1,7 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/includes/security-headers.php';
-
-session_start();
+require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
 
 /**
@@ -203,6 +201,7 @@ function normalizeStatus($status)
 function normalizeServiceType($type)
 {
     $type = strtolower(trim((string) $type));
+    $type = str_replace(array('-', ' '), '_', $type);
 
     if ($type === '') {
         return 'service';
@@ -213,7 +212,7 @@ function normalizeServiceType($type)
     if (strpos($type, 'board') !== false) {
         return 'boarding';
     }
-    if (strpos($type, 'daycare') !== false || strpos($type, 'day care') !== false) {
+    if (strpos($type, 'daycare') !== false || strpos($type, 'day_care') !== false) {
         return 'daycare';
     }
     if (strpos($type, 'sit') !== false) {
@@ -221,6 +220,24 @@ function normalizeServiceType($type)
     }
     if (strpos($type, 'drop') !== false) {
         return 'drop-in';
+    }
+    if ($type === 'service_credit') {
+        return 'service_credit';
+    }
+
+    return str_replace('_', '-', $type);
+}
+
+function normalizeEntitlementType($type)
+{
+    $type = strtolower(trim((string) $type));
+    $type = str_replace(array('-', ' '), '_', $type);
+
+    if ($type === 'dropin') {
+        return 'drop_in';
+    }
+    if ($type === 'boarding') {
+        return 'boarding_night';
     }
 
     return $type;
@@ -624,6 +641,183 @@ function statusBadgeClass($status)
     return 'badge-pending';
 }
 
+function founderPlanDefaults()
+{
+    return array(
+        'founder_walk_club' => array(
+            'name' => 'Founder Walk Club',
+            'walk' => 12,
+            'daycare' => 0,
+            'drop_in' => 0,
+            'boarding_night' => 0,
+            'service_credit' => 0,
+        ),
+        'founder_care_club' => array(
+            'name' => 'Founder Care Club',
+            'walk' => 16,
+            'daycare' => 2,
+            'drop_in' => 2,
+            'boarding_night' => 0,
+            'service_credit' => 0,
+        ),
+        'founder_elite_club' => array(
+            'name' => 'Founder Elite Club',
+            'walk' => 20,
+            'daycare' => 4,
+            'drop_in' => 4,
+            'boarding_night' => 3,
+            'service_credit' => 0,
+        ),
+    );
+}
+
+function getMembershipSummary(PDO $pdo, int $userId): array
+{
+    $result = array(
+        'membership_name' => 'No Membership',
+        'membership_id' => 0,
+        'plan_slug' => '',
+        'renewal_count' => 0,
+        'walk' => 0,
+        'daycare' => 0,
+        'drop-in' => 0,
+        'boarding_night' => 0,
+        'service_credit' => 0,
+    );
+
+    if ($userId <= 0) {
+        return $result;
+    }
+
+    if (!hasTable($pdo, 'member_memberships')) {
+        return $result;
+    }
+
+    $memberIdCol = firstExistingColumn($pdo, 'member_memberships', array('member_id', 'user_id', 'client_id'));
+    $planIdCol = firstExistingColumn($pdo, 'member_memberships', array('plan_id'));
+    $membershipIdCol = firstExistingColumn($pdo, 'member_memberships', array('id'));
+    $createdCol = firstExistingColumn($pdo, 'member_memberships', array('created_at', 'updated_at', 'id'));
+
+    if ($memberIdCol === null || $planIdCol === null || $membershipIdCol === null) {
+        return $result;
+    }
+
+    $orderBy = $createdCol !== null ? $createdCol : $membershipIdCol;
+
+    try {
+        $stmt = $pdo->prepare("
+            SELECT *
+            FROM member_memberships
+            WHERE {$memberIdCol} = :member_id
+            ORDER BY {$orderBy} DESC, rowid DESC
+            LIMIT 1
+        ");
+        if (!safeExecute($stmt, array(':member_id' => $userId))) {
+            return $result;
+        }
+
+        $membership = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$membership) {
+            return $result;
+        }
+
+        $membershipId = (int) valueFromRow($membership, array($membershipIdCol), 0);
+        $planId = (int) valueFromRow($membership, array($planIdCol), 0);
+
+        $result['membership_id'] = $membershipId;
+        $result['renewal_count'] = (int) valueFromRow($membership, array('renewal_count'), 0);
+
+        $planSlug = '';
+        if ($planId > 0 && hasTable($pdo, 'membership_plans')) {
+            $planNameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
+            $planSlugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
+            $planIdLookupCol = firstExistingColumn($pdo, 'membership_plans', array('id', 'plan_id'));
+
+            if ($planIdLookupCol !== null) {
+                $planStmt = $pdo->prepare("SELECT * FROM membership_plans WHERE {$planIdLookupCol} = :plan_id LIMIT 1");
+                if (safeExecute($planStmt, array(':plan_id' => $planId))) {
+                    $planRow = $planStmt->fetch(PDO::FETCH_ASSOC);
+
+                    if ($planRow) {
+                        if ($planNameCol !== null && !empty($planRow[$planNameCol])) {
+                            $result['membership_name'] = (string) $planRow[$planNameCol];
+                        }
+
+                        if ($planSlugCol !== null && !empty($planRow[$planSlugCol])) {
+                            $planSlug = strtolower(trim((string) $planRow[$planSlugCol]));
+                            $result['plan_slug'] = $planSlug;
+                        }
+                    }
+                }
+            }
+        }
+
+        $hasEntitlementRows = false;
+
+        if ($membershipId > 0 && hasTable($pdo, 'membership_entitlements')) {
+            $entMembershipCol = firstExistingColumn($pdo, 'membership_entitlements', array('membership_id'));
+            $serviceCol = firstExistingColumn($pdo, 'membership_entitlements', array('entitlement_type', 'service_type', 'type'));
+            $remainingCol = firstExistingColumn($pdo, 'membership_entitlements', array('remaining_units', 'units_remaining', 'balance'));
+            $totalCol = firstExistingColumn($pdo, 'membership_entitlements', array('total'));
+            $usedCol = firstExistingColumn($pdo, 'membership_entitlements', array('used'));
+
+            if ($entMembershipCol !== null && $serviceCol !== null) {
+                $entStmt = $pdo->prepare("SELECT * FROM membership_entitlements WHERE {$entMembershipCol} = :membership_id");
+
+                if (safeExecute($entStmt, array(':membership_id' => $membershipId))) {
+                    $entRows = $entStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                    foreach ($entRows as $entRow) {
+                        $hasEntitlementRows = true;
+
+                        $serviceType = normalizeEntitlementType((string) valueFromRow($entRow, array($serviceCol), ''));
+                        $remainingUnits = 0;
+
+                        if ($remainingCol !== null && isset($entRow[$remainingCol]) && $entRow[$remainingCol] !== '') {
+                            $remainingUnits = (int) $entRow[$remainingCol];
+                        } else {
+                            $totalUnits = $totalCol !== null ? (int) valueFromRow($entRow, array($totalCol), 0) : 0;
+                            $usedUnits = $usedCol !== null ? (int) valueFromRow($entRow, array($usedCol), 0) : 0;
+                            $remainingUnits = max(0, $totalUnits - $usedUnits);
+                        }
+
+                        if ($serviceType === 'walk') {
+                            $result['walk'] = $remainingUnits;
+                        } elseif ($serviceType === 'daycare') {
+                            $result['daycare'] = $remainingUnits;
+                        } elseif ($serviceType === 'drop_in') {
+                            $result['drop-in'] = $remainingUnits;
+                        } elseif ($serviceType === 'boarding_night') {
+                            $result['boarding_night'] = $remainingUnits;
+                        } elseif ($serviceType === 'service_credit') {
+                            $result['service_credit'] = $remainingUnits;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!$hasEntitlementRows && $result['plan_slug'] !== '') {
+            $defaults = founderPlanDefaults();
+            if (isset($defaults[$result['plan_slug']])) {
+                $defaultPlan = $defaults[$result['plan_slug']];
+                $result['membership_name'] = $defaultPlan['name'];
+                $result['walk'] = (int) $defaultPlan['walk'];
+                $result['daycare'] = (int) $defaultPlan['daycare'];
+                $result['drop-in'] = (int) $defaultPlan['drop_in'];
+                $result['boarding_night'] = (int) $defaultPlan['boarding_night'];
+                $result['service_credit'] = (int) $defaultPlan['service_credit'];
+            }
+        }
+    } catch (Throwable $e) {
+        return $result;
+    } catch (Exception $e) {
+        return $result;
+    }
+
+    return $result;
+}
+
 $userId = currentUserId();
 if ($userId <= 0 && !isAdmin()) {
     redirectTo('login.php');
@@ -638,6 +832,7 @@ unset($_SESSION['dashboard_flash']);
 $bookings = fetchMemberBookings($pdo, $userId);
 $petCount = countMemberPets($pdo, $userId);
 $unreadNotifications = countUnreadNotificationsForUser($pdo, $userId);
+$membershipSummary = getMembershipSummary($pdo, $userId);
 
 $statusCounts = array(
     'pending' => 0,
@@ -787,7 +982,7 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
 
         .metrics {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 12px;
             margin-top: 18px;
         }
@@ -1085,9 +1280,34 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                         <div class="metric-label">Unread Notices</div>
                         <div class="metric-value"><?php echo (int) $unreadNotifications; ?></div>
                     </div>
+                    <div class="metric">
+                        <div class="metric-label">Membership</div>
+                        <div class="metric-value"><?php echo h($membershipSummary['membership_name']); ?></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Walk Credits</div>
+                        <div class="metric-value"><?php echo (int) $membershipSummary['walk']; ?></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Daycare Credits</div>
+                        <div class="metric-value"><?php echo (int) $membershipSummary['daycare']; ?></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Drop-In Credits</div>
+                        <div class="metric-value"><?php echo (int) $membershipSummary['drop-in']; ?></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Boarding Nights</div>
+                        <div class="metric-value"><?php echo (int) $membershipSummary['boarding_night']; ?></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Service Credit</div>
+                        <div class="metric-value"><?php echo h(formatMoney($membershipSummary['service_credit'])); ?></div>
+                    </div>
                 </div>
 
                 <div class="chips">
+                    <div class="chip">Renewals: <?php echo (int) $membershipSummary['renewal_count']; ?></div>
                     <div class="chip">Walks: <?php echo (int) $serviceCounts['walk']; ?></div>
                     <div class="chip">Boarding: <?php echo (int) $serviceCounts['boarding']; ?></div>
                     <div class="chip">Daycare: <?php echo (int) $serviceCounts['daycare']; ?></div>

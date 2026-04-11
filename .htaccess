@@ -1,4 +1,57 @@
-# Force HTTPS
+# ---------------------------------------
+# Enable Rewrite Engine
+# ---------------------------------------
 RewriteEngine On
+
+# ---------------------------------------
+# Force HTTPS
+# Keep HTTPS enforcement here only.
+# ---------------------------------------
 RewriteCond %{HTTPS} !=on
 RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# ---------------------------------------
+# Disable directory browsing
+# ---------------------------------------
+Options -Indexes
+
+# ---------------------------------------
+# Block hidden files
+# ---------------------------------------
+RewriteRule "(^|/)\." - [F,L]
+
+# ---------------------------------------
+# Block access to sensitive file types
+# ---------------------------------------
+<FilesMatch "\.(sqlite|db|sql|env|ini|log|conf|bak|old|tar|gz|zip)$">
+    Require all denied
+</FilesMatch>
+
+# ---------------------------------------
+# Block direct access to internal folders
+# ---------------------------------------
+RewriteRule ^data/ - [F,L,NC]
+RewriteRule ^includes/ - [F,L,NC]
+RewriteRule ^vendor/ - [F,L,NC]
+
+# ---------------------------------------
+# Protect JSON data files inside data only
+# ---------------------------------------
+RewriteRule ^data/.*\.json$ - [F,L,NC]
+
+# ---------------------------------------
+# Protect Stripe webhook
+# Only allow POST requests
+# ---------------------------------------
+RewriteCond %{REQUEST_URI} ^/stripe-webhook\.php$ [NC]
+RewriteCond %{REQUEST_METHOD} !POST
+RewriteRule ^ - [F,L]
+
+# ---------------------------------------
+# Basic security headers
+# ---------------------------------------
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

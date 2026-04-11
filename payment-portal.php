@@ -1,10 +1,8 @@
 <?php
 declare(strict_types=1);
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
+require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/includes/member_config.php';
 
 if (!function_exists('h')) {
@@ -21,6 +19,19 @@ if (!function_exists('money_fmt')) {
     }
 }
 
+if (!function_exists('portal_redirect')) {
+    function portal_redirect(string $url): void
+    {
+        header('Location: ' . $url);
+        exit;
+    }
+}
+
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    exit('Database connection is not available.');
+}
+
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
@@ -32,63 +43,311 @@ $member = currentMember($pdo);
 if (!$member || (int)($member['id'] ?? 0) <= 0) {
     $_SESSION['custom_plan_flash_type'] = 'error';
     $_SESSION['custom_plan_flash_message'] = 'Please sign in to access your payment portal.';
-    redirectTo('signup.php');
+    portal_redirect('login.php');
 }
 
-$planId = (int)($_GET['plan_id'] ?? 0);
+$memberId = (int)($member['id'] ?? 0);
 
-if ($planId <= 0) {
-    redirectTo('customize-plan.php');
+$paymentContext = null;
+$portalMode = 'service_overage';
+
+$requestedPortalMode = strtolower(trim((string)($_GET['mode'] ?? $_POST['mode'] ?? '')));
+if ($requestedPortalMode === '') {
+    $requestedPortalMode = '';
 }
 
-$stmt = $pdo->prepare("
-    SELECT *
-    FROM custom_plans
-    WHERE id = :id
-      AND member_id = :member_id
-    LIMIT 1
-");
-$stmt->execute([
-    ':id' => $planId,
-    ':member_id' => (int)$member['id'],
-]);
-$plan = $stmt->fetch(PDO::FETCH_ASSOC);
-
-if (!$plan) {
-    $_SESSION['custom_plan_flash_type'] = 'error';
-    $_SESSION['custom_plan_flash_message'] = 'That custom plan could not be found.';
-    redirectTo('customize-plan.php');
+$sessionOverage = $_SESSION['service_payment_portal'] ?? null;
+if (!is_array($sessionOverage)) {
+    $sessionOverage = null;
 }
 
-$planName = (string)($plan['plan_name'] ?? 'Custom Plan');
-$paymentMode = (string)($plan['payment_mode'] ?? 'upfront');
-$paymentStatus = (string)($plan['payment_status'] ?? 'pending');
+$serviceType = strtolower(trim((string)($_GET['service_type'] ?? $_POST['service_type'] ?? '')));
+$quantity = (int)($_GET['quantity'] ?? $_POST['quantity'] ?? 0);
+$unitPrice = (float)($_GET['unit_price'] ?? $_POST['unit_price'] ?? 0);
+$totalAmount = (float)($_GET['total_amount'] ?? $_POST['total_amount'] ?? 0);
+$bookingDate = trim((string)($_GET['booking_date'] ?? $_POST['booking_date'] ?? ''));
+$bookingTime = trim((string)($_GET['booking_time'] ?? $_POST['booking_time'] ?? ''));
+$petName = trim((string)($_GET['pet_name'] ?? $_POST['pet_name'] ?? ''));
+$petSize = trim((string)($_GET['pet_size'] ?? $_POST['pet_size'] ?? ''));
+$durationLabel = trim((string)($_GET['duration_label'] ?? $_POST['duration_label'] ?? ''));
+$bookingReference = trim((string)($_GET['booking_reference'] ?? $_POST['booking_reference'] ?? ''));
+$bookingId = (int)($_GET['booking_id'] ?? $_POST['booking_id'] ?? 0);
+$memberPlanSlug = trim((string)($_GET['member_plan_slug'] ?? $_POST['member_plan_slug'] ?? ''));
+$creditType = trim((string)($_GET['credit_type'] ?? $_POST['credit_type'] ?? ''));
+$includedCredits = (int)($_GET['included_credits'] ?? $_POST['included_credits'] ?? 0);
+$remainingCredits = (int)($_GET['remaining_credits'] ?? $_POST['remaining_credits'] ?? 0);
+$overageUnits = (int)($_GET['overage_units'] ?? $_POST['overage_units'] ?? 0);
 
-$finalTotal = (float)($plan['monthly_total'] ?? 0);
-$subtotalAmount = array_key_exists('subtotal_amount', $plan) ? (float)$plan['subtotal_amount'] : $finalTotal;
-$discountAmount = array_key_exists('discount_amount', $plan) ? (float)$plan['discount_amount'] : 0.00;
-$discountPercent = array_key_exists('discount_percent', $plan) ? (float)$plan['discount_percent'] : 0.00;
+if ($sessionOverage !== null) {
+    $sessionMemberId = (int)($sessionOverage['member_id'] ?? 0);
 
-$lineItems = [
-    '15 Minute Walks' => (int)($plan['walks_15'] ?? 0),
-    '20 Minute Walks' => (int)($plan['walks_20'] ?? 0),
-    '30 Minute Walks' => (int)($plan['walks_30'] ?? 0),
-    '45 Minute Walks' => (int)($plan['walks_45'] ?? 0),
-    '60 Minute Walks' => (int)($plan['walks_60'] ?? 0),
-    'Small Daycare Days' => (int)($plan['daycare_small'] ?? 0),
-    'Medium Daycare Days' => (int)($plan['daycare_medium'] ?? 0),
-    'Large Daycare Days' => (int)($plan['daycare_large'] ?? 0),
-    'Small Boarding Nights' => (int)($plan['boarding_small'] ?? 0),
-    'Medium Boarding Nights' => (int)($plan['boarding_medium'] ?? 0),
-    'Large Boarding Nights' => (int)($plan['boarding_large'] ?? 0),
-    'Drop-In Visits' => (int)($plan['drop_ins'] ?? 0),
-];
-
-$visibleLineItems = [];
-foreach ($lineItems as $label => $qty) {
-    if ($qty > 0) {
-        $visibleLineItems[$label] = $qty;
+    if ($sessionMemberId > 0 && $sessionMemberId === $memberId) {
+        $serviceType = strtolower(trim((string)($sessionOverage['service_type'] ?? $serviceType)));
+        $quantity = (int)($sessionOverage['quantity'] ?? $quantity);
+        $unitPrice = (float)($sessionOverage['unit_price'] ?? $unitPrice);
+        $totalAmount = (float)($sessionOverage['total_amount'] ?? $totalAmount);
+        $bookingDate = trim((string)($sessionOverage['booking_date'] ?? $bookingDate));
+        $bookingTime = trim((string)($sessionOverage['booking_time'] ?? $bookingTime));
+        $petName = trim((string)($sessionOverage['pet_name'] ?? $petName));
+        $petSize = trim((string)($sessionOverage['pet_size'] ?? $petSize));
+        $durationLabel = trim((string)($sessionOverage['duration_label'] ?? $durationLabel));
+        $bookingReference = trim((string)($sessionOverage['booking_reference'] ?? $bookingReference));
+        $bookingId = (int)($sessionOverage['booking_id'] ?? $bookingId);
+        $memberPlanSlug = trim((string)($sessionOverage['member_plan_slug'] ?? $memberPlanSlug));
+        $creditType = trim((string)($sessionOverage['credit_type'] ?? $creditType));
+        $includedCredits = (int)($sessionOverage['included_credits'] ?? $includedCredits);
+        $remainingCredits = (int)($sessionOverage['remaining_credits'] ?? $remainingCredits);
+        $overageUnits = (int)($sessionOverage['overage_units'] ?? $overageUnits);
     }
+}
+
+if ($overageUnits <= 0 && $quantity > 0) {
+    $overageUnits = $quantity;
+}
+
+if ($totalAmount <= 0 && $unitPrice > 0 && $overageUnits > 0) {
+    $totalAmount = $unitPrice * $overageUnits;
+}
+
+if ($requestedPortalMode === 'custom_plan') {
+    $portalMode = 'custom_plan';
+} elseif ($requestedPortalMode === 'service_overage') {
+    $portalMode = 'service_overage';
+} elseif ($sessionOverage !== null && $totalAmount > 0) {
+    $portalMode = 'service_overage';
+} elseif ($serviceType !== '' && $totalAmount > 0) {
+    $portalMode = 'service_overage';
+} else {
+    $portalMode = 'custom_plan';
+}
+
+if ($portalMode === 'custom_plan') {
+    $planId = (int)($_GET['plan_id'] ?? 0);
+
+    if ($planId <= 0) {
+        portal_redirect('customize-plan.php');
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT *
+        FROM custom_plans
+        WHERE id = :id
+          AND member_id = :member_id
+        LIMIT 1
+    ");
+    $stmt->execute([
+        ':id' => $planId,
+        ':member_id' => $memberId,
+    ]);
+    $plan = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$plan) {
+        $_SESSION['custom_plan_flash_type'] = 'error';
+        $_SESSION['custom_plan_flash_message'] = 'That custom plan could not be found.';
+        portal_redirect('customize-plan.php');
+    }
+
+    $planName = (string)($plan['plan_name'] ?? 'Custom Plan');
+    $paymentMode = (string)($plan['payment_mode'] ?? 'upfront');
+    $paymentStatus = (string)($plan['payment_status'] ?? 'pending');
+
+    $finalTotal = (float)($plan['monthly_total'] ?? 0);
+    $subtotalAmount = array_key_exists('subtotal_amount', $plan) ? (float)$plan['subtotal_amount'] : $finalTotal;
+    $discountAmount = array_key_exists('discount_amount', $plan) ? (float)$plan['discount_amount'] : 0.00;
+    $discountPercent = array_key_exists('discount_percent', $plan) ? (float)$plan['discount_percent'] : 0.00;
+
+    $lineItems = [
+        '15 Minute Walks' => (int)($plan['walks_15'] ?? 0),
+        '20 Minute Walks' => (int)($plan['walks_20'] ?? 0),
+        '30 Minute Walks' => (int)($plan['walks_30'] ?? 0),
+        '45 Minute Walks' => (int)($plan['walks_45'] ?? 0),
+        '60 Minute Walks' => (int)($plan['walks_60'] ?? 0),
+        'Small Daycare Days' => (int)($plan['daycare_small'] ?? 0),
+        'Medium Daycare Days' => (int)($plan['daycare_medium'] ?? 0),
+        'Large Daycare Days' => (int)($plan['daycare_large'] ?? 0),
+        'Small Boarding Nights' => (int)($plan['boarding_small'] ?? 0),
+        'Medium Boarding Nights' => (int)($plan['boarding_medium'] ?? 0),
+        'Large Boarding Nights' => (int)($plan['boarding_large'] ?? 0),
+        'Drop-In Visits' => (int)($plan['drop_ins'] ?? 0),
+    ];
+
+    $visibleLineItems = [];
+    foreach ($lineItems as $label => $qty) {
+        if ($qty > 0) {
+            $visibleLineItems[$label] = $qty;
+        }
+    }
+
+    $paymentContext = [
+        'mode' => 'custom_plan',
+        'plan_id' => $planId,
+        'hero_badge' => 'Secure Checkout',
+        'hero_title' => 'Review your custom plan payment',
+        'hero_text' => 'This payment portal reflects the custom plan saved to your account. Your exact total is pulled from the database on the server before Stripe checkout begins.',
+        'hero_boxes' => [
+            ['label' => 'Plan Name', 'value' => $planName],
+            ['label' => 'Plan ID', 'value' => '#' . (int)$planId],
+            ['label' => 'Payment Mode', 'value' => ucfirst($paymentMode)],
+            ['label' => 'Current Status', 'value' => ucfirst($paymentStatus)],
+        ],
+        'services_title' => 'Included Services',
+        'visible_line_items' => $visibleLineItems,
+        'empty_line_text' => 'No line items were found for this plan.',
+        'summary_title' => 'Payment Summary',
+        'total_label' => 'Final Total Due',
+        'total_value' => $finalTotal,
+        'total_sub' => $discountAmount > 0
+            ? 'Your member pricing subtotal qualified for a discount before checkout.'
+            : 'No discount was applied to this plan total.',
+        'summary_rows' => [
+            ['label' => 'Subtotal', 'value' => money_fmt($subtotalAmount)],
+            [
+                'label' => 'Discount',
+                'value' => $discountAmount > 0
+                    ? '-' . money_fmt($discountAmount) . ($discountPercent > 0 ? ' (' . number_format($discountPercent, 0) . '%)' : '')
+                    : '—'
+            ],
+        ],
+        'checkout_note' => 'You’ll be redirected to Stripe’s secure hosted checkout to complete this payment.',
+        'submit_label' => 'Pay ' . money_fmt($finalTotal) . ' Securely',
+        'form_action' => 'create-checkout-session.php',
+        'hidden_fields' => [
+            'mode' => 'custom_plan',
+            'plan_id' => (string)$planId,
+            'csrf_token' => $csrfToken,
+        ],
+        'top_links' => [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'customize-plan.php', 'label' => 'Plans'],
+        ],
+        'footer_links' => [
+            ['href' => 'dashboard.php', 'label' => 'Return to Dashboard'],
+            ['href' => 'customize-plan.php', 'label' => 'Back to Plans'],
+        ],
+    ];
+} else {
+    $serviceTypeMap = [
+        'walk' => 'Walk',
+        'walks' => 'Walk',
+        'daycare' => 'Daycare',
+        'drop-in' => 'Drop-In',
+        'drop_in' => 'Drop-In',
+        'dropin' => 'Drop-In',
+        'boarding' => 'Boarding',
+        'sitting' => 'Sitting',
+        'service' => 'Service',
+    ];
+
+    $serviceLabel = $serviceTypeMap[$serviceType] ?? ($serviceType !== '' ? ucwords(str_replace(['_', '-'], ' ', $serviceType)) : 'Service');
+    $creditLabel = $creditType !== '' ? ucwords(str_replace(['_', '-'], ' ', $creditType)) : $serviceLabel . ' Credits';
+
+    if ($overageUnits <= 0 && $quantity > 0) {
+        $overageUnits = $quantity;
+    }
+
+    if ($quantity <= 0 && $overageUnits > 0) {
+        $quantity = $overageUnits;
+    }
+
+    if ($totalAmount <= 0 || $overageUnits <= 0) {
+        $_SESSION['custom_plan_flash_type'] = 'error';
+        $_SESSION['custom_plan_flash_message'] = 'No service overage payment details were found for this booking.';
+        portal_redirect('book-service.php');
+    }
+
+    $unitPriceDisplay = $unitPrice > 0 ? money_fmt($unitPrice) : 'TBD';
+    $bookingLabel = $bookingReference !== '' ? $bookingReference : ($bookingId > 0 ? '#' . $bookingId : 'Pending');
+    $planLabel = $memberPlanSlug !== '' ? ucwords(str_replace('_', ' ', $memberPlanSlug)) : 'Member Booking';
+    $statusLabel = 'Awaiting Payment';
+
+    $visibleLineItems = [];
+    $lineDescription = $serviceLabel;
+    if ($durationLabel !== '') {
+        $lineDescription .= ' · ' . $durationLabel;
+    }
+    if ($petName !== '') {
+        $lineDescription .= ' · ' . $petName;
+    }
+    if ($petSize !== '') {
+        $lineDescription .= ' · ' . ucwords($petSize);
+    }
+    $visibleLineItems[$lineDescription] = $overageUnits;
+
+    $summaryRows = [
+        ['label' => 'Member Plan', 'value' => $planLabel],
+        ['label' => 'Credit Type', 'value' => $creditLabel],
+        ['label' => 'Included Credits', 'value' => (string)$includedCredits],
+        ['label' => 'Remaining Credits', 'value' => (string)$remainingCredits],
+        ['label' => 'Overage Units', 'value' => (string)$overageUnits],
+        ['label' => 'Unit Price', 'value' => $unitPriceDisplay],
+    ];
+
+    if ($bookingDate !== '') {
+        $summaryRows[] = ['label' => 'Booking Date', 'value' => $bookingDate];
+    }
+
+    if ($bookingTime !== '') {
+        $summaryRows[] = ['label' => 'Booking Time', 'value' => $bookingTime];
+    }
+
+    $paymentContext = [
+        'mode' => 'service_overage',
+        'hero_badge' => 'Member Overage Payment',
+        'hero_title' => 'Review your service overage payment',
+        'hero_text' => 'Your membership credits were not enough to fully cover this booking. This portal shows the extra services due before secure Stripe checkout begins.',
+        'hero_boxes' => [
+            ['label' => 'Service', 'value' => $serviceLabel],
+            ['label' => 'Booking Reference', 'value' => $bookingLabel],
+            ['label' => 'Member Plan', 'value' => $planLabel],
+            ['label' => 'Current Status', 'value' => $statusLabel],
+        ],
+        'services_title' => 'Overage Services Due',
+        'visible_line_items' => $visibleLineItems,
+        'empty_line_text' => 'No overage line items were found for this booking.',
+        'summary_title' => 'Payment Summary',
+        'total_label' => 'Overage Total Due',
+        'total_value' => $totalAmount,
+        'total_sub' => 'Only the amount beyond your included membership credits is being charged.',
+        'summary_rows' => $summaryRows,
+        'checkout_note' => 'You’ll be redirected to Stripe’s secure hosted checkout to pay only for the uncovered portion of this booking.',
+        'submit_label' => 'Pay ' . money_fmt($totalAmount) . ' Securely',
+        'form_action' => 'create-checkout-session.php',
+        'hidden_fields' => [
+            'mode' => 'service_overage',
+            'csrf_token' => $csrfToken,
+            'booking_id' => (string)$bookingId,
+            'booking_reference' => $bookingReference,
+            'service_type' => $serviceType,
+            'service_label' => $serviceLabel,
+            'quantity' => (string)$quantity,
+            'overage_units' => (string)$overageUnits,
+            'unit_price' => number_format($unitPrice, 2, '.', ''),
+            'total_amount' => number_format($totalAmount, 2, '.', ''),
+            'booking_date' => $bookingDate,
+            'booking_time' => $bookingTime,
+            'pet_name' => $petName,
+            'pet_size' => $petSize,
+            'duration_label' => $durationLabel,
+            'member_plan_slug' => $memberPlanSlug,
+            'credit_type' => $creditType,
+            'included_credits' => (string)$includedCredits,
+            'remaining_credits' => (string)$remainingCredits,
+        ],
+        'top_links' => [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+        ],
+        'footer_links' => [
+            ['href' => 'dashboard.php', 'label' => 'Return to Dashboard'],
+            ['href' => 'my-bookings.php', 'label' => 'View My Bookings'],
+        ],
+    ];
+}
+
+if (!$paymentContext || !is_array($paymentContext)) {
+    $_SESSION['custom_plan_flash_type'] = 'error';
+    $_SESSION['custom_plan_flash_message'] = 'The payment portal could not be prepared.';
+    portal_redirect('dashboard.php');
 }
 ?>
 <!DOCTYPE html>
@@ -558,8 +817,9 @@ foreach ($lineItems as $label => $qty) {
                 <a href="index.php" class="brand">Doggie <span>Dorian’s</span></a>
 
                 <div class="top-actions">
-                    <a href="dashboard.php" class="top-link">Dashboard</a>
-                    <a href="customize-plan.php" class="top-link">Plans</a>
+                    <?php foreach ($paymentContext['top_links'] as $link): ?>
+                        <a href="<?= h((string)$link['href']) ?>" class="top-link"><?= h((string)$link['label']) ?></a>
+                    <?php endforeach; ?>
                 </div>
             </div>
         </div>
@@ -568,45 +828,30 @@ foreach ($lineItems as $label => $qty) {
             <div class="payment-shell">
                 <div>
                     <section class="hero-card">
-                        <div class="hero-badge">Secure Checkout</div>
-                        <h1 class="hero-title">Review your custom plan payment</h1>
-                        <p class="hero-text">
-                            This payment portal reflects the custom plan saved to your account. Your exact total is pulled from the database on the server before Stripe checkout begins.
-                        </p>
+                        <div class="hero-badge"><?= h((string)$paymentContext['hero_badge']) ?></div>
+                        <h1 class="hero-title"><?= h((string)$paymentContext['hero_title']) ?></h1>
+                        <p class="hero-text"><?= h((string)$paymentContext['hero_text']) ?></p>
 
                         <div class="hero-grid">
-                            <div class="hero-box">
-                                <span class="hero-box-label">Plan Name</span>
-                                <div class="hero-box-value"><?= h($planName) ?></div>
-                            </div>
-
-                            <div class="hero-box">
-                                <span class="hero-box-label">Plan ID</span>
-                                <div class="hero-box-value">#<?= (int)$planId ?></div>
-                            </div>
-
-                            <div class="hero-box">
-                                <span class="hero-box-label">Payment Mode</span>
-                                <div class="hero-box-value"><?= h(ucfirst($paymentMode)) ?></div>
-                            </div>
-
-                            <div class="hero-box">
-                                <span class="hero-box-label">Current Status</span>
-                                <div class="hero-box-value"><?= h(ucfirst($paymentStatus)) ?></div>
-                            </div>
+                            <?php foreach ($paymentContext['hero_boxes'] as $box): ?>
+                                <div class="hero-box">
+                                    <span class="hero-box-label"><?= h((string)$box['label']) ?></span>
+                                    <div class="hero-box-value"><?= h((string)$box['value']) ?></div>
+                                </div>
+                            <?php endforeach; ?>
                         </div>
                     </section>
 
                     <section class="services-card">
-                        <h2 class="services-title">Included Services</h2>
+                        <h2 class="services-title"><?= h((string)$paymentContext['services_title']) ?></h2>
 
-                        <?php if (empty($visibleLineItems)): ?>
-                            <div class="empty-item">No line items were found for this plan.</div>
+                        <?php if (empty($paymentContext['visible_line_items'])): ?>
+                            <div class="empty-item"><?= h((string)$paymentContext['empty_line_text']) ?></div>
                         <?php else: ?>
                             <div class="services-list">
-                                <?php foreach ($visibleLineItems as $label => $qty): ?>
+                                <?php foreach ($paymentContext['visible_line_items'] as $label => $qty): ?>
                                     <div class="service-item">
-                                        <span class="service-label"><?= h($label) ?></span>
+                                        <span class="service-label"><?= h((string)$label) ?></span>
                                         <span class="service-qty"><?= (int)$qty ?></span>
                                     </div>
                                 <?php endforeach; ?>
@@ -614,52 +859,41 @@ foreach ($lineItems as $label => $qty) {
                         <?php endif; ?>
 
                         <div class="footer-actions">
-                            <a href="dashboard.php" class="secondary-button">Return to Dashboard</a>
-                            <a href="customize-plan.php" class="secondary-button">Back to Plans</a>
+                            <?php foreach ($paymentContext['footer_links'] as $link): ?>
+                                <a href="<?= h((string)$link['href']) ?>" class="secondary-button"><?= h((string)$link['label']) ?></a>
+                            <?php endforeach; ?>
                         </div>
                     </section>
                 </div>
 
                 <aside class="summary-card">
-                    <h2 class="summary-title">Payment Summary</h2>
+                    <h2 class="summary-title"><?= h((string)$paymentContext['summary_title']) ?></h2>
 
                     <div class="total-panel">
-                        <div class="total-label">Final Total Due</div>
-                        <div class="total-value"><?= h(money_fmt($finalTotal)) ?></div>
-                        <div class="total-sub">
-                            <?= $discountAmount > 0
-                                ? 'Your member pricing subtotal qualified for a discount before checkout.'
-                                : 'No discount was applied to this plan total.' ?>
-                        </div>
+                        <div class="total-label"><?= h((string)$paymentContext['total_label']) ?></div>
+                        <div class="total-value"><?= h(money_fmt((float)$paymentContext['total_value'])) ?></div>
+                        <div class="total-sub"><?= h((string)$paymentContext['total_sub']) ?></div>
                     </div>
 
                     <div class="summary-grid">
-                        <div class="summary-row">
-                            <span class="summary-row-label">Subtotal</span>
-                            <span class="summary-row-value"><?= h(money_fmt($subtotalAmount)) ?></span>
-                        </div>
-
-                        <div class="summary-row">
-                            <span class="summary-row-label">Discount</span>
-                            <span class="summary-row-value">
-                                <?= $discountAmount > 0
-                                    ? h('-' . money_fmt($discountAmount) . ($discountPercent > 0 ? ' (' . number_format($discountPercent, 0) . '%)' : ''))
-                                    : '—' ?>
-                            </span>
-                        </div>
+                        <?php foreach ($paymentContext['summary_rows'] as $row): ?>
+                            <div class="summary-row">
+                                <span class="summary-row-label"><?= h((string)$row['label']) ?></span>
+                                <span class="summary-row-value"><?= h((string)$row['value']) ?></span>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
 
                     <div class="checkout-box">
-                        <p class="checkout-note">
-                            You’ll be redirected to Stripe’s secure hosted checkout to complete this payment.
-                        </p>
+                        <p class="checkout-note"><?= h((string)$paymentContext['checkout_note']) ?></p>
 
-                        <form method="POST" action="create-checkout-session.php">
-                            <input type="hidden" name="plan_id" value="<?= (int)$planId ?>">
-                            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                        <form method="POST" action="<?= h((string)$paymentContext['form_action']) ?>">
+                            <?php foreach ($paymentContext['hidden_fields'] as $name => $value): ?>
+                                <input type="hidden" name="<?= h((string)$name) ?>" value="<?= h((string)$value) ?>">
+                            <?php endforeach; ?>
 
                             <button type="submit" class="payment-button">
-                                Pay <?= h(money_fmt($finalTotal)) ?> Securely
+                                <?= h((string)$paymentContext['submit_label']) ?>
                             </button>
                         </form>
 

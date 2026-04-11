@@ -1,7 +1,57 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+// Security headers
+if (!headers_sent()) {
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+
+    if (
+        (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (!empty($_SERVER['SERVER_PORT']) && (string) $_SERVER['SERVER_PORT'] === '443')
+        || (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https')
+    ) {
+        header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+    }
+
+    header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+
+    header(
+        "Content-Security-Policy: " .
+        "default-src 'self'; " .
+        "img-src 'self' data: https:; " .
+        "style-src 'self' 'unsafe-inline' https:; " .
+        "script-src 'self' 'unsafe-inline' https:; " .
+        "font-src 'self' data: https:; " .
+        "connect-src 'self' https:; " .
+        "frame-ancestors 'self'; " .
+        "base-uri 'self'; " .
+        "form-action 'self'; " .
+        "object-src 'none';"
+    );
+}
+
+// Detect HTTPS correctly behind proxy/load balancer
+$isHttps =
+    (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || (!empty($_SERVER['SERVER_PORT']) && (string) $_SERVER['SERVER_PORT'] === '443')
+    || (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
+
+// Force HTTPS
+if (!$isHttps && ($_SERVER['HTTP_HOST'] ?? '') !== 'localhost') {
+    header('Location: https://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'], true, 301);
+    exit;
+}
+
+// Secure session settings must be applied before session_start()
+if (session_status() === PHP_SESSION_NONE) {
+    ini_set('session.cookie_secure', '1');
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.cookie_samesite', 'Lax');
+    session_start();
+}
+
 require_once __DIR__ . '/includes/pricing.php';
 
 $isLoggedIn = isset($_SESSION['member_id']) || isset($_SESSION['user_id']) || isset($_SESSION['id']);
@@ -778,6 +828,12 @@ $clientPricingData = [
       return '$' + Number(value || 0).toFixed(2);
     }
 
+    function setFieldRequired(id, required) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.required = !!required;
+    }
+
     function updateBookingFormUI() {
       const serviceType = document.getElementById('service_type').value;
       const walkFields = document.querySelectorAll('.walk-only');
@@ -825,6 +881,10 @@ $clientPricingData = [
       if (endDateHelper) {
         endDateHelper.textContent = 'Boarding total uses nights. Example: April 1 to April 6 = 5 boarding nights.';
       }
+
+      setFieldRequired('walk_duration', serviceType === 'Walk');
+      setFieldRequired('dog_size', serviceType === 'Boarding');
+      setFieldRequired('date_end', serviceType === 'Boarding');
 
       updateEstimatedPrice();
     }
@@ -931,11 +991,17 @@ $clientPricingData = [
         if (DD_PRICING.boarding[dogSize]) {
           unitPrice = Number(DD_PRICING.boarding[dogSize]);
           quantity = nightsBetween(dateStart, dateEnd);
-          if (quantity <= 0) quantity = 1;
-          total = unitPrice * quantity;
-          label = money(total) + ' live price for ' + quantity + ' boarding night' + (quantity === 1 ? '' : 's') + '.';
-          meta = money(unitPrice) + ' per night · ' + quantity + ' night' + (quantity === 1 ? '' : 's');
-          discountLabel = 'standard_non_member';
+
+          if (quantity > 0) {
+            total = unitPrice * quantity;
+            label = money(total) + ' live price for ' + quantity + ' boarding night' + (quantity === 1 ? '' : 's') + '.';
+            meta = money(unitPrice) + ' per night · ' + quantity + ' night' + (quantity === 1 ? '' : 's');
+            discountLabel = 'standard_non_member';
+          } else {
+            total = 0;
+            label = 'Select a valid boarding date range to view live pricing.';
+            meta = money(unitPrice) + ' per night';
+          }
         }
       }
 
@@ -968,6 +1034,49 @@ $clientPricingData = [
       }
     }
 
+    function validateBookingForSubmit() {
+      const serviceType = document.getElementById('service_type').value;
+      const walkDuration = document.getElementById('walk_duration').value;
+      const dogSize = document.getElementById('dog_size').value;
+      const dateStart = document.getElementById('date_start').value;
+      const dateEnd = document.getElementById('date_end').value;
+      const estimatedPrice = document.getElementById('estimated_price').value;
+
+      if (!serviceType) {
+        alert('Please choose a service type.');
+        return false;
+      }
+
+      if (serviceType === 'Walk' && !walkDuration) {
+        alert('Please choose a walk duration.');
+        return false;
+      }
+
+      if (serviceType === 'Boarding') {
+        if (!dogSize) {
+          alert('Please choose your dog size for boarding.');
+          return false;
+        }
+
+        if (!dateEnd) {
+          alert('Please choose a check-out date for boarding.');
+          return false;
+        }
+
+        if (nightsBetween(dateStart, dateEnd) <= 0) {
+          alert('Please choose a valid boarding date range.');
+          return false;
+        }
+      }
+
+      if (!estimatedPrice || Number(estimatedPrice) <= 0) {
+        alert('Please complete the booking details so the live price can be calculated before continuing to payment.');
+        return false;
+      }
+
+      return true;
+    }
+
     window.addEventListener('DOMContentLoaded', function () {
       updateBookingFormUI();
 
@@ -994,6 +1103,18 @@ $clientPricingData = [
         });
         el.addEventListener('input', updateEstimatedPrice);
       });
+
+      const bookingForm = document.getElementById('non_member_booking_form');
+      if (bookingForm) {
+        bookingForm.addEventListener('submit', function (event) {
+          updateEstimatedPrice();
+          if (!validateBookingForSubmit()) {
+            event.preventDefault();
+          }
+        });
+      }
+
+      updateEstimatedPrice();
     });
   </script>
 </head>
@@ -1051,7 +1172,7 @@ $clientPricingData = [
                 <small>What Clients Can Book</small>
                 <h3>Flexible premium care for non-members.</h3>
                 <p>
-                  Clients can request walks, drop-ins, daycare, in-home sitting, or boarding with a clean premium booking experience and transparent live pricing.
+                  Clients can request walks, drop-ins, daycare, in-home sitting, or boarding with a clean premium booking experience, transparent live pricing, and a dedicated non-member payment portal before secure checkout.
                 </p>
 
                 <div class="hero-panel-list">
@@ -1146,9 +1267,9 @@ $clientPricingData = [
         <div class="booking-shell">
           <div class="booking-grid">
             <div class="booking-copy">
-              <h3>Submit a non-member booking request.</h3>
+              <h3>Submit your non-member booking and continue to payment.</h3>
               <p>
-                This form captures one-time or occasional booking requests and stores them directly in your database for follow-up and scheduling.
+                This form captures one-time or occasional non-member bookings, calculates the live non-member total, and sends the client into the dedicated non-member payment portal for checkout.
               </p>
 
               <div class="booking-copy-list">
@@ -1162,15 +1283,15 @@ $clientPricingData = [
               <div class="quote-box">
                 <small>Live Price</small>
                 <strong id="estimated_price_text">Select service details to view live pricing.</strong>
-                <span>Daycare is now one 6-hour session. Sitting is priced as one session. Boarding totals use nights and still depend on dog size.</span>
+                <span>This live total will carry into the non-member payment portal before Stripe checkout. Daycare is one 6-hour session. Sitting is priced as one session. Boarding totals use nights and still depend on dog size.</span>
                 <div class="quote-meta" id="quote_meta"></div>
               </div>
             </div>
 
-            <form class="booking-form" action="process-non-member-booking.php" method="post">
+            <form class="booking-form" id="non_member_booking_form" action="process-non-member-booking.php" method="post">
               <input type="hidden" id="estimated_price" name="estimated_price" value="<?php echo old_value($formData, 'estimated_price'); ?>">
-              <input type="hidden" id="pricing_type" name="pricing_type" value="non_member">
-              <input type="hidden" id="discount_label" name="discount_label" value="standard_non_member">
+              <input type="hidden" id="pricing_type" name="pricing_type" value="<?php echo old_value($formData, 'pricing_type') !== '' ? old_value($formData, 'pricing_type') : 'non_member'; ?>">
+              <input type="hidden" id="discount_label" name="discount_label" value="<?php echo old_value($formData, 'discount_label') !== '' ? old_value($formData, 'discount_label') : 'standard_non_member'; ?>">
               <input type="hidden" id="unit_price" name="unit_price" value="<?php echo old_value($formData, 'unit_price'); ?>">
               <input type="hidden" id="quantity" name="quantity" value="<?php echo old_value($formData, 'quantity'); ?>">
 
@@ -1358,7 +1479,7 @@ $clientPricingData = [
                 <textarea id="notes" name="notes" placeholder="Tell us anything helpful about your dog, routine, feeding details, pickup/drop-off preferences, or anything else we should know."><?php echo old_value($formData, 'notes'); ?></textarea>
               </div>
 
-              <button type="submit" class="btn btn-gold">Submit Booking Request</button>
+              <button type="submit" class="btn btn-gold">Continue to Payment Portal</button>
             </form>
           </div>
         </div>

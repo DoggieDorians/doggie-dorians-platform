@@ -1,13 +1,8 @@
 <?php
 declare(strict_types=1);
-
-ini_set('display_errors', '1');
-error_reporting(E_ALL);
-
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
+require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/includes/member_config.php';
 
 function h($value): string
@@ -15,26 +10,143 @@ function h($value): string
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
-$member = currentMember($pdo);
-
-if (!$member || (int)($member['id'] ?? 0) <= 0) {
-    redirectTo('signup.php');
+function redirect_to(string $url): void
+{
+    header('Location: ' . $url);
+    exit;
 }
 
-$planId = (int)($_GET['plan_id'] ?? 0);
+function current_member_id(PDO $pdo): int
+{
+    $member = currentMember($pdo);
+    return (int)($member['id'] ?? 0);
+}
 
-if ($planId > 0) {
-    $stmt = $pdo->prepare("
-        UPDATE custom_plans
-        SET payment_status = :payment_status
-        WHERE id = :id
-          AND member_id = :member_id
-    ");
-    $stmt->execute([
-        ':payment_status' => 'pending',
-        ':id' => $planId,
-        ':member_id' => (int)$member['id'],
-    ]);
+function normalize_mode(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    return match ($value) {
+        'custom_plan' => 'custom_plan',
+        'service_overage' => 'service_overage',
+        'non_member' => 'non_member',
+        default => '',
+    };
+}
+
+$mode = normalize_mode((string)($_GET['mode'] ?? ''));
+
+/*
+|--------------------------------------------------------------------------
+| Defaults
+|--------------------------------------------------------------------------
+*/
+$pageTitle = 'Checkout Cancelled';
+$headline = 'No payment was completed';
+$bodyText = 'Your checkout was canceled before Stripe confirmed payment.';
+$primaryHref = 'index.php';
+$primaryLabel = 'Return Home';
+$secondaryHref = 'index.php';
+$secondaryLabel = 'Go Back';
+$topLinks = [
+    ['href' => 'index.php', 'label' => 'Home'],
+    ['href' => 'contact.php', 'label' => 'Contact'],
+];
+
+/*
+|--------------------------------------------------------------------------
+| CUSTOM PLAN CANCEL
+|--------------------------------------------------------------------------
+*/
+if ($mode === 'custom_plan') {
+    $memberId = current_member_id($pdo);
+
+    if ($memberId <= 0) {
+        $primaryHref = 'login.php';
+        $primaryLabel = 'Member Login';
+        $secondaryHref = 'customize-plan.php';
+        $secondaryLabel = 'Back to Plans';
+        $topLinks = [
+            ['href' => 'login.php', 'label' => 'Login'],
+            ['href' => 'customize-plan.php', 'label' => 'Plans'],
+        ];
+    } else {
+        $planId = (int)($_GET['plan_id'] ?? 0);
+
+        $primaryHref = $planId > 0
+            ? 'payment-portal.php?plan_id=' . $planId
+            : 'customize-plan.php';
+
+        $primaryLabel = 'Return to Payment Portal';
+        $secondaryHref = 'dashboard.php';
+        $secondaryLabel = 'Go to Dashboard';
+
+        $topLinks = [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'customize-plan.php', 'label' => 'Plans'],
+        ];
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| MEMBER OVERAGE CANCEL
+|--------------------------------------------------------------------------
+*/
+if ($mode === 'service_overage') {
+    $memberId = current_member_id($pdo);
+
+    if ($memberId <= 0) {
+        $primaryHref = 'login.php';
+        $primaryLabel = 'Member Login';
+        $secondaryHref = 'book-service.php';
+        $secondaryLabel = 'Back to Booking';
+        $topLinks = [
+            ['href' => 'login.php', 'label' => 'Login'],
+            ['href' => 'book-service.php', 'label' => 'Book Service'],
+        ];
+    } else {
+        $bookingId = (int)($_GET['booking_id'] ?? 0);
+
+        $primaryHref = 'payment-portal.php';
+        $primaryLabel = 'Return to Payment Portal';
+
+        if ($bookingId > 0) {
+            $primaryHref .= '?booking_id=' . $bookingId;
+        }
+
+        $secondaryHref = 'my-bookings.php';
+        $secondaryLabel = 'View Bookings';
+
+        $topLinks = [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+        ];
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| NON-MEMBER CANCEL
+|--------------------------------------------------------------------------
+*/
+if ($mode === 'non_member') {
+    $requestId = (int)($_GET['request_id'] ?? 0);
+
+    $primaryHref = 'non-member-payment-portal.php';
+    $primaryLabel = 'Return to Payment Portal';
+
+    if ($requestId > 0) {
+        $primaryHref .= '?request_id=' . $requestId;
+    }
+
+    $secondaryHref = 'non-member-booking.php';
+    $secondaryLabel = 'Back to Booking';
+
+    $topLinks = [
+        ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+        ['href' => 'contact.php', 'label' => 'Contact'],
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -42,7 +154,7 @@ if ($planId > 0) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Checkout Cancelled | Doggie Dorian’s</title>
+    <title><?= h($pageTitle) ?> | Doggie Dorian’s</title>
     <style>
         * { box-sizing: border-box; }
 
@@ -55,7 +167,7 @@ if ($planId > 0) {
             min-height: 100vh;
             font-family: Georgia, "Times New Roman", serif;
             background:
-                radial-gradient(circle at top, rgba(212, 175, 55, 0.10), transparent 35%),
+                radial-gradient(circle at top, rgba(212, 175, 55, 0.14), transparent 35%),
                 linear-gradient(180deg, #05060a 0%, #090b12 45%, #04050a 100%);
             color: #f4f1ea;
         }
@@ -144,7 +256,7 @@ if ($planId > 0) {
             content: '';
             position: absolute;
             inset: 0;
-            background: linear-gradient(135deg, rgba(212,175,55,0.08), transparent 35%);
+            background: linear-gradient(135deg, rgba(212,175,55,0.10), transparent 35%);
             pointer-events: none;
         }
 
@@ -188,26 +300,26 @@ if ($planId > 0) {
             position: relative;
             z-index: 1;
             margin-top: 24px;
-            padding: 20px;
-            border-radius: 20px;
+            padding: 22px;
+            border-radius: 22px;
             background: rgba(255,255,255,0.04);
             border: 1px solid rgba(255,255,255,0.08);
             text-align: center;
         }
 
         .info-label {
-            display: block;
-            font-size: 0.82rem;
+            font-size: 0.9rem;
+            color: rgba(244,241,234,0.62);
             text-transform: uppercase;
             letter-spacing: 0.10em;
-            color: rgba(244,241,234,0.58);
-            margin-bottom: 8px;
         }
 
         .info-value {
-            font-size: 1.05rem;
-            font-weight: 700;
-            color: #ffffff;
+            margin-top: 10px;
+            font-size: 1.2rem;
+            font-weight: 800;
+            color: #f2d471;
+            line-height: 1.2;
         }
 
         .cancel-actions {
@@ -225,7 +337,7 @@ if ($planId > 0) {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-width: 190px;
+            min-width: 180px;
             padding: 14px 20px;
             border-radius: 999px;
             text-decoration: none;
@@ -306,8 +418,9 @@ if ($planId > 0) {
                 <a href="index.php" class="brand">Doggie <span>Dorian’s</span></a>
 
                 <div class="top-actions">
-                    <a href="dashboard.php" class="top-link">Dashboard</a>
-                    <a href="my-bookings.php" class="top-link">My Bookings</a>
+                    <?php foreach ($topLinks as $link): ?>
+                        <a href="<?= h((string)$link['href']) ?>" class="top-link"><?= h((string)$link['label']) ?></a>
+                    <?php endforeach; ?>
                 </div>
             </div>
         </div>
@@ -316,21 +429,21 @@ if ($planId > 0) {
             <div class="cancel-shell">
                 <section class="cancel-card">
                     <div class="status-badge">Checkout Cancelled</div>
-                    <h1 class="cancel-title">No payment was completed</h1>
+
+                    <h1 class="cancel-title"><?= h($headline) ?></h1>
+
                     <p class="cancel-text">
-                        Your checkout was canceled before Stripe confirmed payment. You can return to your payment portal and try again whenever you're ready.
+                        <?= h($bodyText) ?> You can return and complete payment whenever you're ready.
                     </p>
 
                     <div class="info-box">
                         <span class="info-label">Status</span>
-                        <div class="info-value">Payment remains pending</div>
+                        <div class="info-value">Payment remains unpaid</div>
                     </div>
 
                     <div class="cancel-actions">
-                        <?php if ($planId > 0): ?>
-                            <a href="payment-portal.php?plan_id=<?= (int)$planId ?>" class="btn-primary">Return to Payment Portal</a>
-                        <?php endif; ?>
-                        <a href="dashboard.php" class="btn-secondary">Go to Dashboard</a>
+                        <a href="<?= h($primaryHref) ?>" class="btn-primary"><?= h($primaryLabel) ?></a>
+                        <a href="<?= h($secondaryHref) ?>" class="btn-secondary"><?= h($secondaryLabel) ?></a>
                     </div>
                 </section>
             </div>

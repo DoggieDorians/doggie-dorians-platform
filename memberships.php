@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 session_start();
 
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/vendor/autoload.php';
+
 function h(mixed $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
@@ -14,6 +17,470 @@ function redirectTo(string $url): never
     exit;
 }
 
+function hasTable(PDO $pdo, string $table): bool
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
+        $stmt->execute(array(':name' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    } catch (Exception $e) {
+        $cache[$table] = false;
+        return false;
+    }
+}
+
+function getTableColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!hasTable($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $columns = array();
+
+        if ($stmt) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (isset($row['name'])) {
+                    $columns[] = (string) $row['name'];
+                }
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    } catch (Exception $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function firstExistingColumn(PDO $pdo, string $table, array $candidates): ?string
+{
+    $columns = getTableColumns($pdo, $table);
+
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function safeExecute(PDOStatement $stmt, array $params = array()): bool
+{
+    try {
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        return false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function safeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    } catch (Exception $e) {
+        return null;
+    }
+}
+
+function getBaseUrl(): string
+{
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || ((string)($_SERVER['SERVER_PORT'] ?? '') === '443');
+
+    $scheme = $https ? 'https' : 'http';
+    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+
+    return $scheme . '://' . $host;
+}
+
+function currentMemberIdFromSession(): int
+{
+    foreach (array('member_id', 'user_id', 'id') as $key) {
+        if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
+            return (int) $_SESSION[$key];
+        }
+    }
+
+    return 0;
+}
+
+function founderPlanCatalog(): array
+{
+    return array(
+        'founder_walk_club' => array(
+            'slug' => 'founder_walk_club',
+            'name' => 'Founder Walk Club',
+            'price' => 250,
+            'value' => 300,
+            'tag' => 'Founding Walk Access',
+            'stripe_price_id' => 'YOUR_STRIPE_PRICE_ID_WALK',
+            'summary' => 'Built for clients who mainly want recurring walks, premium booking access, and a cleaner high-touch membership experience.',
+            'features' => array(
+                '12 included 30-minute walks each month',
+                'Unused walks roll over into the following month only',
+                'Priority scheduling access',
+                'Reserved availability during peak demand',
+                'Founder-only private contact path',
+                '$250 annual service credit issued quarterly',
+                'Locked-in founder pricing',
+            ),
+        ),
+        'founder_care_club' => array(
+            'slug' => 'founder_care_club',
+            'name' => 'Founder Care Club',
+            'price' => 499,
+            'value' => 650,
+            'tag' => 'Most Popular',
+            'stripe_price_id' => 'YOUR_STRIPE_PRICE_ID_CARE',
+            'summary' => 'For clients who want stronger recurring support across walks, daycare, and drop-ins with founder-level priority.',
+            'features' => array(
+                '16 included 30-minute walks each month',
+                '2 included daycare days each month',
+                '2 included drop-in visits each month',
+                'Unused walks roll over into the following month only',
+                '10% off boarding bookings',
+                '$500 annual service credit issued quarterly',
+                'Higher founder scheduling priority',
+            ),
+        ),
+        'founder_elite_club' => array(
+            'slug' => 'founder_elite_club',
+            'name' => 'Founder Elite Club',
+            'price' => 899,
+            'value' => 1100,
+            'tag' => 'Highest Tier',
+            'stripe_price_id' => 'YOUR_STRIPE_PRICE_ID_ELITE',
+            'summary' => 'Your most exclusive founder package for premium recurring care, elevated flexibility, and top-tier access.',
+            'features' => array(
+                '20 included 30-minute walks each month',
+                '4 included daycare days each month',
+                '4 included drop-in visits each month',
+                '3 complimentary boarding nights',
+                '20% off additional boarding bookings',
+                '$750 annual service credit issued quarterly',
+                'Highest founder scheduling priority',
+            ),
+        ),
+    );
+}
+
+function ensureMembershipPlansTable(PDO $pdo): bool
+{
+    if (hasTable($pdo, 'membership_plans')) {
+        return true;
+    }
+
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS membership_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT,
+                name TEXT,
+                created_at TEXT
+            )
+        ");
+    } catch (Throwable $e) {
+        return hasTable($pdo, 'membership_plans');
+    } catch (Exception $e) {
+        return hasTable($pdo, 'membership_plans');
+    }
+
+    return hasTable($pdo, 'membership_plans');
+}
+
+function ensureMembershipPlanColumns(PDO $pdo): bool
+{
+    if (!ensureMembershipPlansTable($pdo)) {
+        return false;
+    }
+
+    $columns = getTableColumns($pdo, 'membership_plans');
+
+    try {
+        if (!in_array('slug', $columns, true)) {
+            $pdo->exec("ALTER TABLE membership_plans ADD COLUMN slug TEXT");
+        }
+    } catch (Throwable $e) {
+    } catch (Exception $e) {
+    }
+
+    $columns = getTableColumns($pdo, 'membership_plans');
+
+    try {
+        if (!in_array('name', $columns, true)) {
+            $pdo->exec("ALTER TABLE membership_plans ADD COLUMN name TEXT");
+        }
+    } catch (Throwable $e) {
+    } catch (Exception $e) {
+    }
+
+    $columns = getTableColumns($pdo, 'membership_plans');
+
+    try {
+        if (!in_array('created_at', $columns, true)) {
+            $pdo->exec("ALTER TABLE membership_plans ADD COLUMN created_at TEXT");
+        }
+    } catch (Throwable $e) {
+    } catch (Exception $e) {
+    }
+
+    return true;
+}
+
+function findMembershipPlanRow(PDO $pdo, string $slug, string $name): ?array
+{
+    if (!ensureMembershipPlanColumns($pdo)) {
+        return null;
+    }
+
+    $slugColumns = array('slug', 'plan_slug', 'code');
+    $nameColumns = array('name', 'plan_name', 'title');
+
+    foreach ($slugColumns as $column) {
+        if (!in_array($column, getTableColumns($pdo, 'membership_plans'), true)) {
+            continue;
+        }
+
+        $row = safeFetchOne(
+            $pdo,
+            "SELECT * FROM membership_plans WHERE LOWER(TRIM(COALESCE($column, ''))) = :value LIMIT 1",
+            array(':value' => strtolower(trim($slug)))
+        );
+
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    foreach ($nameColumns as $column) {
+        if (!in_array($column, getTableColumns($pdo, 'membership_plans'), true)) {
+            continue;
+        }
+
+        $row = safeFetchOne(
+            $pdo,
+            "SELECT * FROM membership_plans WHERE LOWER(TRIM(COALESCE($column, ''))) = :value LIMIT 1",
+            array(':value' => strtolower(trim($name)))
+        );
+
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    return null;
+}
+
+function insertMembershipPlanRow(PDO $pdo, string $slug, string $name): bool
+{
+    if (!ensureMembershipPlanColumns($pdo)) {
+        return false;
+    }
+
+    $columns = getTableColumns($pdo, 'membership_plans');
+    $insertColumns = array();
+    $params = array();
+
+    if (in_array('slug', $columns, true)) {
+        $insertColumns[] = 'slug';
+        $params[':slug'] = $slug;
+    } elseif (in_array('plan_slug', $columns, true)) {
+        $insertColumns[] = 'plan_slug';
+        $params[':plan_slug'] = $slug;
+    } elseif (in_array('code', $columns, true)) {
+        $insertColumns[] = 'code';
+        $params[':code'] = $slug;
+    }
+
+    if (in_array('name', $columns, true)) {
+        $insertColumns[] = 'name';
+        $params[':name'] = $name;
+    } elseif (in_array('plan_name', $columns, true)) {
+        $insertColumns[] = 'plan_name';
+        $params[':plan_name'] = $name;
+    } elseif (in_array('title', $columns, true)) {
+        $insertColumns[] = 'title';
+        $params[':title'] = $name;
+    }
+
+    if (in_array('created_at', $columns, true)) {
+        $insertColumns[] = 'created_at';
+        $params[':created_at'] = date('Y-m-d H:i:s');
+    }
+
+    if (empty($insertColumns)) {
+        return false;
+    }
+
+    try {
+        $placeholders = array();
+        foreach ($insertColumns as $column) {
+            $placeholders[] = ':' . $column;
+        }
+
+        $sql = 'INSERT INTO membership_plans (' . implode(', ', $insertColumns) . ') VALUES (' . implode(', ', $placeholders) . ')';
+        $stmt = $pdo->prepare($sql);
+
+        return safeExecute($stmt, $params);
+    } catch (Throwable $e) {
+        return false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function backfillFounderPlanRows(PDO $pdo): void
+{
+    if (!ensureMembershipPlanColumns($pdo)) {
+        return;
+    }
+
+    $catalog = founderPlanCatalog();
+
+    foreach ($catalog as $slug => $plan) {
+        $row = findMembershipPlanRow($pdo, $slug, $plan['name']);
+        if ($row !== null) {
+            continue;
+        }
+
+        insertMembershipPlanRow($pdo, $slug, $plan['name']);
+    }
+}
+
+function normalizeExistingFounderPlanRows(PDO $pdo): void
+{
+    if (!ensureMembershipPlanColumns($pdo)) {
+        return;
+    }
+
+    $catalog = founderPlanCatalog();
+    $columns = getTableColumns($pdo, 'membership_plans');
+
+    $idCol = in_array('id', $columns, true) ? 'id' : (in_array('plan_id', $columns, true) ? 'plan_id' : null);
+    $slugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
+    $nameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
+
+    if ($idCol === null) {
+        return;
+    }
+
+    foreach ($catalog as $slug => $plan) {
+        $row = findMembershipPlanRow($pdo, $slug, $plan['name']);
+        if ($row === null) {
+            continue;
+        }
+
+        $updateParts = array();
+        $params = array(':id' => (int) ($row[$idCol] ?? 0));
+
+        if ($slugCol !== null && (string) ($row[$slugCol] ?? '') !== $slug) {
+            $updateParts[] = $slugCol . ' = :slug';
+            $params[':slug'] = $slug;
+        }
+
+        if ($nameCol !== null && (string) ($row[$nameCol] ?? '') !== $plan['name']) {
+            $updateParts[] = $nameCol . ' = :name';
+            $params[':name'] = $plan['name'];
+        }
+
+        if (!empty($updateParts)) {
+            try {
+                $stmt = $pdo->prepare(
+                    'UPDATE membership_plans SET ' . implode(', ', $updateParts) . ' WHERE ' . $idCol . ' = :id'
+                );
+                safeExecute($stmt, $params);
+            } catch (Throwable $e) {
+            } catch (Exception $e) {
+            }
+        }
+    }
+}
+
+function ensureFounderMembershipPlans(PDO $pdo): bool
+{
+    if (!ensureMembershipPlanColumns($pdo)) {
+        return false;
+    }
+
+    backfillFounderPlanRows($pdo);
+    normalizeExistingFounderPlanRows($pdo);
+    backfillFounderPlanRows($pdo);
+
+    $catalog = founderPlanCatalog();
+
+    foreach ($catalog as $plan) {
+        if (findMembershipPlanRow($pdo, $plan['slug'], $plan['name']) === null) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function lookupMembershipPlanId(PDO $pdo, string $slug, string $name): int
+{
+    $row = findMembershipPlanRow($pdo, $slug, $name);
+    if ($row === null) {
+        return 0;
+    }
+
+    foreach (array('id', 'plan_id') as $key) {
+        if (isset($row[$key]) && is_numeric($row[$key])) {
+            return (int) $row[$key];
+        }
+    }
+
+    return 0;
+}
+
+function getStripeSecretKey(): string
+{
+    if (defined('STRIPE_SECRET_KEY') && is_string(STRIPE_SECRET_KEY) && STRIPE_SECRET_KEY !== '') {
+        return STRIPE_SECRET_KEY;
+    }
+
+    $env = getenv('STRIPE_SECRET_KEY');
+    if (is_string($env) && $env !== '') {
+        return $env;
+    }
+
+    return 'YOUR_STRIPE_SECRET_KEY';
+}
+
 $isLoggedIn = isset($_SESSION['member_id']) || isset($_SESSION['user_id']) || isset($_SESSION['user']) || isset($_SESSION['email']);
 
 if (!$isLoggedIn) {
@@ -21,80 +488,33 @@ if (!$isLoggedIn) {
     redirectTo('login.php?redirect=' . $redirect);
 }
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    echo 'Database connection is not available.';
+    exit;
+}
+
 $currentUserName = '';
-foreach (['member_name', 'full_name', 'name', 'user_name', 'email'] as $sessionKey) {
+foreach (array('member_name', 'full_name', 'name', 'user_name', 'email') as $sessionKey) {
     if (!empty($_SESSION[$sessionKey]) && is_string($_SESSION[$sessionKey])) {
         $currentUserName = trim($_SESSION[$sessionKey]);
         break;
     }
 }
 
+$currentMemberId = currentMemberIdFromSession();
 $tosVersion = '2026-04-07';
 
-$plans = [
-    [
-        'slug' => 'founder-walk-club',
-        'name' => 'Founder Walk Club',
-        'price' => 250,
-        'value' => 300,
-        'tag' => 'Founding Walk Access',
-        'summary' => 'Built for clients who mainly want recurring walks, premium booking access, and a cleaner high-touch membership experience.',
-        'features' => [
-            '12 included 30-minute walks each month',
-            'Unused walks roll over into the following month only',
-            'Priority scheduling access',
-            'Reserved availability during peak demand',
-            'Founder-only private contact path',
-            '$250 annual service credit issued quarterly',
-            'Locked-in founder pricing',
-        ],
-    ],
-    [
-        'slug' => 'founder-care-club',
-        'name' => 'Founder Care Club',
-        'price' => 499,
-        'value' => 650,
-        'tag' => 'Most Popular',
-        'summary' => 'For clients who want stronger recurring support across walks, daycare, and drop-ins with founder-level priority.',
-        'features' => [
-            '16 included 30-minute walks each month',
-            '2 included daycare days each month',
-            '2 included drop-in visits each month',
-            'Unused walks roll over into the following month only',
-            '10% off boarding bookings',
-            '$500 annual service credit issued quarterly',
-            'Higher founder scheduling priority',
-        ],
-    ],
-    [
-        'slug' => 'founder-elite-club',
-        'name' => 'Founder Elite Club',
-        'price' => 899,
-        'value' => 1100,
-        'tag' => 'Highest Tier',
-        'summary' => 'Your most exclusive founder package for premium recurring care, elevated flexibility, and top-tier access.',
-        'features' => [
-            '20 included 30-minute walks each month',
-            '4 included daycare days each month',
-            '4 included drop-in visits each month',
-            '3 complimentary boarding nights',
-            '20% off additional boarding bookings',
-            '$750 annual service credit issued quarterly',
-            'Highest founder scheduling priority',
-        ],
-    ],
-];
-
-$plansBySlug = [];
-foreach ($plans as $plan) {
-    $plansBySlug[$plan['slug']] = $plan;
-}
+$plansBySlug = founderPlanCatalog();
+$plans = array_values($plansBySlug);
 
 $error = '';
 $success = '';
-$selectedPlanSlug = (string)($_GET['plan'] ?? '');
+$selectedPlanSlug = trim((string)($_GET['plan'] ?? ''));
 $checkoutReady = false;
 $checkoutPayload = $_SESSION['pending_membership_checkout'] ?? null;
+
+ensureFounderMembershipPlans($pdo);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $selectedPlanSlug = trim((string)($_POST['plan'] ?? ''));
@@ -104,23 +524,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = 'Please choose a membership before continuing.';
     } elseif (!$tosAccepted) {
         $error = 'You must agree to the Membership Terms of Service before continuing.';
+    } elseif ($currentMemberId <= 0) {
+        $error = 'Your account session is missing a member ID. Please log out and sign back in.';
+    } elseif (!ensureFounderMembershipPlans($pdo)) {
+        $error = 'Founder membership plans could not be prepared in the database.';
     } else {
         $plan = $plansBySlug[$selectedPlanSlug];
+        $planId = lookupMembershipPlanId($pdo, $plan['slug'], $plan['name']);
 
-        $_SESSION['pending_membership_checkout'] = [
-            'type' => 'membership',
-            'plan_slug' => $plan['slug'],
-            'plan_name' => $plan['name'],
-            'monthly_price' => (int)$plan['price'],
-            'tos_version' => $tosVersion,
-            'tos_accepted' => true,
-            'tos_accepted_at' => date('c'),
-            'started_from' => 'memberships.php',
-        ];
+        if ($planId <= 0) {
+            $error = 'The selected membership plan could not be matched to the database.';
+        } else {
+            $_SESSION['pending_membership_checkout'] = array(
+                'type' => 'membership',
+                'plan_id' => $planId,
+                'plan_slug' => $plan['slug'],
+                'plan_name' => $plan['name'],
+                'monthly_price' => (int)$plan['price'],
+                'stripe_price_id' => (string)$plan['stripe_price_id'],
+                'member_id' => $currentMemberId,
+                'tos_version' => $tosVersion,
+                'tos_accepted' => true,
+                'tos_accepted_at' => date('c'),
+                'started_from' => 'memberships.php',
+            );
 
-        $checkoutPayload = $_SESSION['pending_membership_checkout'];
-        $checkoutReady = true;
-        $success = 'Membership selected and Terms accepted. This account is now ready for Stripe checkout wiring in the next step.';
+            $checkoutPayload = $_SESSION['pending_membership_checkout'];
+            $checkoutReady = true;
+
+            $stripeSecretKey = getStripeSecretKey();
+            $stripePriceId = (string)$plan['stripe_price_id'];
+
+            if (
+                $stripeSecretKey === '' ||
+                $stripeSecretKey === 'YOUR_STRIPE_SECRET_KEY' ||
+                $stripePriceId === '' ||
+                strpos($stripePriceId, 'YOUR_STRIPE_PRICE_ID_') === 0
+            ) {
+                $success = 'Membership selected and Terms accepted. This account is now ready for Stripe checkout wiring in the next step.';
+            } else {
+                try {
+                    \Stripe\Stripe::setApiKey($stripeSecretKey);
+
+                    $baseUrl = getBaseUrl();
+
+                    $checkoutSession = \Stripe\Checkout\Session::create(array(
+                        'mode' => 'subscription',
+                        'payment_method_types' => array('card'),
+                        'line_items' => array(array(
+                            'price' => $stripePriceId,
+                            'quantity' => 1,
+                        )),
+                        'success_url' => $baseUrl . '/dashboard.php?membership_checkout=success',
+                        'cancel_url' => $baseUrl . '/memberships.php?plan=' . rawurlencode($plan['slug']) . '&membership_checkout=cancelled#selection',
+                        'metadata' => array(
+                            'ledger_action' => 'membership_signup',
+                            'member_id' => (string)$currentMemberId,
+                            'plan_id' => (string)$planId,
+                            'plan_slug' => $plan['slug'],
+                            'plan_name' => $plan['name'],
+                            'tos_version' => $tosVersion,
+                        ),
+                        'customer_email' => !empty($_SESSION['email']) && is_string($_SESSION['email']) ? (string)$_SESSION['email'] : null,
+                        'allow_promotion_codes' => false,
+                    ));
+
+                    if (!empty($checkoutSession->url) && is_string($checkoutSession->url)) {
+                        redirectTo($checkoutSession->url);
+                    }
+
+                    $success = 'Membership selected and Terms accepted. Checkout session was prepared, but Stripe did not return a redirect URL.';
+                } catch (Throwable $e) {
+                    $error = 'Stripe checkout could not be started: ' . $e->getMessage();
+                } catch (Exception $e) {
+                    $error = 'Stripe checkout could not be started: ' . $e->getMessage();
+                }
+            }
+        }
     }
 }
 
@@ -132,6 +612,10 @@ if (!$checkoutReady && is_array($checkoutPayload) && !empty($checkoutPayload['pl
 $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlug]))
     ? $plansBySlug[$selectedPlanSlug]
     : null;
+
+if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'cancelled' && $error === '') {
+    $error = 'Stripe checkout was cancelled before payment was completed.';
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -664,17 +1148,17 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
             <section class="hero">
                 <div class="card">
                     <div class="eyebrow">Members Only Access</div>
-                    <h1>Choose your membership before checkout goes live.</h1>
+                    <h1>Secure Your Founder Membership</h1>
                     <p class="lead">
-                        This page is now locked to logged-in clients only. Choose your founder membership,
-                        review what is included, and accept the Membership Terms before the Stripe step is connected.
+                        You’re now inside the private member experience. Select your founder membership,
+                        review what’s included, and complete your enrollment to unlock premium access.
                     </p>
 
                     <div class="hero-pills">
-                        <div class="pill">Login required</div>
-                        <div class="pill">Terms required before checkout</div>
-                        <div class="pill">Stripe-ready session flow</div>
-                        <div class="pill">Luxury member experience</div>
+                        <div class="pill">Private member access</div>
+                        <div class="pill">Founder-only pricing</div>
+                        <div class="pill">Priority booking privileges</div>
+                        <div class="pill">Premium service experience</div>
                     </div>
                 </div>
 
@@ -682,18 +1166,18 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
                     <div class="eyebrow">Account Status</div>
                     <h2>Welcome<?php echo $currentUserName !== '' ? ', ' . h($currentUserName) : ''; ?></h2>
                     <p class="sub">
-                        Your account is signed in and eligible to continue through the membership selection flow.
+                        Your account is active and ready to proceed with membership enrollment.
                     </p>
 
                     <div class="welcome-list">
                         <div class="welcome-item">
-                            <strong>Step 1:</strong> choose the membership that matches your care routine.
+                            <strong>Step 1:</strong> select the membership that fits your dog’s routine.
                         </div>
                         <div class="welcome-item">
-                            <strong>Step 2:</strong> agree to the Membership Terms of Service.
+                            <strong>Step 2:</strong> review and accept the membership terms.
                         </div>
                         <div class="welcome-item">
-                            <strong>Step 3:</strong> continue to Stripe when payment wiring is added next.
+                            <strong>Step 3:</strong> proceed to secure checkout to activate your membership.
                         </div>
                     </div>
                 </div>
@@ -702,9 +1186,9 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
             <section class="stack">
                 <div class="section-title">
                     <div class="eyebrow">Founder Collection</div>
-                    <h2>Membership options</h2>
+                    <h2>Founder Membership Collection</h2>
                     <p class="sub">
-                        Premium recurring access, structured benefits, and a cleaner member booking experience.
+                        Exclusive access, priority scheduling, and premium care designed for a higher standard of service.
                     </p>
                 </div>
 
@@ -743,9 +1227,9 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
             <section class="selection-panel" id="selection">
                 <div class="card selection-summary">
                     <div class="eyebrow">Membership Checkout Prep</div>
-                    <h2><?php echo $selectedPlan ? 'Review your selected membership' : 'Choose a membership to continue'; ?></h2>
+                    <h2><?php echo $selectedPlan ? 'Confirm Your Selection' : 'Select Your Membership'; ?></h2>
                     <p class="sub">
-                        This section prepares the exact membership choice and Terms acceptance that Stripe checkout will use later.
+                        Confirm your membership selection and prepare for a seamless, secure checkout experience.
                     </p>
 
                     <div class="summary-box">
@@ -771,26 +1255,27 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
                             </div>
 
                             <div class="mini-pills">
-                                <div class="pill">Recurring billing later via Stripe</div>
-                                <div class="pill">TOS acceptance stored in session</div>
-                                <div class="pill">Plan locked for next step</div>
+                                <div class="pill">Secure recurring membership</div>
+                                <div class="pill">Protected account setup</div>
+                                <div class="pill">Ready for activation</div>
                             </div>
                         <?php else: ?>
                             <p class="sub">
-                                Pick one of the founder plans above. Once selected, the terms agreement box and continue action will activate the pre-checkout flow.
+                                Select one of the founder memberships above to unlock exclusive access and continue your enrollment.
                             </p>
                         <?php endif; ?>
                     </div>
 
                     <?php if ($checkoutReady && is_array($checkoutPayload) && $selectedPlan): ?>
                         <div class="ready-box">
-                            <h3>Checkout session prep saved</h3>
+                            <h3>Membership Ready for Activation</h3>
                             <p class="sub">
-                                The selected membership and Terms acceptance are already stored in the session, so the Stripe step can plug directly into this flow next.
+                                Your membership selection has been secured and is ready for final activation through checkout.
                             </p>
 
                             <div class="ready-meta">
                                 <div><strong>Plan:</strong> <?php echo h((string)$checkoutPayload['plan_name']); ?></div>
+                                <div><strong>Plan ID:</strong> <?php echo h((string)$checkoutPayload['plan_id']); ?></div>
                                 <div><strong>TOS Accepted:</strong> Yes</div>
                                 <div><strong>TOS Version:</strong> <?php echo h((string)$checkoutPayload['tos_version']); ?></div>
                                 <div><strong>Accepted At:</strong> <?php echo h((string)$checkoutPayload['tos_accepted_at']); ?></div>
@@ -805,9 +1290,9 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
 
                 <div class="card">
                     <div class="eyebrow">Terms Agreement</div>
-                    <h2>Accept Terms before checkout</h2>
+                    <h2>Final Step: Secure Your Membership</h2>
                     <p class="sub">
-                        Before payment is connected, every member must review and accept the Membership Terms of Service.
+                        To finalize your membership, please review and accept the Membership Terms of Service.
                     </p>
 
                     <form method="post" action="memberships.php<?php echo $selectedPlan ? '?plan=' . rawurlencode($selectedPlan['slug']) : ''; ?>#selection" class="stack" style="margin-top: 18px;">
@@ -818,7 +1303,7 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
                                 <input type="checkbox" id="agree_tos" name="agree_tos" value="1" <?php echo $checkoutReady ? 'checked' : ''; ?>>
                                 <span>
                                     I agree to the <a class="tos-link" href="tos.php" target="_blank" rel="noopener noreferrer">Doggie Dorian’s Membership Terms of Service</a>,
-                                    including recurring billing terms, membership usage rules, cancellations, and founder membership conditions.
+                                    including billing terms, usage guidelines, and founder membership conditions.
                                 </span>
                             </label>
                         </div>
@@ -829,11 +1314,11 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
                         </div>
 
                         <button type="submit" class="btn btn-gold btn-block">
-                            Continue to Checkout Setup
+                            Continue to Secure Checkout
                         </button>
 
                         <div class="helper">
-                            Right now this stores the member’s selected plan + Terms acceptance safely in session so Stripe can be added next without rebuilding the flow.
+                            Complete your selection to continue to secure checkout and activate your membership.
                         </div>
                     </form>
                 </div>
@@ -841,7 +1326,7 @@ $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlu
 
             <footer class="footer">
                 <div>
-                    © <?php echo date('Y'); ?> Doggie Dorian’s — premium memberships, cleaner checkout flow, and a stronger luxury client experience.
+                    © <?php echo date('Y'); ?> Doggie Dorian’s — exclusive memberships, elevated care, and a premium client experience.
                 </div>
 
                 <div class="footer-links">

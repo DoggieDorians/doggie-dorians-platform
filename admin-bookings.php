@@ -299,6 +299,502 @@ function bookingBaseTable(PDO $pdo)
     return null;
 }
 
+function buildNameFromParts(array $row)
+{
+    $first = trim((string) valueFromRow($row, array('first_name', 'firstname', 'client_first_name', 'owner_first_name'), ''));
+    $last = trim((string) valueFromRow($row, array('last_name', 'lastname', 'client_last_name', 'owner_last_name'), ''));
+
+    $full = trim($first . ' ' . $last);
+    return $full !== '' ? $full : '';
+}
+
+function decodeJsonIfPossible($value)
+{
+    if (!is_string($value) && !is_numeric($value)) {
+        return null;
+    }
+
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+
+    $firstChar = substr($value, 0, 1);
+    if ($firstChar !== '{' && $firstChar !== '[') {
+        return null;
+    }
+
+    $decoded = json_decode($value, true);
+    return is_array($decoded) ? $decoded : null;
+}
+
+function looksLikeJsonObjectOrArray($value)
+{
+    if (!is_string($value) && !is_numeric($value)) {
+        return false;
+    }
+
+    $value = trim((string) $value);
+    if ($value === '') {
+        return false;
+    }
+
+    $firstChar = substr($value, 0, 1);
+    $lastChar = substr($value, -1);
+
+    if (!(($firstChar === '{' && $lastChar === '}') || ($firstChar === '[' && $lastChar === ']'))) {
+        return false;
+    }
+
+    json_decode($value, true);
+    return json_last_error() === JSON_ERROR_NONE;
+}
+
+function stripJsonLinesFromText($text)
+{
+    $text = trim((string) $text);
+    if ($text === '') {
+        return '';
+    }
+
+    $lines = preg_split("/\r\n|\n|\r/", $text);
+    $cleanLines = array();
+
+    foreach ($lines as $line) {
+        $trimmed = trim((string) $line);
+
+        if ($trimmed === '') {
+            continue;
+        }
+
+        if (looksLikeJsonObjectOrArray($trimmed)) {
+            continue;
+        }
+
+        $cleanLines[] = rtrim((string) $line);
+    }
+
+    return trim(implode("\n", $cleanLines));
+}
+
+function cleanDisplayNotesText($text)
+{
+    $text = stripJsonLinesFromText($text);
+    if ($text === '') {
+        return '';
+    }
+
+    $lines = preg_split("/\r\n|\n|\r/", $text);
+    $cleanLines = array();
+
+    foreach ($lines as $line) {
+        $trimmed = trim((string) $line);
+        if ($trimmed === '') {
+            continue;
+        }
+
+        $lower = strtolower($trimmed);
+
+        if ($lower === 'booking details:' || $lower === 'booking details') {
+            continue;
+        }
+
+        $cleanLines[] = rtrim((string) $line);
+    }
+
+    return trim(implode("\n", $cleanLines));
+}
+
+function extractNestedScalar(array $data, array $paths)
+{
+    foreach ($paths as $path) {
+        $parts = explode('.', $path);
+        $current = $data;
+        $found = true;
+
+        foreach ($parts as $part) {
+            if (is_array($current) && array_key_exists($part, $current)) {
+                $current = $current[$part];
+            } else {
+                $found = false;
+                break;
+            }
+        }
+
+        if ($found && is_scalar($current)) {
+            $value = trim((string) $current);
+            if ($value !== '') {
+                return $value;
+            }
+        }
+    }
+
+    return '';
+}
+
+function collectJsonSourcesFromRow(array $row)
+{
+    $sources = array();
+
+    foreach ($row as $key => $value) {
+        if (!is_string($key)) {
+            continue;
+        }
+
+        $decoded = decodeJsonIfPossible($value);
+        if (is_array($decoded)) {
+            $sources[] = $decoded;
+        }
+    }
+
+    return $sources;
+}
+
+function extractDisplayNotesFromSources(array $jsonSources, $rawNotes)
+{
+    $rawNotes = trim((string) $rawNotes);
+
+    if ($rawNotes !== '') {
+        $cleanRawNotes = cleanDisplayNotesText($rawNotes);
+        if ($cleanRawNotes !== '') {
+            return $cleanRawNotes;
+        }
+    }
+
+    $parts = array();
+
+    foreach ($jsonSources as $json) {
+        foreach (array(
+            'notes',
+            'note',
+            'special_instructions',
+            'instructions',
+            'care_notes',
+            'client_notes',
+            'additional_notes',
+            'details',
+            'message',
+            'booking_details',
+            'care_instructions'
+        ) as $key) {
+            if (isset($json[$key]) && is_scalar($json[$key])) {
+                $text = cleanDisplayNotesText((string) $json[$key]);
+                if ($text !== '') {
+                    $parts[] = $text;
+                }
+            }
+        }
+    }
+
+    $parts = array_values(array_unique($parts));
+
+    return empty($parts) ? '' : implode("\n", $parts);
+}
+
+function lookupRelatedName(PDO $pdo, $table, $idValue, array $idCandidates, array $nameCandidates)
+{
+    if ($idValue === null || $idValue === '' || !hasTable($pdo, $table)) {
+        return '';
+    }
+
+    $idColumn = firstExistingColumn($pdo, $table, $idCandidates);
+    $nameColumn = firstExistingColumn($pdo, $table, $nameCandidates);
+
+    if ($idColumn === null || $nameColumn === null) {
+        return '';
+    }
+
+    $safeTable = '"' . str_replace('"', '""', $table) . '"';
+    $safeIdColumn = '"' . str_replace('"', '""', $idColumn) . '"';
+    $safeNameColumn = '"' . str_replace('"', '""', $nameColumn) . '"';
+
+    $row = safeFetchOne(
+        $pdo,
+        'SELECT ' . $safeNameColumn . ' AS resolved_name FROM ' . $safeTable . ' WHERE ' . $safeIdColumn . ' = :id LIMIT 1',
+        array(':id' => $idValue)
+    );
+
+    if ($row && isset($row['resolved_name']) && $row['resolved_name'] !== null) {
+        $value = trim((string) $row['resolved_name']);
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return '';
+}
+
+function lookupRelatedFullName(PDO $pdo, $table, $idValue, array $idCandidates, array $fullNameCandidates, array $firstNameCandidates, array $lastNameCandidates)
+{
+    if ($idValue === null || $idValue === '' || !hasTable($pdo, $table)) {
+        return '';
+    }
+
+    $idColumn = firstExistingColumn($pdo, $table, $idCandidates);
+    if ($idColumn === null) {
+        return '';
+    }
+
+    $fullNameColumn = firstExistingColumn($pdo, $table, $fullNameCandidates);
+    $firstNameColumn = firstExistingColumn($pdo, $table, $firstNameCandidates);
+    $lastNameColumn = firstExistingColumn($pdo, $table, $lastNameCandidates);
+
+    if ($fullNameColumn === null && $firstNameColumn === null && $lastNameColumn === null) {
+        return '';
+    }
+
+    $selectParts = array();
+
+    if ($fullNameColumn !== null) {
+        $selectParts[] = '"' . str_replace('"', '""', $fullNameColumn) . '" AS full_name';
+    } else {
+        $selectParts[] = "'' AS full_name";
+    }
+
+    if ($firstNameColumn !== null) {
+        $selectParts[] = '"' . str_replace('"', '""', $firstNameColumn) . '" AS first_name';
+    } else {
+        $selectParts[] = "'' AS first_name";
+    }
+
+    if ($lastNameColumn !== null) {
+        $selectParts[] = '"' . str_replace('"', '""', $lastNameColumn) . '" AS last_name';
+    } else {
+        $selectParts[] = "'' AS last_name";
+    }
+
+    $safeTable = '"' . str_replace('"', '""', $table) . '"';
+    $safeIdColumn = '"' . str_replace('"', '""', $idColumn) . '"';
+
+    $row = safeFetchOne(
+        $pdo,
+        'SELECT ' . implode(', ', $selectParts) . ' FROM ' . $safeTable . ' WHERE ' . $safeIdColumn . ' = :id LIMIT 1',
+        array(':id' => $idValue)
+    );
+
+    if (!$row) {
+        return '';
+    }
+
+    $fullName = trim((string) ($row['full_name'] ?? ''));
+    if ($fullName !== '') {
+        return $fullName;
+    }
+
+    $firstName = trim((string) ($row['first_name'] ?? ''));
+    $lastName = trim((string) ($row['last_name'] ?? ''));
+    $combined = trim($firstName . ' ' . $lastName);
+
+    return $combined !== '' ? $combined : '';
+}
+
+function resolveMemberClientName(PDO $pdo, array $row, array $jsonSources)
+{
+    $clientName = (string) valueFromRow(
+        $row,
+        array(
+            'client_name',
+            'owner_name',
+            'member_name',
+            'customer_name',
+            'customer',
+            'full_name',
+            'name',
+            'member_full_name'
+        ),
+        ''
+    );
+
+    if ($clientName === '') {
+        $clientName = buildNameFromParts($row);
+    }
+
+    if ($clientName === '') {
+        foreach ($jsonSources as $json) {
+            $clientName = extractNestedScalar($json, array(
+                'client_name',
+                'owner_name',
+                'member_name',
+                'customer_name',
+                'full_name',
+                'name',
+                'client.name',
+                'customer.name',
+                'owner.name',
+                'member.name',
+                'user.name',
+                'member_full_name'
+            ));
+
+            if ($clientName !== '') {
+                break;
+            }
+        }
+    }
+
+    if ($clientName === '') {
+        $memberId = valueFromRow($row, array('member_id', 'memberID'), '');
+        if ($memberId !== '') {
+            $clientName = lookupRelatedFullName(
+                $pdo,
+                'members',
+                $memberId,
+                array('id', 'member_id'),
+                array('full_name', 'name', 'member_name', 'client_name'),
+                array('first_name', 'firstname'),
+                array('last_name', 'lastname')
+            );
+        }
+    }
+
+    if ($clientName === '') {
+        $userId = valueFromRow($row, array('user_id', 'client_id', 'owner_id'), '');
+        if ($userId !== '') {
+            $clientName = lookupRelatedFullName(
+                $pdo,
+                'users',
+                $userId,
+                array('id', 'user_id'),
+                array('full_name', 'name', 'display_name', 'client_name'),
+                array('first_name', 'firstname'),
+                array('last_name', 'lastname')
+            );
+        }
+    }
+
+    if ($clientName === '') {
+        foreach ($jsonSources as $json) {
+            $memberId = extractNestedScalar($json, array('member_id', 'member.id', 'booking.member_id'));
+            if ($memberId !== '') {
+                $clientName = lookupRelatedFullName(
+                    $pdo,
+                    'members',
+                    $memberId,
+                    array('id', 'member_id'),
+                    array('full_name', 'name', 'member_name', 'client_name'),
+                    array('first_name', 'firstname'),
+                    array('last_name', 'lastname')
+                );
+                if ($clientName !== '') {
+                    break;
+                }
+            }
+
+            $userId = extractNestedScalar($json, array('user_id', 'user.id', 'client_id', 'owner_id'));
+            if ($userId !== '') {
+                $clientName = lookupRelatedFullName(
+                    $pdo,
+                    'users',
+                    $userId,
+                    array('id', 'user_id'),
+                    array('full_name', 'name', 'display_name', 'client_name'),
+                    array('first_name', 'firstname'),
+                    array('last_name', 'lastname')
+                );
+                if ($clientName !== '') {
+                    break;
+                }
+            }
+        }
+    }
+
+    return $clientName !== '' ? $clientName : 'Member Client';
+}
+
+function resolveMemberPetName(PDO $pdo, array $row, array $jsonSources)
+{
+    $petName = (string) valueFromRow(
+        $row,
+        array(
+            'pet_name',
+            'dog_name',
+            'pet',
+            'dog',
+            'dogs',
+            'pet_names'
+        ),
+        ''
+    );
+
+    if ($petName === '') {
+        foreach ($jsonSources as $json) {
+            $petName = extractNestedScalar($json, array(
+                'pet_name',
+                'dog_name',
+                'pet',
+                'dog',
+                'pet.name',
+                'dog.name',
+                'primary_pet_name'
+            ));
+
+            if ($petName !== '') {
+                break;
+            }
+        }
+    }
+
+    if ($petName === '') {
+        $dogId = valueFromRow($row, array('dog_id', 'pet_id'), '');
+        if ($dogId !== '') {
+            $petName = lookupRelatedName(
+                $pdo,
+                'dogs',
+                $dogId,
+                array('id', 'dog_id'),
+                array('dog_name', 'pet_name', 'name')
+            );
+        }
+    }
+
+    if ($petName === '') {
+        $petId = valueFromRow($row, array('pet_id', 'dog_id'), '');
+        if ($petId !== '') {
+            $petName = lookupRelatedName(
+                $pdo,
+                'pets',
+                $petId,
+                array('id', 'pet_id'),
+                array('pet_name', 'dog_name', 'name')
+            );
+        }
+    }
+
+    if ($petName === '') {
+        foreach ($jsonSources as $json) {
+            $dogId = extractNestedScalar($json, array('dog_id', 'pet_id', 'dog.id', 'pet.id'));
+            if ($dogId !== '') {
+                $petName = lookupRelatedName(
+                    $pdo,
+                    'dogs',
+                    $dogId,
+                    array('id', 'dog_id'),
+                    array('dog_name', 'pet_name', 'name')
+                );
+                if ($petName !== '') {
+                    break;
+                }
+            }
+
+            $petId = extractNestedScalar($json, array('pet_id', 'dog_id', 'pet.id', 'dog.id'));
+            if ($petId !== '') {
+                $petName = lookupRelatedName(
+                    $pdo,
+                    'pets',
+                    $petId,
+                    array('id', 'pet_id'),
+                    array('pet_name', 'dog_name', 'name')
+                );
+                if ($petName !== '') {
+                    break;
+                }
+            }
+        }
+    }
+
+    return $petName;
+}
+
 function fetchMemberBookings(PDO $pdo)
 {
     $table = bookingBaseTable($pdo);
@@ -310,17 +806,127 @@ function fetchMemberBookings(PDO $pdo)
     $normalized = array();
 
     foreach ($rows as $row) {
+        $jsonSources = collectJsonSourcesFromRow($row);
+
+        $clientName = resolveMemberClientName($pdo, $row, $jsonSources);
+        $petName = resolveMemberPetName($pdo, $row, $jsonSources);
+
+        $serviceType = (string) valueFromRow(
+            $row,
+            array(
+                'service_type',
+                'type',
+                'booking_type',
+                'category',
+                'service'
+            ),
+            ''
+        );
+
+        if ($serviceType === '') {
+            foreach ($jsonSources as $json) {
+                $serviceType = extractNestedScalar($json, array(
+                    'service_type',
+                    'type',
+                    'booking_type',
+                    'category',
+                    'service',
+                    'booking.service_type'
+                ));
+
+                if ($serviceType !== '') {
+                    break;
+                }
+            }
+        }
+
+        $serviceDate = (string) valueFromRow(
+            $row,
+            array(
+                'service_date',
+                'booking_date',
+                'walk_date',
+                'date',
+                'scheduled_date',
+                'start_date'
+            ),
+            ''
+        );
+
+        if ($serviceDate === '') {
+            foreach ($jsonSources as $json) {
+                $serviceDate = extractNestedScalar($json, array(
+                    'service_date',
+                    'booking_date',
+                    'walk_date',
+                    'date',
+                    'scheduled_date',
+                    'start_date',
+                    'booking.date'
+                ));
+
+                if ($serviceDate !== '') {
+                    break;
+                }
+            }
+        }
+
+        $serviceTime = (string) valueFromRow(
+            $row,
+            array(
+                'service_time',
+                'booking_time',
+                'walk_time',
+                'time',
+                'scheduled_time',
+                'start_time'
+            ),
+            ''
+        );
+
+        if ($serviceTime === '') {
+            foreach ($jsonSources as $json) {
+                $serviceTime = extractNestedScalar($json, array(
+                    'service_time',
+                    'booking_time',
+                    'walk_time',
+                    'time',
+                    'scheduled_time',
+                    'start_time',
+                    'booking.time'
+                ));
+
+                if ($serviceTime !== '') {
+                    break;
+                }
+            }
+        }
+
+        $rawNotes = (string) valueFromRow(
+            $row,
+            array(
+                'notes',
+                'special_instructions',
+                'instructions',
+                'care_notes',
+                'client_notes'
+            ),
+            ''
+        );
+
+        $cleanNotes = extractDisplayNotesFromSources($jsonSources, $rawNotes);
+
         $normalized[] = array(
             'source' => 'member',
             'id' => (int) valueFromRow($row, array('id', 'booking_id', 'walk_id'), 0),
-            'client_name' => (string) valueFromRow($row, array('client_name', 'owner_name', 'member_name', 'customer_name', 'full_name', 'name'), 'Member Client'),
-            'service_type' => normalizeServiceType((string) valueFromRow($row, array('service_type', 'type', 'booking_type', 'category', 'service'), 'service')),
-            'service_date' => (string) valueFromRow($row, array('service_date', 'booking_date', 'walk_date', 'date', 'scheduled_date', 'start_date'), ''),
-            'service_time' => (string) valueFromRow($row, array('service_time', 'booking_time', 'walk_time', 'time', 'scheduled_time', 'start_time'), ''),
-            'pet_name' => (string) valueFromRow($row, array('pet_name', 'dog_name'), ''),
+            'client_name' => $clientName,
+            'service_type' => normalizeServiceType($serviceType !== '' ? $serviceType : 'service'),
+            'service_date' => $serviceDate,
+            'service_time' => $serviceTime,
+            'pet_name' => $petName,
             'price' => valueFromRow($row, array('price', 'total_price', 'amount'), ''),
             'status' => normalizeStatus((string) valueFromRow($row, array('status', 'booking_status', 'service_status', 'walk_status'), 'pending')),
-            'notes' => (string) valueFromRow($row, array('notes', 'special_instructions', 'instructions', 'care_notes', 'client_notes'), ''),
+            'notes' => $cleanNotes,
             'created_at' => (string) valueFromRow($row, array('created_at'), ''),
             'raw' => $row,
         );
@@ -387,8 +993,17 @@ $flash = isset($_SESSION['admin_bookings_flash']) ? (string) $_SESSION['admin_bo
 $flashType = isset($_SESSION['admin_bookings_flash_type']) ? (string) $_SESSION['admin_bookings_flash_type'] : '';
 unset($_SESSION['admin_bookings_flash'], $_SESSION['admin_bookings_flash_type']);
 
+$view = isset($_GET['view']) ? strtolower(trim((string) $_GET['view'])) : 'all';
+if (!in_array($view, array('all', 'member', 'public'), true)) {
+    $view = 'all';
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = isset($_POST['action']) ? (string) $_POST['action'] : '';
+    $postedView = isset($_POST['view']) ? strtolower(trim((string) $_POST['view'])) : $view;
+    if (!in_array($postedView, array('all', 'member', 'public'), true)) {
+        $postedView = 'all';
+    }
 
     if ($action === 'update_public_booking_status') {
         $bookingId = isset($_POST['booking_id']) ? (int) $_POST['booking_id'] : 0;
@@ -397,13 +1012,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($bookingId <= 0) {
             $_SESSION['admin_bookings_flash_type'] = 'error';
             $_SESSION['admin_bookings_flash'] = 'Invalid booking selected.';
-            redirectTo('admin-bookings.php');
+            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
         }
 
         if (!hasTable($pdo, 'non_member_bookings')) {
             $_SESSION['admin_bookings_flash_type'] = 'error';
             $_SESSION['admin_bookings_flash'] = 'Public booking table was not found.';
-            redirectTo('admin-bookings.php');
+            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
         }
 
         $stmt = $pdo->prepare('UPDATE non_member_bookings SET status = :status WHERE id = :id');
@@ -417,13 +1032,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['admin_bookings_flash'] = 'Could not update the public booking.';
         }
 
-        redirectTo('admin-bookings.php');
+        redirectTo('admin-bookings.php?view=' . urlencode($postedView));
     }
-}
-
-$view = isset($_GET['view']) ? strtolower(trim((string) $_GET['view'])) : 'all';
-if (!in_array($view, array('all', 'member', 'public'), true)) {
-    $view = 'all';
 }
 
 $memberBookings = fetchMemberBookings($pdo);
@@ -753,6 +1363,17 @@ foreach ($publicBookings as $booking) {
             gap: 14px;
         }
 
+        .action-forms {
+            display: grid;
+            gap: 10px;
+            align-content: end;
+        }
+
+        .action-form {
+            display: block;
+            margin: 0;
+        }
+
         label {
             display: block;
             font-size: 13px;
@@ -990,11 +1611,12 @@ foreach ($publicBookings as $booking) {
                         <?php endif; ?>
 
                         <?php if ($booking['source'] === 'public'): ?>
-                            <form method="post" action="admin-bookings.php">
-                                <input type="hidden" name="action" value="update_public_booking_status">
-                                <input type="hidden" name="booking_id" value="<?php echo (int) $booking['id']; ?>">
+                            <div class="form-grid">
+                                <form method="post" action="admin-bookings.php">
+                                    <input type="hidden" name="action" value="update_public_booking_status">
+                                    <input type="hidden" name="booking_id" value="<?php echo (int) $booking['id']; ?>">
+                                    <input type="hidden" name="view" value="<?php echo h($view); ?>">
 
-                                <div class="form-grid">
                                     <div>
                                         <label for="status_<?php echo (int) $booking['id']; ?>">Public Booking Status</label>
                                         <select id="status_<?php echo (int) $booking['id']; ?>" name="status">
@@ -1008,18 +1630,20 @@ foreach ($publicBookings as $booking) {
 
                                     <div class="btn-row" style="align-items:end;">
                                         <button type="submit" class="btn btn-gold">Save Status</button>
-
-                                        <?php if (isset($booking['email']) && trim((string) $booking['email']) !== ''): ?>
-                                            <form method="post" action="process-admin-non-member-booking-update.php">
-                                                <input type="hidden" name="action" value="send_email">
-                                                <input type="hidden" name="id" value="<?php echo (int) $booking['id']; ?>">
-                                                <input type="hidden" name="return_url" value="admin-bookings.php?view=<?php echo h($view); ?>">
-                                                <button type="submit" class="btn btn-light">Email Client</button>
-                                            </form>
-                                        <?php endif; ?>
                                     </div>
+                                </form>
+
+                                <div class="action-forms">
+                                    <?php if (isset($booking['email']) && trim((string) $booking['email']) !== ''): ?>
+                                        <form method="post" action="process-admin-non-member-booking-update.php" class="action-form">
+                                            <input type="hidden" name="action" value="send_email">
+                                            <input type="hidden" name="id" value="<?php echo (int) $booking['id']; ?>">
+                                            <input type="hidden" name="return_url" value="admin-bookings.php?view=<?php echo h($view); ?>">
+                                            <button type="submit" class="btn btn-light">Email Client</button>
+                                        </form>
+                                    <?php endif; ?>
                                 </div>
-                            </form>
+                            </div>
                         <?php else: ?>
                             <div class="btn-row">
                                 <a class="btn btn-light" href="admin-dashboard.php">Back to Dashboard</a>

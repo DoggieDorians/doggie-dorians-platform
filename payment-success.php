@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/includes/member_config.php';
 require_once __DIR__ . '/includes/stripe-config.php';
 require_once __DIR__ . '/vendor/autoload.php';
@@ -16,10 +17,42 @@ function money_fmt(float $amount): string
     return '$' . number_format($amount, 2);
 }
 
-$member = currentMember($pdo);
+function redirect_to(string $url): void
+{
+    header('Location: ' . $url);
+    exit;
+}
 
-if (!$member || (int) ($member['id'] ?? 0) <= 0) {
-    redirectTo('signup.php');
+function current_member_id(PDO $pdo): int
+{
+    $member = currentMember($pdo);
+    return (int)($member['id'] ?? 0);
+}
+
+function normalize_mode(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    return match ($value) {
+        'custom_plan' => 'custom_plan',
+        'service_overage' => 'service_overage',
+        'non_member' => 'non_member',
+        default => '',
+    };
+}
+
+function service_label_from_type(string $serviceType): string
+{
+    $serviceType = strtolower(trim($serviceType));
+
+    return match ($serviceType) {
+        'walk', 'walks' => 'Walk',
+        'drop_in', 'drop-in', 'dropin', 'drop in' => 'Drop-In',
+        'daycare', 'day care' => 'Daycare',
+        'boarding', 'board' => 'Boarding',
+        'sitting', 'pet sitting', 'in-home sitting', 'in_home_sitting' => 'Pet Sitting',
+        default => 'Service',
+    };
 }
 
 $sessionId = trim((string) ($_GET['session_id'] ?? ''));
@@ -29,7 +62,7 @@ if ($sessionId === '') {
     exit('Invalid payment session.');
 }
 
-$stripeKey = dd_stripe_secret_key();
+$stripeKey = trim((string) dd_stripe_secret_key());
 
 if ($stripeKey === '') {
     error_log('Stripe key missing in payment-success.php');
@@ -39,7 +72,21 @@ if ($stripeKey === '') {
 
 $verifiedPaid = false;
 $errorMessage = '';
-$plan = null;
+$mode = normalize_mode((string)($_GET['mode'] ?? ''));
+$pageTitle = 'Payment Verification';
+$headline = 'We couldn’t confirm this payment yet';
+$bodyText = 'There was a problem verifying the Stripe session for this payment.';
+$amountPaid = 0.00;
+$itemLabel = 'Purchase';
+$itemName = 'Payment';
+$primaryHref = 'index.php';
+$primaryLabel = 'Return Home';
+$secondaryHref = 'index.php';
+$secondaryLabel = 'Go Back';
+$topLinks = [
+    ['href' => 'index.php', 'label' => 'Home'],
+    ['href' => 'contact.php', 'label' => 'Contact'],
+];
 
 try {
     \Stripe\Stripe::setApiKey($stripeKey);
@@ -51,77 +98,229 @@ try {
     }
 
     $paymentStatus = (string) ($session->payment_status ?? '');
-    $planId = (int) ($session->metadata->custom_plan_id ?? 0);
-    $memberId = (int) ($session->metadata->member_id ?? 0);
+    $amountPaidCents = (int) ($session->amount_total ?? 0);
+    $metadata = $session->metadata ?? new stdClass();
 
-    if ($planId <= 0 || $memberId <= 0) {
-        throw new RuntimeException('Invalid Stripe session metadata.');
+    if ($mode === '') {
+        $mode = normalize_mode((string)($metadata->mode ?? ''));
     }
 
-    if ($memberId !== (int) $member['id']) {
-        throw new RuntimeException('This payment does not belong to the signed-in member.');
-    }
-
-    $stmt = $pdo->prepare("
-        SELECT *
-        FROM custom_plans
-        WHERE id = :id
-          AND member_id = :member_id
-        LIMIT 1
-    ");
-    $stmt->execute([
-        ':id' => $planId,
-        ':member_id' => $memberId,
-    ]);
-
-    $plan = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$plan) {
-        throw new RuntimeException('Matching custom plan was not found.');
+    if ($mode === '') {
+        throw new RuntimeException('Invalid Stripe session mode.');
     }
 
     if ($paymentStatus !== 'paid') {
         throw new RuntimeException('Stripe has not marked this payment as paid.');
     }
 
-    $amountPaidCents = (int) ($session->amount_total ?? 0);
-    $expectedAmountCents = (int) round((float) ($plan['monthly_total'] ?? 0) * 100);
+    $amountPaid = $amountPaidCents > 0 ? ($amountPaidCents / 100) : 0.00;
 
-    if ($expectedAmountCents > 0 && $amountPaidCents > 0 && $amountPaidCents !== $expectedAmountCents) {
-        throw new RuntimeException('Paid amount does not match expected plan amount.');
-    }
+    /*
+    |--------------------------------------------------------------------------
+    | Custom Plan Success
+    |--------------------------------------------------------------------------
+    */
+    if ($mode === 'custom_plan') {
+        $memberId = current_member_id($pdo);
 
-    if (($plan['payment_status'] ?? '') !== 'paid') {
-        $update = $pdo->prepare("
-            UPDATE custom_plans
-            SET payment_status = :payment_status
+        if ($memberId <= 0) {
+            redirect_to('login.php');
+        }
+
+        $planId = (int) ($metadata->custom_plan_id ?? 0);
+        $stripeMemberId = (int) ($metadata->member_id ?? 0);
+
+        if ($planId <= 0 || $stripeMemberId <= 0) {
+            throw new RuntimeException('Invalid Stripe session metadata.');
+        }
+
+        if ($stripeMemberId !== $memberId) {
+            throw new RuntimeException('This payment does not belong to the signed-in member.');
+        }
+
+        $stmt = $pdo->prepare("
+            SELECT *
+            FROM custom_plans
             WHERE id = :id
               AND member_id = :member_id
+            LIMIT 1
         ");
-        $update->execute([
-            ':payment_status' => 'paid',
+        $stmt->execute([
             ':id' => $planId,
             ':member_id' => $memberId,
         ]);
 
-        $plan['payment_status'] = 'paid';
+        $plan = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$plan) {
+            throw new RuntimeException('Matching custom plan was not found.');
+        }
+
+        $expectedAmountCents = (int) round((float) ($plan['monthly_total'] ?? 0) * 100);
+
+        if ($expectedAmountCents > 0 && $amountPaidCents > 0 && $amountPaidCents !== $expectedAmountCents) {
+            throw new RuntimeException('Paid amount does not match expected plan amount.');
+        }
+
+        $verifiedPaid = true;
+        $pageTitle = 'Payment Successful';
+        $headline = 'Payment Successful';
+        $bodyText = 'Your custom plan has been verified with Stripe and activated successfully.';
+        $itemLabel = 'Plan';
+        $itemName = (string) ($plan['plan_name'] ?? 'Custom Plan');
+        $amountPaid = (float) ($plan['monthly_total'] ?? $amountPaid);
+        $primaryHref = 'dashboard.php';
+        $primaryLabel = 'Go to Dashboard';
+        $secondaryHref = 'my-bookings.php';
+        $secondaryLabel = 'View Bookings';
+        $topLinks = [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+        ];
     }
 
-    $verifiedPaid = true;
+    /*
+    |--------------------------------------------------------------------------
+    | Member Service Overage Success
+    |--------------------------------------------------------------------------
+    */
+    if ($mode === 'service_overage') {
+        $memberId = current_member_id($pdo);
+
+        if ($memberId <= 0) {
+            redirect_to('login.php');
+        }
+
+        $stripeMemberId = (int) ($metadata->member_id ?? 0);
+        $bookingId = (int) ($metadata->booking_id ?? 0);
+        $serviceType = (string) ($metadata->service_type ?? '');
+        $overageUnits = (int) ($metadata->overage_units ?? 0);
+        $memberPlanSlug = trim((string) ($metadata->member_plan_slug ?? ''));
+        $expectedAmount = (float) ($metadata->total_amount ?? 0);
+
+        if ($stripeMemberId <= 0 || $stripeMemberId !== $memberId) {
+            throw new RuntimeException('This overage payment does not belong to the signed-in member.');
+        }
+
+        if ($expectedAmount > 0) {
+            $expectedAmountCents = (int) round($expectedAmount * 100);
+
+            if ($amountPaidCents > 0 && $expectedAmountCents !== $amountPaidCents) {
+                throw new RuntimeException('Paid amount does not match expected overage total.');
+            }
+        }
+
+        unset($_SESSION['service_payment_portal']);
+
+        $verifiedPaid = true;
+        $pageTitle = 'Payment Successful';
+        $headline = 'Member Overage Paid';
+        $bodyText = 'Your member overage payment has been verified successfully and the uncovered portion of your booking has been paid.';
+        $itemLabel = 'Service';
+        $itemName = service_label_from_type($serviceType) . ($overageUnits > 0 ? ' × ' . $overageUnits : '');
+        if ($memberPlanSlug !== '') {
+            $itemName .= ' · ' . ucwords(str_replace('_', ' ', $memberPlanSlug));
+        }
+        $primaryHref = 'my-bookings.php';
+        $primaryLabel = 'View Bookings';
+        $secondaryHref = 'dashboard.php';
+        $secondaryLabel = 'Go to Dashboard';
+        $topLinks = [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+        ];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Non-Member Success
+    |--------------------------------------------------------------------------
+    */
+    if ($mode === 'non_member') {
+        $requestId = (int) ($metadata->request_id ?? 0);
+        $serviceType = (string) ($metadata->service_type ?? '');
+        $fullName = trim((string) ($metadata->full_name ?? ''));
+        $dogName = trim((string) ($metadata->dog_name ?? ''));
+        $expectedAmount = (float) ($metadata->total_amount ?? 0);
+
+        if ($expectedAmount > 0) {
+            $expectedAmountCents = (int) round($expectedAmount * 100);
+
+            if ($amountPaidCents > 0 && $expectedAmountCents !== $amountPaidCents) {
+                throw new RuntimeException('Paid amount does not match expected non-member total.');
+            }
+        }
+
+        unset($_SESSION['non_member_payment_portal']);
+
+        $verifiedPaid = true;
+        $pageTitle = 'Payment Successful';
+        $headline = 'Non-Member Booking Paid';
+        $bodyText = 'Your non-member booking payment has been verified successfully. Your request is now marked as paid and ready for follow-up.';
+        $itemLabel = 'Booking';
+        $itemName = service_label_from_type($serviceType);
+
+        if ($dogName !== '') {
+            $itemName .= ' · ' . $dogName;
+        }
+
+        if ($fullName !== '') {
+            $itemName .= ' · ' . $fullName;
+        }
+
+        $primaryHref = 'non-member-booking.php';
+        $primaryLabel = 'Book Another Service';
+        $secondaryHref = 'contact.php';
+        $secondaryLabel = 'Contact Us';
+        $topLinks = [
+            ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+            ['href' => 'contact.php', 'label' => 'Contact'],
+        ];
+    }
+
+    if (!$verifiedPaid) {
+        throw new RuntimeException('Payment mode was not handled.');
+    }
 } catch (\Throwable $e) {
     error_log('payment-success.php error: ' . $e->getMessage());
     $errorMessage = 'We could not verify this payment yet. Please contact support if this persists.';
-}
 
-$planName = (string) ($plan['plan_name'] ?? 'Custom Plan');
-$amountPaid = (float) ($plan['monthly_total'] ?? 0.00);
+    if ($mode === 'custom_plan') {
+        $primaryHref = 'login.php';
+        $primaryLabel = 'Member Login';
+        $secondaryHref = 'customize-plan.php';
+        $secondaryLabel = 'Back to Plans';
+        $topLinks = [
+            ['href' => 'login.php', 'label' => 'Login'],
+            ['href' => 'customize-plan.php', 'label' => 'Plans'],
+        ];
+    } elseif ($mode === 'service_overage') {
+        $primaryHref = 'login.php';
+        $primaryLabel = 'Member Login';
+        $secondaryHref = 'my-bookings.php';
+        $secondaryLabel = 'View Bookings';
+        $topLinks = [
+            ['href' => 'login.php', 'label' => 'Login'],
+            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+        ];
+    } elseif ($mode === 'non_member') {
+        $primaryHref = 'non-member-booking.php';
+        $primaryLabel = 'Back to Booking';
+        $secondaryHref = 'contact.php';
+        $secondaryLabel = 'Contact Us';
+        $topLinks = [
+            ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+            ['href' => 'contact.php', 'label' => 'Contact'],
+        ];
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= $verifiedPaid ? 'Payment Successful' : 'Payment Verification' ?> | Doggie Dorian’s</title>
+    <title><?= $verifiedPaid ? h($pageTitle) : 'Payment Verification' ?> | Doggie Dorian’s</title>
     <style>
         * { box-sizing: border-box; }
 
@@ -437,8 +636,9 @@ $amountPaid = (float) ($plan['monthly_total'] ?? 0.00);
                 <a href="index.php" class="brand">Doggie <span>Dorian’s</span></a>
 
                 <div class="top-actions">
-                    <a href="dashboard.php" class="top-link">Dashboard</a>
-                    <a href="my-bookings.php" class="top-link">My Bookings</a>
+                    <?php foreach ($topLinks as $link): ?>
+                        <a href="<?= h((string)$link['href']) ?>" class="top-link"><?= h((string)$link['label']) ?></a>
+                    <?php endforeach; ?>
                 </div>
             </div>
         </div>
@@ -448,10 +648,8 @@ $amountPaid = (float) ($plan['monthly_total'] ?? 0.00);
                 <section class="success-card">
                     <?php if ($verifiedPaid): ?>
                         <div class="status-badge success">Payment Confirmed</div>
-                        <h1 class="success-title">Payment Successful</h1>
-                        <p class="success-text">
-                            Your custom plan has been verified with Stripe and activated successfully.
-                        </p>
+                        <h1 class="success-title"><?= h($headline) ?></h1>
+                        <p class="success-text"><?= h($bodyText) ?></p>
 
                         <div class="amount-panel">
                             <div class="amount-label">Amount Paid</div>
@@ -459,26 +657,24 @@ $amountPaid = (float) ($plan['monthly_total'] ?? 0.00);
                         </div>
 
                         <div class="plan-box">
-                            <span class="plan-label">Plan</span>
-                            <div class="plan-name"><?= h($planName) ?></div>
+                            <span class="plan-label"><?= h($itemLabel) ?></span>
+                            <div class="plan-name"><?= h($itemName) ?></div>
                         </div>
 
                         <div class="success-actions">
-                            <a href="dashboard.php" class="btn-primary">Go to Dashboard</a>
-                            <a href="my-bookings.php" class="btn-secondary">View Bookings</a>
+                            <a href="<?= h($primaryHref) ?>" class="btn-primary"><?= h($primaryLabel) ?></a>
+                            <a href="<?= h($secondaryHref) ?>" class="btn-secondary"><?= h($secondaryLabel) ?></a>
                         </div>
                     <?php else: ?>
                         <div class="status-badge error">Verification Issue</div>
-                        <h1 class="success-title">We couldn’t confirm this payment yet</h1>
-                        <p class="success-text">
-                            There was a problem verifying the Stripe session for this payment.
-                        </p>
+                        <h1 class="success-title"><?= h($headline) ?></h1>
+                        <p class="success-text"><?= h($bodyText) ?></p>
 
                         <div class="debug-box"><?= h($errorMessage !== '' ? $errorMessage : 'Unknown error.') ?></div>
 
                         <div class="success-actions">
-                            <a href="dashboard.php" class="btn-primary">Return to Dashboard</a>
-                            <a href="customize-plan.php" class="btn-secondary">Back to Plans</a>
+                            <a href="<?= h($primaryHref) ?>" class="btn-primary"><?= h($primaryLabel) ?></a>
+                            <a href="<?= h($secondaryHref) ?>" class="btn-secondary"><?= h($secondaryLabel) ?></a>
                         </div>
                     <?php endif; ?>
                 </section>

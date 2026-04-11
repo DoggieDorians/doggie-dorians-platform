@@ -1,304 +1,302 @@
 <?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/includes/security-headers.php';
+
 session_start();
+
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/mailer.php';
 
-date_default_timezone_set('America/New_York');
-
-$pdoConnection = null;
-
-if (isset($pdo) && $pdo instanceof PDO) {
-    $pdoConnection = $pdo;
-} elseif (isset($db) && $db instanceof PDO) {
-    $pdoConnection = $db;
-}
-
-if (!$pdoConnection instanceof PDO) {
-    $_SESSION['admin_nonmember_flash_type'] = 'error';
-    $_SESSION['admin_nonmember_flash_message'] = 'Database connection not available.';
-    header('Location: admin-non-member-bookings.php');
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    echo 'Database connection is not available.';
     exit;
 }
 
-$pdoConnection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-$pdoConnection->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-
-/*
-|--------------------------------------------------------------------------
-| Admin protection
-|--------------------------------------------------------------------------
-*/
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
+function redirectTo($url)
+{
+    header('Location: ' . $url);
     exit;
 }
 
-$userRole = $_SESSION['role'] ?? 'member';
-if ($userRole !== 'admin') {
-    header('Location: dashboard.php');
-    exit;
+function isAdmin()
+{
+    if (!empty($_SESSION['is_admin'])) {
+        return true;
+    }
+
+    return isset($_SESSION['role']) && strtolower((string) $_SESSION['role']) === 'admin';
+}
+
+if (!isAdmin()) {
+    redirectTo('admin-login.php');
+}
+
+function safeExecute(PDOStatement $stmt, array $params = array())
+{
+    try {
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        return false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function safeFetchOne(PDO $pdo, $sql, array $params = array())
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row !== false ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    } catch (Exception $e) {
+        return null;
+    }
+}
+
+function normalizeServiceType($type)
+{
+    $type = strtolower(trim((string) $type));
+
+    if ($type === '') {
+        return 'service';
+    }
+    if (strpos($type, 'walk') !== false) {
+        return 'walk';
+    }
+    if (strpos($type, 'board') !== false) {
+        return 'boarding';
+    }
+    if (strpos($type, 'daycare') !== false || strpos($type, 'day care') !== false) {
+        return 'daycare';
+    }
+    if (strpos($type, 'sit') !== false) {
+        return 'sitting';
+    }
+    if (strpos($type, 'drop') !== false) {
+        return 'drop-in';
+    }
+
+    return $type;
+}
+
+function serviceDisplayName($type)
+{
+    $type = normalizeServiceType($type);
+
+    if ($type === 'drop-in') {
+        return 'Drop-In';
+    }
+
+    return ucfirst($type);
+}
+
+function formatDateDisplay($date)
+{
+    $date = trim((string) $date);
+    if ($date === '') {
+        return 'TBD';
+    }
+
+    $ts = strtotime($date);
+    return $ts !== false ? date('F j, Y', $ts) : $date;
+}
+
+function formatTimeDisplay($time)
+{
+    $time = trim((string) $time);
+    if ($time === '') {
+        return 'TBD';
+    }
+
+    $ts = strtotime($time);
+    return $ts !== false ? date('g:i A', $ts) : $time;
+}
+
+function allowedReturnUrl($url)
+{
+    $url = trim((string) $url);
+    if ($url === '') {
+        return 'admin-bookings.php';
+    }
+
+    if (strpos($url, "\n") !== false || strpos($url, "\r") !== false) {
+        return 'admin-bookings.php';
+    }
+
+    if (preg_match('/^https?:\/\//i', $url)) {
+        return 'admin-bookings.php';
+    }
+
+    if (strpos($url, '/') === 0) {
+        return ltrim($url, '/');
+    }
+
+    return $url;
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    header('Location: admin-non-member-bookings.php');
-    exit;
+    redirectTo('admin-bookings.php');
 }
 
-/*
-|--------------------------------------------------------------------------
-| Helpers
-|--------------------------------------------------------------------------
-*/
-function redirect_to_booking(int $bookingId, string $type, string $message): void
-{
-    $_SESSION['admin_nonmember_flash_type'] = $type;
-    $_SESSION['admin_nonmember_flash_message'] = $message;
-    header('Location: admin-non-member-booking-view.php?id=' . $bookingId);
-    exit;
+$action = isset($_POST['action']) ? trim((string) $_POST['action']) : '';
+$returnUrl = allowedReturnUrl(isset($_POST['return_url']) ? (string) $_POST['return_url'] : 'admin-bookings.php');
+
+if ($action !== 'send_email') {
+    $_SESSION['admin_bookings_flash_type'] = 'error';
+    $_SESSION['admin_bookings_flash'] = 'Invalid action.';
+    redirectTo($returnUrl);
 }
 
-function redirect_to_list(string $type, string $message): void
-{
-    $_SESSION['admin_nonmember_flash_type'] = $type;
-    $_SESSION['admin_nonmember_flash_message'] = $message;
-    header('Location: admin-non-member-bookings.php');
-    exit;
-}
-
-function booking_reference(): string
-{
-    return 'DDNM-' . date('Ymd') . '-' . strtoupper(substr(bin2hex(random_bytes(4)), 0, 8));
-}
-
-function table_exists(PDO $pdo, string $tableName): bool
-{
-    $stmt = $pdo->prepare("
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = :table
-        LIMIT 1
-    ");
-    $stmt->execute([':table' => $tableName]);
-
-    return (bool) $stmt->fetchColumn();
-}
-
-function get_table_columns(PDO $pdo, string $tableName): array
-{
-    $columns = [];
-    $stmt = $pdo->query("PRAGMA table_info(" . $tableName . ")");
-    $rows = $stmt->fetchAll();
-
-    foreach ($rows as $row) {
-        if (!empty($row['name'])) {
-            $columns[] = $row['name'];
-        }
-    }
-
-    return $columns;
-}
-
-function add_column_if_missing(PDO $pdo, string $tableName, string $columnName, string $definition, array $existingColumns): array
-{
-    if (!in_array($columnName, $existingColumns, true)) {
-        $pdo->exec("ALTER TABLE {$tableName} ADD COLUMN {$columnName} {$definition}");
-        $existingColumns[] = $columnName;
-    }
-
-    return $existingColumns;
-}
-
-function send_client_email(string $toEmail, string $subject, string $message): bool
-{
-    $headers = "From: Doggie Dorian's <noreply@dorianspetcare.com>\r\n";
-    $headers .= "Reply-To: noreply@dorianspetcare.com\r\n";
-    $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
-
-    return mail($toEmail, $subject, $message, $headers);
-}
-
-function ensure_non_member_bookings_table(PDO $pdo): void
-{
-    if (!table_exists($pdo, 'non_member_bookings')) {
-        $pdo->exec("
-            CREATE TABLE non_member_bookings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                booking_reference TEXT UNIQUE,
-                booking_source TEXT DEFAULT 'non-member',
-                status TEXT NOT NULL DEFAULT 'Pending',
-
-                full_name TEXT NOT NULL,
-                phone TEXT,
-                email TEXT NOT NULL,
-
-                service_type TEXT NOT NULL,
-                dog_name TEXT NOT NULL,
-                dog_size TEXT,
-
-                walk_duration INTEGER,
-                preferred_walk_time TEXT,
-
-                dropin_hours INTEGER,
-                dropin_preferred_time TEXT,
-
-                dropin_walk_duration INTEGER,
-                include_second_walk TEXT DEFAULT 'No',
-                second_walk_duration INTEGER,
-                dropin_walk_preferred_time TEXT,
-
-                date_start TEXT NOT NULL,
-                date_end TEXT,
-
-                feeding_schedule TEXT,
-                preferred_contact TEXT,
-                notes TEXT,
-
-                estimated_price REAL NOT NULL DEFAULT 0,
-
-                pricing_type TEXT,
-                unit_price REAL,
-                discount_label TEXT,
-                quantity INTEGER,
-
-                raw_form_json TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        ");
-        return;
-    }
-
-    $columns = get_table_columns($pdo, 'non_member_bookings');
-
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'booking_reference', 'TEXT', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'booking_source', "TEXT DEFAULT 'non-member'", $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'dropin_hours', 'INTEGER', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'dropin_preferred_time', 'TEXT', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'dropin_walk_duration', 'INTEGER', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'include_second_walk', "TEXT DEFAULT 'No'", $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'second_walk_duration', 'INTEGER', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'dropin_walk_preferred_time', 'TEXT', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'pricing_type', 'TEXT', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'unit_price', 'REAL', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'discount_label', 'TEXT', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'quantity', 'INTEGER', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'raw_form_json', 'TEXT', $columns);
-    $columns = add_column_if_missing($pdo, 'non_member_bookings', 'updated_at', "TEXT DEFAULT CURRENT_TIMESTAMP", $columns);
-
-    if (in_array('booking_source', $columns, true)) {
-        $pdo->exec("UPDATE non_member_bookings SET booking_source = 'non-member' WHERE booking_source IS NULL OR booking_source = ''");
-    }
-
-    if (in_array('booking_reference', $columns, true)) {
-        $rows = $pdo->query("SELECT id FROM non_member_bookings WHERE booking_reference IS NULL OR booking_reference = ''")->fetchAll();
-        foreach ($rows as $row) {
-            $ref = booking_reference();
-            $stmt = $pdo->prepare("UPDATE non_member_bookings SET booking_reference = :ref WHERE id = :id");
-            $stmt->execute([
-                ':ref' => $ref,
-                ':id' => (int) $row['id'],
-            ]);
-        }
-    }
-
-    if (in_array('updated_at', $columns, true)) {
-        $pdo->exec("UPDATE non_member_bookings SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''");
-    }
-}
-
-ensure_non_member_bookings_table($pdoConnection);
-
-/*
-|--------------------------------------------------------------------------
-| Validate input
-|--------------------------------------------------------------------------
-*/
 $bookingId = isset($_POST['id']) ? (int) $_POST['id'] : 0;
-$newStatus = trim((string) ($_POST['status'] ?? ''));
-
-$allowedStatuses = ['Pending', 'Confirmed', 'Scheduled', 'Completed', 'Cancelled'];
 
 if ($bookingId <= 0) {
-    redirect_to_list('error', 'Invalid non-member booking ID.');
+    $_SESSION['admin_bookings_flash_type'] = 'error';
+    $_SESSION['admin_bookings_flash'] = 'Invalid booking selected.';
+    redirectTo($returnUrl);
 }
 
-if (!in_array($newStatus, $allowedStatuses, true)) {
-    redirect_to_booking($bookingId, 'error', 'Invalid booking status selected.');
-}
-
-/*
-|--------------------------------------------------------------------------
-| Confirm booking exists and belongs to non-member flow
-|--------------------------------------------------------------------------
-*/
-$stmt = $pdoConnection->prepare("
-    SELECT id, booking_reference, status, email, full_name
-    FROM non_member_bookings
-    WHERE id = :id
-      AND COALESCE(booking_source, 'non-member') = 'non-member'
-    LIMIT 1
-");
-$stmt->execute([':id' => $bookingId]);
-$booking = $stmt->fetch();
+$booking = safeFetchOne(
+    $pdo,
+    'SELECT * FROM non_member_bookings WHERE id = :id LIMIT 1',
+    array(':id' => $bookingId)
+);
 
 if (!$booking) {
-    redirect_to_list('error', 'Non-member booking not found.');
+    $_SESSION['admin_bookings_flash_type'] = 'error';
+    $_SESSION['admin_bookings_flash'] = 'Booking not found.';
+    redirectTo($returnUrl);
 }
 
-$currentStatus = (string) ($booking['status'] ?? 'Pending');
+$clientName = trim((string) ($booking['full_name'] ?? $booking['name'] ?? 'Client'));
+$clientEmail = trim((string) ($booking['email'] ?? ''));
+$serviceType = serviceDisplayName((string) ($booking['service_type'] ?? $booking['service'] ?? 'service'));
+$serviceDate = formatDateDisplay((string) ($booking['service_date'] ?? $booking['date'] ?? $booking['date_start'] ?? ''));
+$serviceTime = formatTimeDisplay((string) ($booking['service_time'] ?? $booking['time'] ?? $booking['preferred_walk_time'] ?? ''));
+$petName = trim((string) ($booking['pet_name'] ?? $booking['dog_name'] ?? ''));
+$notes = trim((string) ($booking['notes'] ?? ''));
+$phone = trim((string) ($booking['phone'] ?? ''));
 
-if ($currentStatus === $newStatus) {
-    redirect_to_booking(
-        $bookingId,
-        'success',
-        'Status remains ' . $newStatus . '. No additional changes were needed.'
-    );
+if ($clientEmail === '') {
+    $_SESSION['admin_bookings_flash_type'] = 'error';
+    $_SESSION['admin_bookings_flash'] = 'This booking does not have an email address.';
+    redirectTo($returnUrl);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Update booking status
-|--------------------------------------------------------------------------
-*/
+$subject = 'Doggie Dorian’s Booking Request Received';
+
+$htmlBody = '<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Doggie Dorian’s Booking Request Received</title>
+</head>
+<body style="margin:0;padding:0;background:#09090d;color:#f4f1ea;font-family:Inter,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;">
+    <div style="max-width:680px;margin:0 auto;padding:32px 20px;">
+        <div style="background:linear-gradient(180deg,rgba(255,255,255,0.065),rgba(255,255,255,0.03));border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:28px;">
+            <div style="color:#c6b28b;text-transform:uppercase;letter-spacing:.14em;font-size:12px;font-weight:800;margin-bottom:10px;">
+                Doggie Dorian’s
+            </div>
+
+            <h1 style="margin:0 0 14px;font-size:28px;line-height:1.15;color:#f4f1ea;">
+                We received your booking request
+            </h1>
+
+            <p style="margin:0 0 16px;line-height:1.7;color:rgba(244,241,234,0.82);">
+                Hi ' . htmlspecialchars($clientName, ENT_QUOTES, 'UTF-8') . ',
+            </p>
+
+            <p style="margin:0 0 16px;line-height:1.7;color:rgba(244,241,234,0.82);">
+                Thank you for reaching out to Doggie Dorian’s. This email confirms that we received your booking request and our team will review it shortly.
+            </p>
+
+            <div style="margin:22px 0;padding:18px;border-radius:18px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);">
+                <div style="margin-bottom:8px;"><strong style="color:#f3e5c7;">Service:</strong> ' . htmlspecialchars($serviceType, ENT_QUOTES, 'UTF-8') . '</div>
+                <div style="margin-bottom:8px;"><strong style="color:#f3e5c7;">Date:</strong> ' . htmlspecialchars($serviceDate, ENT_QUOTES, 'UTF-8') . '</div>
+                <div style="margin-bottom:8px;"><strong style="color:#f3e5c7;">Time:</strong> ' . htmlspecialchars($serviceTime, ENT_QUOTES, 'UTF-8') . '</div>
+                <div style="margin-bottom:8px;"><strong style="color:#f3e5c7;">Pet:</strong> ' . htmlspecialchars($petName !== '' ? $petName : '—', ENT_QUOTES, 'UTF-8') . '</div>
+                <div style="margin-bottom:8px;"><strong style="color:#f3e5c7;">Phone:</strong> ' . htmlspecialchars($phone !== '' ? $phone : '—', ENT_QUOTES, 'UTF-8') . '</div>';
+
+if ($notes !== '') {
+    $htmlBody .= '
+                <div style="margin-top:12px;"><strong style="color:#f3e5c7;">Notes:</strong><br>' . nl2br(htmlspecialchars($notes, ENT_QUOTES, 'UTF-8')) . '</div>';
+}
+
+$htmlBody .= '
+            </div>
+
+            <p style="margin:0 0 16px;line-height:1.7;color:rgba(244,241,234,0.82);">
+                If we need any additional details, we will follow up with you directly.
+            </p>
+
+            <p style="margin:0;line-height:1.7;color:rgba(244,241,234,0.82);">
+                — Doggie Dorian’s
+            </p>
+        </div>
+    </div>
+</body>
+</html>';
+
+$textBody = "Doggie Dorian's Booking Request Received\n\n"
+    . "Hi " . $clientName . ",\n\n"
+    . "Thank you for reaching out to Doggie Dorian's. This email confirms that we received your booking request and our team will review it shortly.\n\n"
+    . "Service: " . $serviceType . "\n"
+    . "Date: " . $serviceDate . "\n"
+    . "Time: " . $serviceTime . "\n"
+    . "Pet: " . ($petName !== '' ? $petName : '—') . "\n"
+    . "Phone: " . ($phone !== '' ? $phone : '—') . "\n";
+
+if ($notes !== '') {
+    $textBody .= "Notes: " . $notes . "\n";
+}
+
+$textBody .= "\nIf we need any additional details, we will follow up with you directly.\n\n— Doggie Dorian's";
+
+$emailResult = dd_send_email(
+    $clientEmail,
+    $clientName !== '' ? $clientName : 'Client',
+    $subject,
+    $htmlBody,
+    $textBody
+);
+
+if (!$emailResult['success']) {
+    $_SESSION['admin_bookings_flash_type'] = 'error';
+    $_SESSION['admin_bookings_flash'] = 'Email could not be sent from the server. ' . ($emailResult['error'] ?? 'Unknown SMTP error.');
+    redirectTo($returnUrl);
+}
+
+$statusUpdated = true;
+
 try {
-    $updateStmt = $pdoConnection->prepare("
-        UPDATE non_member_bookings
-        SET
-            status = :status,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = :id
-          AND COALESCE(booking_source, 'non-member') = 'non-member'
-    ");
-
-    $updateStmt->execute([
-        ':status' => $newStatus,
-        ':id' => $bookingId,
-    ]);
-
-    $clientEmail = trim((string) ($booking['email'] ?? ''));
-    $clientName = trim((string) ($booking['full_name'] ?? 'Client'));
-
-    if ($clientEmail !== '') {
-        $subject = "Your Booking Update - Doggie Dorian's";
-
-        $message = "Hi " . $clientName . ",\n\n";
-        $message .= "Your booking status has been updated to: " . $newStatus . ".\n\n";
-        $message .= "If you have any questions, feel free to reply to this email.\n\n";
-        $message .= "— Doggie Dorian's";
-
-        send_client_email($clientEmail, $subject, $message);
-    }
-
-    redirect_to_booking(
-        $bookingId,
-        'success',
-        'Non-member booking status updated successfully to ' . $newStatus . '.'
+    $stmt = $pdo->prepare('UPDATE non_member_bookings SET status = CASE WHEN status = :current_status THEN :new_status ELSE status END WHERE id = :id');
+    $statusUpdated = safeExecute(
+        $stmt,
+        array(
+            ':current_status' => 'new',
+            ':new_status' => 'reviewed',
+            ':id' => $bookingId
+        )
     );
 } catch (Throwable $e) {
-    redirect_to_booking(
-        $bookingId,
-        'error',
-        'Unable to update this non-member booking right now.'
-    );
+    $statusUpdated = false;
+} catch (Exception $e) {
+    $statusUpdated = false;
 }
-?>
+
+$_SESSION['admin_bookings_flash_type'] = 'success';
+
+if ($statusUpdated) {
+    $_SESSION['admin_bookings_flash'] = 'Email sent successfully to ' . $clientEmail . '.';
+} else {
+    $_SESSION['admin_bookings_flash'] = 'Email sent successfully to ' . $clientEmail . '. Status was not changed.';
+}
+
+redirectTo($returnUrl);
