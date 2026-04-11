@@ -70,3 +70,13 @@ root-test.php
 # =========================
 *.swp
 *.swo
+# Local-only files
+.env
+.env.*
+data/members.sqlite
+*.zip
+*.sql
+*.sqlite
+*.sqlite3
+sftp.json
+.vscode/sftp.json
