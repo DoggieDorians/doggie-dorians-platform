@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/includes/bootstrap.php';
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
 $allowedOrigins = [
@@ -32,8 +33,6 @@ session_set_cookie_params([
     'httponly' => true,
     'samesite' => 'None',
 ]);
-
-session_start();
 require_once __DIR__ . '/db.php';
 
 $data = json_decode(file_get_contents('php://input'), true);

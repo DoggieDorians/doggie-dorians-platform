@@ -1,4 +1,7 @@
 <?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/includes/member_config.php';
 
 $message = 'Invalid or expired verification link.';

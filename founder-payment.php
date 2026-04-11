@@ -1,6 +1,7 @@
 <?php
-session_start();
+declare(strict_types=1);
 
+require_once __DIR__ . '/includes/bootstrap.php';
 $storageFile = __DIR__ . '/data/founder-applications.json';
 
 function dd_load_founder_payment_applications(string $file): array

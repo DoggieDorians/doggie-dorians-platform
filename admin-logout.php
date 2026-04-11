@@ -1,8 +1,7 @@
 <?php
 declare(strict_types=1);
 
-session_start();
-
+require_once __DIR__ . '/includes/bootstrap.php';
 /*
 |--------------------------------------------------------------------------
 | Admin Logout
@@ -36,7 +35,6 @@ if (ini_get('session.use_cookies')) {
 session_destroy();
 
 // Start fresh session just for flash
-session_start();
 $_SESSION['admin_flash_type'] = 'success';
 $_SESSION['admin_flash_message'] = 'You have been logged out.';
 

@@ -1,8 +1,7 @@
 <?php
 declare(strict_types=1);
 
-session_start();
-
+require_once __DIR__ . '/includes/bootstrap.php';
 /*
 |--------------------------------------------------------------------------
 | Walker Logout
@@ -37,8 +36,6 @@ if (ini_get('session.use_cookies')) {
 
 // Start a fresh session for flash message redirect
 session_destroy();
-session_start();
-
 $_SESSION['walker_flash_type'] = 'success';
 $_SESSION['walker_flash_message'] = 'You have been logged out.';
 

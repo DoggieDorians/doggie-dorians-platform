@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/includes/bootstrap.php';
 // Security headers
 if (!headers_sent()) {
     header('X-Content-Type-Options: nosniff');
@@ -49,7 +50,6 @@ if (session_status() === PHP_SESSION_NONE) {
     ini_set('session.cookie_secure', '1');
     ini_set('session.cookie_httponly', '1');
     ini_set('session.cookie_samesite', 'Lax');
-    session_start();
 }
 
 $isLoggedIn = isset($_SESSION['user_id']) || isset($_SESSION['member_id']) || isset($_SESSION['id']);

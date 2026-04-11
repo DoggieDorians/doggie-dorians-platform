@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/includes/bootstrap.php';
 /*
 |--------------------------------------------------------------------------
 | Doggie Dorian's
@@ -16,9 +17,6 @@ declare(strict_types=1);
 | - non-member-booking.php for public / non-member clients
 |--------------------------------------------------------------------------
 */
-
-session_start();
-
 $isLoggedIn = isset($_SESSION['member_id']) && (int) $_SESSION['member_id'] > 0;
 
 $query = $_GET;

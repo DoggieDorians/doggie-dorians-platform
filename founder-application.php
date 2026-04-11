@@ -1,6 +1,7 @@
 <?php
-session_start();
+declare(strict_types=1);
 
+require_once __DIR__ . '/includes/bootstrap.php';
 $isLoggedIn = isset($_SESSION['member_id']);
 
 /**

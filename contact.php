@@ -1,8 +1,7 @@
 <?php
 declare(strict_types=1);
 
-session_start();
-
+require_once __DIR__ . '/includes/bootstrap.php';
 $isLoggedIn = isset($_SESSION['user_id']) || isset($_SESSION['member_id']) || isset($_SESSION['id']);
 
 $bookingLink = $isLoggedIn ? 'book-service.php' : 'non-member-booking.php';
