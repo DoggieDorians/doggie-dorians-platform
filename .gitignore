@@ -84,3 +84,5 @@ sftp.json
 backups/
 
 backups/
+
+bulk_add_bootstrap.py
