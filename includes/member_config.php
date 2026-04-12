@@ -1,14 +1,6 @@
 <?php
 declare(strict_types=1);
 
-// Secure session settings must be applied before session_start()
-if (session_status() === PHP_SESSION_NONE) {
-    ini_set('session.cookie_secure', '1');
-    ini_set('session.cookie_httponly', '1');
-    ini_set('session.cookie_samesite', 'Lax');
-    session_start();
-}
-
 $dataDir = dirname(__DIR__) . '/data';
 if (!is_dir($dataDir)) {
     mkdir($dataDir, 0755, true);
@@ -124,7 +116,8 @@ $pdo->exec("
     )
 ");
 
-function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void {
+function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void
+{
     $stmt = $pdo->query("PRAGMA table_info($table)");
     $columns = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -150,7 +143,7 @@ ensureColumn($pdo, 'walk_sessions', 'route_points', "TEXT");
 ensureColumn($pdo, 'walk_sessions', 'last_gps_at', "TEXT");
 
 $walkerCountStmt = $pdo->query("SELECT COUNT(*) AS total FROM walkers");
-$walkerCount = (int)$walkerCountStmt->fetch(PDO::FETCH_ASSOC)['total'];
+$walkerCount = (int) $walkerCountStmt->fetch(PDO::FETCH_ASSOC)['total'];
 
 if ($walkerCount === 0) {
     $seed = $pdo->prepare("
@@ -162,32 +155,37 @@ if ($walkerCount === 0) {
         ':full_name' => 'John Walker',
         ':email' => 'walker@doggiedorians.com',
         ':phone' => '(631) 555-8181',
-        ':password_hash' => password_hash('walker123', PASSWORD_DEFAULT)
+        ':password_hash' => password_hash('walker123', PASSWORD_DEFAULT),
     ]);
 }
 
-function e(string $value): string {
+function e(string $value): string
+{
     return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirectTo(string $path): void {
+function redirectTo(string $path): void
+{
     header('Location: ' . $path);
     exit;
 }
 
-function requireMemberLogin(): void {
+function requireMemberLogin(): void
+{
     if (empty($_SESSION['member_id'])) {
         redirectTo('login.php');
     }
 }
 
-function requireWalkerLogin(): void {
+function requireWalkerLogin(): void
+{
     if (empty($_SESSION['walker_id'])) {
         redirectTo('walker-login.php');
     }
 }
 
-function currentMember(PDO $pdo): ?array {
+function currentMember(PDO $pdo): ?array
+{
     if (empty($_SESSION['member_id'])) {
         return null;
     }
@@ -199,7 +197,8 @@ function currentMember(PDO $pdo): ?array {
     return $member ?: null;
 }
 
-function currentWalker(PDO $pdo): ?array {
+function currentWalker(PDO $pdo): ?array
+{
     if (empty($_SESSION['walker_id'])) {
         return null;
     }

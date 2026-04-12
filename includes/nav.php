@@ -1,11 +1,11 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
 $currentPage = basename(parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) ?? '');
 
-$isLoggedIn = !empty($_SESSION['member_id']) || !empty($_SESSION['user_id']) || !empty($_SESSION['user']);
+$session = (session_status() === PHP_SESSION_ACTIVE && isset($_SESSION) && is_array($_SESSION))
+    ? $_SESSION
+    : [];
+
+$isLoggedIn = !empty($session['member_id']) || !empty($session['user_id']) || !empty($session['user']);
 
 function dd_nav_active(array $pages, string $currentPage): string
 {

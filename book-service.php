@@ -3,9 +3,13 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 
-ini_set('display_errors', '1');
-ini_set('display_startup_errors', '1');
-error_reporting(E_ALL);
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/pricing.php';
+
+$referralInclude = __DIR__ . '/includes/referral.php';
+if (is_file($referralInclude)) {
+    require_once $referralInclude;
+}
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/includes/pricing.php';
 
@@ -141,22 +145,6 @@ function normalizeServiceTypeLocal($value)
     }
 
     return 'walk';
-}
-
-function normalizeEntitlementTypeLocal($value)
-{
-    $value = strtolower(trim((string) $value));
-    $value = str_replace(array('-', ' '), '_', $value);
-
-    if ($value === 'dropin') {
-        return 'drop_in';
-    }
-
-    if ($value === 'boarding') {
-        return 'boarding_night';
-    }
-
-    return $value;
 }
 
 function serviceLabel($serviceType)
@@ -441,6 +429,8 @@ function memberServiceConfig()
 
 function calculateMemberBookingPricing(array $input)
 {
+    $config = memberServiceConfig();
+
     $serviceType = normalizeServiceTypeLocal(isset($input['service_type']) ? $input['service_type'] : '');
     $petSize = strtolower(trim((string) (isset($input['pet_size']) ? $input['pet_size'] : '')));
     $durationMinutes = (int) (isset($input['duration_minutes']) ? $input['duration_minutes'] : 0);
@@ -662,515 +652,6 @@ function insertBooking(PDO $pdo, array $payload)
     return array('ok' => true, 'message' => 'Booking created successfully.', 'booking_id' => $bookingId);
 }
 
-/* =========================
-   MEMBERSHIP CREDIT HELPERS
-   ========================= */
-
-function dd_get_latest_membership_for_user(PDO $pdo, int $userId): array
-{
-    $result = array(
-        'membership_id' => 0,
-        'plan_id' => 0,
-    );
-
-    if ($userId <= 0 || !hasTable($pdo, 'member_memberships')) {
-        return $result;
-    }
-
-    $memberIdCol = firstExistingColumn($pdo, 'member_memberships', array('member_id', 'user_id', 'client_id'));
-    $membershipIdCol = firstExistingColumn($pdo, 'member_memberships', array('id'));
-    $planIdCol = firstExistingColumn($pdo, 'member_memberships', array('plan_id'));
-    $orderCol = firstExistingColumn($pdo, 'member_memberships', array('created_at', 'updated_at', 'id'));
-
-    if ($memberIdCol === null || $membershipIdCol === null) {
-        return $result;
-    }
-
-    if ($orderCol === null) {
-        $orderCol = $membershipIdCol;
-    }
-
-    $stmt = $pdo->prepare("
-        SELECT *
-        FROM member_memberships
-        WHERE {$memberIdCol} = :member_id
-        ORDER BY {$orderCol} DESC, rowid DESC
-        LIMIT 1
-    ");
-
-    if (!safeExecute($stmt, array(':member_id' => $userId))) {
-        return $result;
-    }
-
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$row) {
-        return $result;
-    }
-
-    $result['membership_id'] = (int) ($row[$membershipIdCol] ?? 0);
-    if ($planIdCol !== null) {
-        $result['plan_id'] = (int) ($row[$planIdCol] ?? 0);
-    }
-
-    return $result;
-}
-
-function dd_get_credit_service_and_units(string $serviceType, int $quantity): array
-{
-    $serviceType = normalizeServiceTypeLocal($serviceType);
-    $quantity = max(1, $quantity);
-
-    if ($serviceType === 'walk') {
-        return array('service_type' => 'walk', 'units' => 1);
-    }
-
-    if ($serviceType === 'daycare') {
-        return array('service_type' => 'daycare', 'units' => 1);
-    }
-
-    if ($serviceType === 'boarding') {
-        return array('service_type' => 'boarding_night', 'units' => $quantity);
-    }
-
-    if ($serviceType === 'drop-in') {
-        return array('service_type' => 'drop_in', 'units' => 1);
-    }
-
-    return array('service_type' => '', 'units' => 0);
-}
-
-function dd_get_membership_credit_balance(PDO $pdo, int $membershipId, string $serviceType): int
-{
-    if ($membershipId <= 0 || $serviceType === '' || !hasTable($pdo, 'membership_entitlements')) {
-        return 0;
-    }
-
-    $membershipCol = firstExistingColumn($pdo, 'membership_entitlements', array('membership_id'));
-    $serviceCol = firstExistingColumn($pdo, 'membership_entitlements', array('entitlement_type', 'service_type', 'type'));
-
-    $remainingCol = firstExistingColumn($pdo, 'membership_entitlements', array('remaining_units', 'units_remaining', 'balance'));
-    $totalCol = firstExistingColumn($pdo, 'membership_entitlements', array('total'));
-    $usedCol = firstExistingColumn($pdo, 'membership_entitlements', array('used'));
-
-    if ($membershipCol === null || $serviceCol === null) {
-        return 0;
-    }
-
-    $stmt = $pdo->prepare("
-        SELECT *
-        FROM membership_entitlements
-        WHERE {$membershipCol} = :membership_id
-          AND {$serviceCol} = :service_type
-        LIMIT 1
-    ");
-
-    if (!safeExecute($stmt, array(
-        ':membership_id' => $membershipId,
-        ':service_type' => $serviceType,
-    ))) {
-        return 0;
-    }
-
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$row) {
-        return 0;
-    }
-
-    if ($remainingCol !== null && isset($row[$remainingCol]) && $row[$remainingCol] !== '') {
-        return (int) $row[$remainingCol];
-    }
-
-    if ($totalCol !== null && $usedCol !== null) {
-        $total = (int) ($row[$totalCol] ?? 0);
-        $used = (int) ($row[$usedCol] ?? 0);
-        return max(0, $total - $used);
-    }
-
-    return 0;
-}
-
-function dd_has_required_membership_credits(PDO $pdo, int $userId, string $serviceType, int $unitsNeeded): array
-{
-    $membership = dd_get_latest_membership_for_user($pdo, $userId);
-    $membershipId = (int) $membership['membership_id'];
-
-    if ($membershipId <= 0) {
-        return array(
-            'membership_id' => 0,
-            'ok' => false,
-            'remaining' => 0,
-        );
-    }
-
-    $remaining = dd_get_membership_credit_balance($pdo, $membershipId, $serviceType);
-
-    return array(
-        'membership_id' => $membershipId,
-        'ok' => $remaining >= $unitsNeeded,
-        'remaining' => $remaining,
-    );
-}
-
-function dd_insert_membership_transaction(PDO $pdo, array $data): bool
-{
-    if (!hasTable($pdo, 'membership_transactions')) {
-        return false;
-    }
-
-    $columns = getTableColumns($pdo, 'membership_transactions');
-    if (empty($columns)) {
-        return false;
-    }
-
-    $row = array();
-
-    if (in_array('membership_id', $columns, true)) {
-        $row['membership_id'] = (int) $data['membership_id'];
-    }
-
-    if (in_array('service_type', $columns, true)) {
-        $row['service_type'] = (string) $data['service_type'];
-    }
-
-    if (in_array('direction', $columns, true)) {
-        $row['direction'] = (string) $data['direction'];
-    }
-
-    if (in_array('transaction_type', $columns, true)) {
-        $row['transaction_type'] = (string) $data['direction'];
-    }
-
-    if (in_array('units', $columns, true)) {
-        $row['units'] = (int) $data['units'];
-    }
-
-    if (in_array('amount', $columns, true)) {
-        $row['amount'] = (int) $data['units'];
-    }
-
-    if (in_array('reason', $columns, true)) {
-        $row['reason'] = (string) $data['reason'];
-    }
-
-    if (in_array('note', $columns, true)) {
-        $row['note'] = (string) $data['reason'];
-    }
-
-    if (in_array('created_at', $columns, true)) {
-        $row['created_at'] = date('Y-m-d H:i:s');
-    }
-
-    if (in_array('booking_id', $columns, true)) {
-        $row['booking_id'] = (int) $data['booking_id'];
-    }
-
-    if (in_array('external_source', $columns, true)) {
-        $row['external_source'] = 'booking';
-    }
-
-    if (in_array('external_id', $columns, true)) {
-        $row['external_id'] = (string) $data['external_id'];
-    }
-
-    if (empty($row)) {
-        return false;
-    }
-
-    $fields = array_keys($row);
-    $placeholders = array();
-    $params = array();
-
-    foreach ($fields as $field) {
-        $placeholders[] = ':' . $field;
-        $params[':' . $field] = $row[$field];
-    }
-
-    $stmt = $pdo->prepare(
-        'INSERT INTO membership_transactions (' . implode(', ', $fields) . ') VALUES (' . implode(', ', $placeholders) . ')'
-    );
-
-    return safeExecute($stmt, $params);
-}
-
-function dd_deduct_membership_credits(PDO $pdo, int $membershipId, string $serviceType, int $units, int $bookingId): array
-{
-    if ($membershipId <= 0 || $serviceType === '' || $units <= 0) {
-        return array('ok' => true, 'message' => '');
-    }
-
-    if (!hasTable($pdo, 'membership_entitlements')) {
-        return array('ok' => false, 'message' => 'Membership credits table was not found.');
-    }
-
-    $membershipCol = firstExistingColumn($pdo, 'membership_entitlements', array('membership_id'));
-    $serviceCol = firstExistingColumn($pdo, 'membership_entitlements', array('entitlement_type', 'service_type', 'type'));
-
-    $remainingCol = firstExistingColumn($pdo, 'membership_entitlements', array('remaining_units', 'units_remaining', 'balance'));
-    $totalCol = firstExistingColumn($pdo, 'membership_entitlements', array('total'));
-    $usedCol = firstExistingColumn($pdo, 'membership_entitlements', array('used'));
-
-    if ($membershipCol === null || $serviceCol === null) {
-        return array('ok' => false, 'message' => 'Membership credit columns were not found.');
-    }
-
-    $currentBalance = dd_get_membership_credit_balance($pdo, $membershipId, $serviceType);
-    if ($currentBalance < $units) {
-        return array('ok' => false, 'message' => 'Not enough credits remain for this booking.');
-    }
-
-    if ($remainingCol !== null) {
-        $stmt = $pdo->prepare("
-            UPDATE membership_entitlements
-            SET {$remainingCol} = {$remainingCol} - :units
-            WHERE {$membershipCol} = :membership_id
-              AND {$serviceCol} = :service_type
-              AND {$remainingCol} >= :units
-        ");
-
-        if (!safeExecute($stmt, array(
-            ':units' => $units,
-            ':membership_id' => $membershipId,
-            ':service_type' => $serviceType,
-        ))) {
-            return array('ok' => false, 'message' => 'Could not update membership credits.');
-        }
-
-        if ($stmt->rowCount() < 1) {
-            return array('ok' => false, 'message' => 'Could not reserve membership credits.');
-        }
-    } elseif ($usedCol !== null && $totalCol !== null) {
-        $stmt = $pdo->prepare("
-            UPDATE membership_entitlements
-            SET {$usedCol} = {$usedCol} + :units
-            WHERE {$membershipCol} = :membership_id
-              AND {$serviceCol} = :service_type
-        ");
-
-        if (!safeExecute($stmt, array(
-            ':units' => $units,
-            ':membership_id' => $membershipId,
-            ':service_type' => $serviceType,
-        ))) {
-            return array('ok' => false, 'message' => 'Could not update usage.');
-        }
-
-        if ($stmt->rowCount() < 1) {
-            return array('ok' => false, 'message' => 'Could not reserve membership credits.');
-        }
-    } else {
-        return array('ok' => false, 'message' => 'Membership credit columns were not found.');
-    }
-
-    dd_insert_membership_transaction($pdo, array(
-        'membership_id' => $membershipId,
-        'service_type' => $serviceType,
-        'direction' => 'debit',
-        'units' => $units,
-        'reason' => 'booking_usage',
-        'booking_id' => $bookingId,
-        'external_id' => 'booking_' . $bookingId . '_' . $serviceType,
-    ));
-
-    return array('ok' => true, 'message' => '');
-}
-
-function dd_money_round($amount)
-{
-    return round((float) $amount, 2);
-}
-
-function dd_get_service_payment_redirect_url()
-{
-    if (defined('SERVICE_PAYMENT_PORTAL_URL') && is_string(SERVICE_PAYMENT_PORTAL_URL) && trim(SERVICE_PAYMENT_PORTAL_URL) !== '') {
-        return trim(SERVICE_PAYMENT_PORTAL_URL);
-    }
-
-    $envKeys = array(
-        'SERVICE_PAYMENT_PORTAL_URL',
-        'STRIPE_SERVICE_PAYMENT_URL',
-        'STRIPE_PAYMENT_LINK_URL',
-    );
-
-    foreach ($envKeys as $envKey) {
-        $envValue = getenv($envKey);
-        if (is_string($envValue) && trim($envValue) !== '') {
-            return trim($envValue);
-        }
-    }
-
-    $localCandidates = array(
-        'service-checkout.php',
-        'payment-portal.php',
-        'checkout.php',
-        'stripe-checkout.php',
-    );
-
-    foreach ($localCandidates as $candidate) {
-        if (is_file(__DIR__ . '/' . $candidate)) {
-            return $candidate;
-        }
-    }
-
-    return '';
-}
-
-function dd_store_pending_service_checkout(array $payload)
-{
-    $_SESSION['pending_service_checkout'] = $payload;
-}
-
-function dd_get_credit_coverage_breakdown(PDO $pdo, int $userId, array $pricingInput, array $pricingResult, array $memberConfig): array
-{
-    $serviceType = normalizeServiceTypeLocal(isset($pricingInput['service_type']) ? $pricingInput['service_type'] : '');
-    $totalPrice = dd_money_round(isset($pricingResult['total_price']) ? $pricingResult['total_price'] : 0);
-    $quantity = max(1, (int) (isset($pricingResult['quantity']) ? $pricingResult['quantity'] : 1));
-    $durationMinutes = (int) (isset($pricingInput['duration_minutes']) ? $pricingInput['duration_minutes'] : 0);
-    $petSize = strtolower(trim((string) (isset($pricingInput['pet_size']) ? $pricingInput['pet_size'] : '')));
-    $dropInHours = max(1, (int) (isset($pricingInput['drop_in_hours']) ? $pricingInput['drop_in_hours'] : 1));
-    $dropInAddWalk = !empty($pricingInput['drop_in_add_walk']);
-
-    $creditUsage = dd_get_credit_service_and_units($serviceType, $quantity);
-    $creditServiceType = (string) $creditUsage['service_type'];
-    $unitsNeeded = (int) $creditUsage['units'];
-
-    $result = array(
-        'has_credit_type' => ($creditServiceType !== '' && $unitsNeeded > 0),
-        'membership_id' => 0,
-        'credit_service_type' => $creditServiceType,
-        'units_needed' => $unitsNeeded,
-        'available_units' => 0,
-        'credits_to_use' => 0,
-        'covered_amount' => 0.00,
-        'charge_amount' => $totalPrice,
-        'requires_payment_redirect' => false,
-        'reason_code' => '',
-        'reason_message' => '',
-    );
-
-    if ($creditServiceType === '' || $unitsNeeded <= 0) {
-        return $result;
-    }
-
-    $membership = dd_has_required_membership_credits($pdo, $userId, $creditServiceType, $unitsNeeded);
-    $membershipId = (int) $membership['membership_id'];
-    $availableUnits = 0;
-
-    if ($membershipId > 0) {
-        $availableUnits = dd_get_membership_credit_balance($pdo, $membershipId, $creditServiceType);
-    }
-
-    $result['membership_id'] = $membershipId;
-    $result['available_units'] = $availableUnits;
-
-    if ($serviceType === 'walk') {
-        if ($availableUnits > 0) {
-            $result['credits_to_use'] = 1;
-
-            if ($durationMinutes > 30) {
-                $includedPricing = dd_get_service_pricing('walk', true, array(
-                    'duration_minutes' => 30,
-                ));
-                $coveredAmount = dd_money_round(isset($includedPricing['total_price']) ? $includedPricing['total_price'] : 0);
-                $result['covered_amount'] = min($coveredAmount, $totalPrice);
-                $result['charge_amount'] = dd_money_round(max(0, $totalPrice - $result['covered_amount']));
-                if ($result['charge_amount'] > 0) {
-                    $result['requires_payment_redirect'] = true;
-                    $result['reason_code'] = 'walk_duration_exceeds_credit';
-                    $result['reason_message'] = 'Your walk credit covers up to 30 minutes. The extra time will continue to checkout.';
-                }
-            } else {
-                $result['covered_amount'] = $totalPrice;
-                $result['charge_amount'] = 0.00;
-            }
-        } else {
-            $result['requires_payment_redirect'] = true;
-            $result['reason_code'] = 'walk_credit_unavailable';
-            $result['reason_message'] = 'You do not have a walk credit remaining, so this booking will continue to checkout.';
-        }
-
-        return $result;
-    }
-
-    if ($serviceType === 'daycare') {
-        if ($availableUnits > 0) {
-            $result['credits_to_use'] = 1;
-
-            $includedPricing = dd_get_service_pricing('daycare', true, array(
-                'provide_food' => false,
-                'extra_walks' => 0,
-            ));
-            $coveredAmount = dd_money_round(isset($includedPricing['total_price']) ? $includedPricing['total_price'] : 0);
-            $result['covered_amount'] = min($coveredAmount, $totalPrice);
-            $result['charge_amount'] = dd_money_round(max(0, $totalPrice - $result['covered_amount']));
-
-            if ($result['charge_amount'] > 0) {
-                $result['requires_payment_redirect'] = true;
-                $result['reason_code'] = 'daycare_addons_exceed_credit';
-                $result['reason_message'] = 'Your daycare credit covers the base daycare session. Any add-ons will continue to checkout.';
-            }
-        } else {
-            $result['requires_payment_redirect'] = true;
-            $result['reason_code'] = 'daycare_credit_unavailable';
-            $result['reason_message'] = 'You do not have a daycare credit remaining, so this booking will continue to checkout.';
-        }
-
-        return $result;
-    }
-
-    if ($serviceType === 'drop-in') {
-        if ($availableUnits > 0) {
-            $result['credits_to_use'] = 1;
-
-            $includedPricing = dd_get_service_pricing('drop_in', true, array(
-                'quantity' => 1,
-                'add_walk' => false,
-            ));
-            $coveredAmount = dd_money_round(isset($includedPricing['total_price']) ? $includedPricing['total_price'] : 0);
-            $result['covered_amount'] = min($coveredAmount, $totalPrice);
-            $result['charge_amount'] = dd_money_round(max(0, $totalPrice - $result['covered_amount']));
-
-            if ($dropInHours > 1 || $dropInAddWalk || $result['charge_amount'] > 0) {
-                $result['requires_payment_redirect'] = true;
-                $result['reason_code'] = 'dropin_exceeds_credit';
-                $result['reason_message'] = 'Your drop-in credit covers a standard 1-hour drop-in. Any extra time or add-ons will continue to checkout.';
-            }
-        } else {
-            $result['requires_payment_redirect'] = true;
-            $result['reason_code'] = 'dropin_credit_unavailable';
-            $result['reason_message'] = 'You do not have a drop-in credit remaining, so this booking will continue to checkout.';
-        }
-
-        return $result;
-    }
-
-    if ($serviceType === 'boarding') {
-        $unitPrice = dd_money_round(isset($pricingResult['unit_price']) ? $pricingResult['unit_price'] : 0);
-
-        if ($unitPrice <= 0 && $quantity > 0) {
-            $unitPrice = dd_money_round($totalPrice / $quantity);
-        }
-
-        $creditsToUse = min($availableUnits, $unitsNeeded);
-        $result['credits_to_use'] = $creditsToUse;
-
-        if ($creditsToUse > 0) {
-            $coveredAmount = dd_money_round($unitPrice * $creditsToUse);
-            $result['covered_amount'] = min($coveredAmount, $totalPrice);
-            $result['charge_amount'] = dd_money_round(max(0, $totalPrice - $result['covered_amount']));
-        }
-
-        if ($creditsToUse < $unitsNeeded) {
-            $result['requires_payment_redirect'] = true;
-            $result['reason_code'] = 'boarding_nights_exceed_credit';
-            $result['reason_message'] = 'Your boarding credits will be applied first, and any extra nights will continue to checkout.';
-        }
-
-        return $result;
-    }
-
-    return $result;
-}
-
 if (!isLoggedInMember()) {
     redirectTo('login.php');
 }
@@ -1261,7 +742,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
 
             $pricingResult = calculateMemberBookingPricing($pricingInput);
-            $fullServicePrice = dd_money_round((float) $pricingResult['total_price']);
+            $price = (float) $pricingResult['total_price'];
 
             $bookingMeta = array(
                 'service_type' => $serviceType,
@@ -1285,136 +766,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $bookingMeta['sitting_extra_walks'] = $sittingExtraWalks;
             }
 
-            $coverage = dd_get_credit_coverage_breakdown(
-                $pdo,
-                $userId,
-                $pricingInput,
-                $pricingResult,
-                $memberConfig
-            );
+            $insert = insertBooking($pdo, array(
+                'user_id' => $userId,
+                'pet_id' => $petId,
+                'pet_name' => (string) $selectedPet['pet_name'],
+                'client_name' => $clientName,
+                'service_type' => $serviceType,
+                'service_date' => $serviceDate,
+                'end_date' => $endDate,
+                'service_time' => $serviceTime,
+                'duration_minutes' => (int) $pricingResult['duration'],
+                'notes' => $notes,
+                'price' => $price,
+                'pricing_type' => (string) $pricingResult['pricing_type'],
+                'discount_label' => (string) $pricingResult['discount_label'],
+                'quantity' => (int) $pricingResult['quantity'],
+                'unit_price' => (float) $pricingResult['unit_price'],
+                'referral_code' => $referralCode,
+                'booking_meta' => $bookingMeta,
+            ));
 
-            $priceToChargeNow = dd_money_round($coverage['charge_amount']);
-
-            if ($coverage['has_credit_type']) {
-                $bookingMeta['membership_credit_service_type'] = $coverage['credit_service_type'];
-                $bookingMeta['membership_credit_units_needed'] = (int) $coverage['units_needed'];
-                $bookingMeta['membership_credit_units_available'] = (int) $coverage['available_units'];
-                $bookingMeta['membership_credit_units_to_use'] = (int) $coverage['credits_to_use'];
-                $bookingMeta['membership_credit_covered_amount'] = dd_money_round($coverage['covered_amount']);
-                $bookingMeta['membership_charge_amount'] = $priceToChargeNow;
-            }
-
-            if ($coverage['requires_payment_redirect'] && $priceToChargeNow > 0) {
-                $paymentUrl = dd_get_service_payment_redirect_url();
-
-                if ($paymentUrl === '') {
-                    throw new RuntimeException('A payment portal or Stripe checkout URL has not been configured yet.');
-                }
-
-                dd_store_pending_service_checkout(array(
-                    'type' => 'service_booking',
-                    'user_id' => $userId,
-                    'membership_id' => (int) $coverage['membership_id'],
-                    'credits_to_use' => (int) $coverage['credits_to_use'],
-                    'credit_service_type' => (string) $coverage['credit_service_type'],
-                    'covered_amount' => dd_money_round($coverage['covered_amount']),
-                    'charge_amount' => $priceToChargeNow,
-                    'full_service_price' => $fullServicePrice,
-                    'service_type' => $serviceType,
-                    'service_label' => serviceLabel($serviceType),
-                    'service_date' => $serviceDate,
-                    'end_date' => $endDate,
-                    'service_time' => $serviceTime,
-                    'duration_minutes' => (int) $pricingResult['duration'],
-                    'quantity' => (int) $pricingResult['quantity'],
-                    'unit_price' => dd_money_round((float) $pricingResult['unit_price']),
-                    'pricing_type' => (string) $pricingResult['pricing_type'],
-                    'discount_label' => (string) $pricingResult['discount_label'],
-                    'client_name' => $clientName,
-                    'pet_id' => $petId,
-                    'pet_name' => (string) $selectedPet['pet_name'],
-                    'pet_size' => isset($selectedPet['size']) ? (string) $selectedPet['size'] : '',
-                    'notes' => $notes,
-                    'referral_code' => $referralCode,
-                    'booking_meta' => $bookingMeta,
-                    'reason_code' => (string) $coverage['reason_code'],
-                    'reason_message' => (string) $coverage['reason_message'],
-                    'created_at' => date('c'),
-                    'return_to' => 'book-service.php',
-                ));
-
-                $_SESSION['dashboard_flash'] = $coverage['reason_message'];
-                redirectTo($paymentUrl);
-            }
-
-            $creditUsage = dd_get_credit_service_and_units($serviceType, (int) $pricingResult['quantity']);
-
-            if ($creditUsage['service_type'] !== '' && $creditUsage['units'] > 0 && !$coverage['requires_payment_redirect']) {
-                $creditCheck = dd_has_required_membership_credits(
-                    $pdo,
-                    $userId,
-                    $creditUsage['service_type'],
-                    (int) $coverage['credits_to_use']
-                );
-
-                if ((int) $coverage['credits_to_use'] > 0 && !$creditCheck['ok']) {
-                    if ($creditUsage['service_type'] === 'walk') {
-                        throw new RuntimeException('You do not have enough walk credits remaining for this booking.');
-                    } elseif ($creditUsage['service_type'] === 'daycare') {
-                        throw new RuntimeException('You do not have enough daycare credits remaining for this booking.');
-                    } elseif ($creditUsage['service_type'] === 'boarding_night') {
-                        throw new RuntimeException('You do not have enough boarding nights remaining for this booking.');
-                    } elseif ($creditUsage['service_type'] === 'drop_in') {
-                        throw new RuntimeException('You do not have enough drop-in credits remaining for this booking.');
-                    } else {
-                        throw new RuntimeException('You do not have enough membership credits remaining for this booking.');
-                    }
-                }
-            }
-
-            $pdo->beginTransaction();
-
-            try {
-                $insert = insertBooking($pdo, array(
-                    'user_id' => $userId,
-                    'pet_id' => $petId,
-                    'pet_name' => (string) $selectedPet['pet_name'],
-                    'client_name' => $clientName,
-                    'service_type' => $serviceType,
-                    'service_date' => $serviceDate,
-                    'end_date' => $endDate,
-                    'service_time' => $serviceTime,
-                    'duration_minutes' => (int) $pricingResult['duration'],
-                    'notes' => $notes,
-                    'price' => $priceToChargeNow,
-                    'pricing_type' => (string) $pricingResult['pricing_type'],
-                    'discount_label' => (string) $pricingResult['discount_label'],
-                    'quantity' => (int) $pricingResult['quantity'],
-                    'unit_price' => (float) $pricingResult['unit_price'],
-                    'referral_code' => $referralCode,
-                    'booking_meta' => $bookingMeta,
-                ));
-
-                if (!$insert['ok']) {
-                    throw new RuntimeException($insert['message']);
-                }
-
+            if (!$insert['ok']) {
+                $error = $insert['message'];
+            } else {
                 $bookingId = (int) $insert['booking_id'];
-
-                if ($creditUsage['service_type'] !== '' && (int) $coverage['credits_to_use'] > 0 && !$coverage['requires_payment_redirect']) {
-                    $membership = dd_get_latest_membership_for_user($pdo, $userId);
-                    $deduct = dd_deduct_membership_credits(
-                        $pdo,
-                        (int) $membership['membership_id'],
-                        $creditUsage['service_type'],
-                        (int) $coverage['credits_to_use'],
-                        $bookingId
-                    );
-
-                    if (!$deduct['ok']) {
-                        throw new RuntimeException($deduct['message']);
-                    }
-                }
 
                 if (
                     $bookingId > 0
@@ -1428,7 +803,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $userId,
                             $referralCode,
                             $serviceType,
-                            $priceToChargeNow
+                            $price
                         );
                     } catch (Throwable $e) {
                     } catch (Exception $e) {
@@ -1437,9 +812,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($bookingId > 0) {
                     $message = 'Your ' . serviceLabel($serviceType) . ' booking has been created and is pending confirmation.';
-                    if ($creditUsage['service_type'] !== '' && (int) $coverage['credits_to_use'] > 0) {
-                        $message .= ' ' . (int) $coverage['credits_to_use'] . ' membership credit' . ((int) $coverage['credits_to_use'] === 1 ? '' : 's') . ' reserved.';
-                    }
                     if ($referralCode !== '') {
                         $message .= ' Referral code ' . $referralCode . ' was applied.';
                     }
@@ -1453,20 +825,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
                 }
 
-                $pdo->commit();
-
                 $_SESSION['dashboard_flash'] = 'Your ' . serviceLabel($serviceType) . ' booking request was submitted successfully.';
                 redirectTo('my-bookings.php');
-            } catch (Throwable $e) {
-                if ($pdo->inTransaction()) {
-                    $pdo->rollBack();
-                }
-                throw $e;
-            } catch (Exception $e) {
-                if ($pdo->inTransaction()) {
-                    $pdo->rollBack();
-                }
-                throw $e;
             }
         } catch (Throwable $e) {
             $error = $e->getMessage();

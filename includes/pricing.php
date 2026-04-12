@@ -129,7 +129,7 @@ function dd_pricing_matrix(): array
          */
         'sitting' => [
             'member' => [
-                'base_rate' => 120.00,
+                'base_rate' => 110.00,
                 'hours' => 4,
                 'included_walks' => 1,
                 'included_walk_duration_minutes' => 30,

@@ -40,10 +40,17 @@ function currentUserRole()
     return 'member';
 }
 
-function currentUserId()
+function isMemberLike()
 {
-    $keys = array('user_id', 'member_id', 'client_id', 'id');
+    return currentUserRole() === 'member' || !empty($_SESSION['user_id']) || !empty($_SESSION['member_id']) || !empty($_SESSION['id']);
+}
 
+if (!isMemberLike()) {
+    redirectTo('login.php');
+}
+
+function sessionInt(array $keys): int
+{
     foreach ($keys as $key) {
         if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
             return (int) $_SESSION[$key];
@@ -53,92 +60,7 @@ function currentUserId()
     return 0;
 }
 
-function isMemberLike()
-{
-    return currentUserRole() === 'member' || currentUserId() > 0;
-}
-
-if (!isMemberLike()) {
-    redirectTo('login.php');
-}
-
-function hasTable(PDO $pdo, $table)
-{
-    static $cache = array();
-
-    if (array_key_exists($table, $cache)) {
-        return $cache[$table];
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
-        $stmt->execute(array(':name' => $table));
-        $cache[$table] = (bool) $stmt->fetchColumn();
-        return $cache[$table];
-    } catch (Throwable $e) {
-        $cache[$table] = false;
-        return false;
-    } catch (Exception $e) {
-        $cache[$table] = false;
-        return false;
-    }
-}
-
-function getTableColumns(PDO $pdo, $table)
-{
-    static $cache = array();
-
-    if (array_key_exists($table, $cache)) {
-        return $cache[$table];
-    }
-
-    if (!hasTable($pdo, $table)) {
-        $cache[$table] = array();
-        return array();
-    }
-
-    try {
-        $safeTable = str_replace('"', '""', $table);
-        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
-        $columns = array();
-
-        if ($stmt) {
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach ($rows as $row) {
-                if (isset($row['name'])) {
-                    $columns[] = (string) $row['name'];
-                }
-            }
-        }
-
-        $cache[$table] = $columns;
-        return $columns;
-    } catch (Throwable $e) {
-        $cache[$table] = array();
-        return array();
-    } catch (Exception $e) {
-        $cache[$table] = array();
-        return array();
-    }
-}
-
-function hasColumn(PDO $pdo, $table, $column)
-{
-    return in_array($column, getTableColumns($pdo, $table), true);
-}
-
-function firstExistingColumn(PDO $pdo, $table, array $candidates)
-{
-    foreach ($candidates as $candidate) {
-        if (hasColumn($pdo, $table, $candidate)) {
-            return $candidate;
-        }
-    }
-
-    return null;
-}
-
-function safeExecute(PDOStatement $stmt, array $params = array())
+function safeExecute(PDOStatement $stmt, array $params = array()): bool
 {
     try {
         return $stmt->execute($params);
@@ -149,34 +71,58 @@ function safeExecute(PDOStatement $stmt, array $params = array())
     }
 }
 
-function countUnreadNotificationsForUser(PDO $pdo, $userId)
+function fetchOne(PDO $pdo, string $sql, array $params = array()): ?array
 {
-    $userId = (int) $userId;
+    $stmt = $pdo->prepare($sql);
+    if (!safeExecute($stmt, $params)) {
+        return null;
+    }
+
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return is_array($row) ? $row : null;
+}
+
+function countUnreadNotificationsForUser(PDO $pdo, int $userId): int
+{
     $tables = array('notifications', 'user_notifications', 'alerts');
 
     foreach ($tables as $table) {
-        if (!hasTable($pdo, $table)) {
-            continue;
-        }
-
-        $readCol = firstExistingColumn($pdo, $table, array('is_read', 'read_status', 'seen', 'viewed'));
-        $userCol = firstExistingColumn($pdo, $table, array('user_id'));
-        $memberCol = firstExistingColumn($pdo, $table, array('member_id'));
-
-        if ($readCol === null) {
-            continue;
-        }
-
         try {
-            if ($userCol !== null) {
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$userCol} = :id AND COALESCE({$readCol}, 0) = 0");
-                if (safeExecute($stmt, array(':id' => $userId))) {
-                    return (int) $stmt->fetchColumn();
+            $check = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name = " . $pdo->quote($table) . " LIMIT 1");
+            if (!$check || !$check->fetchColumn()) {
+                continue;
+            }
+
+            $columnsStmt = $pdo->query('PRAGMA table_info("' . str_replace('"', '""', $table) . '")');
+            if (!$columnsStmt) {
+                continue;
+            }
+
+            $columns = array();
+            foreach ($columnsStmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
+                if (isset($column['name'])) {
+                    $columns[] = (string) $column['name'];
                 }
             }
 
-            if ($memberCol !== null) {
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$memberCol} = :id AND COALESCE({$readCol}, 0) = 0");
+            $readCol = null;
+            foreach (array('is_read', 'read_status', 'seen', 'viewed') as $candidate) {
+                if (in_array($candidate, $columns, true)) {
+                    $readCol = $candidate;
+                    break;
+                }
+            }
+
+            if ($readCol === null) {
+                continue;
+            }
+
+            foreach (array('user_id', 'member_id') as $ownerCol) {
+                if (!in_array($ownerCol, $columns, true)) {
+                    continue;
+                }
+
+                $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$ownerCol} = :id AND COALESCE({$readCol}, 0) = 0");
                 if (safeExecute($stmt, array(':id' => $userId))) {
                     return (int) $stmt->fetchColumn();
                 }
@@ -191,31 +137,59 @@ function countUnreadNotificationsForUser(PDO $pdo, $userId)
     return 0;
 }
 
-function getProfileRow(PDO $pdo, $userId)
+function resolveUserRow(PDO $pdo): ?array
 {
-    $userId = (int) $userId;
+    $userIdCandidates = array_filter(array_unique(array(
+        sessionInt(array('user_id')),
+        sessionInt(array('id')),
+        sessionInt(array('client_id')),
+        sessionInt(array('member_id')),
+    )));
 
-    $tables = array('users', 'members', 'client_profiles');
-
-    foreach ($tables as $table) {
-        if (!hasTable($pdo, $table)) {
-            continue;
+    foreach ($userIdCandidates as $candidate) {
+        $row = fetchOne($pdo, 'SELECT * FROM users WHERE id = :id LIMIT 1', array(':id' => $candidate));
+        if ($row !== null) {
+            return $row;
         }
+    }
 
-        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
-        if ($idCol === null) {
-            continue;
+    $memberIdCandidates = array_filter(array_unique(array(
+        sessionInt(array('member_id')),
+        sessionInt(array('id')),
+        sessionInt(array('user_id')),
+    )));
+
+    foreach ($memberIdCandidates as $candidate) {
+        $memberRow = fetchOne($pdo, 'SELECT * FROM members WHERE id = :id LIMIT 1', array(':id' => $candidate));
+        if ($memberRow !== null && !empty($memberRow['email'])) {
+            $userRow = fetchOne($pdo, 'SELECT * FROM users WHERE lower(email) = lower(:email) LIMIT 1', array(':email' => (string) $memberRow['email']));
+            if ($userRow !== null) {
+                return $userRow;
+            }
         }
+    }
 
-        $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE {$idCol} = :id LIMIT 1");
-        if (!safeExecute($stmt, array(':id' => $userId))) {
-            continue;
+    return null;
+}
+
+function resolveMemberRow(PDO $pdo, ?array $userRow): ?array
+{
+    $memberIdCandidates = array_filter(array_unique(array(
+        sessionInt(array('member_id')),
+        sessionInt(array('id')),
+        sessionInt(array('user_id')),
+    )));
+
+    foreach ($memberIdCandidates as $candidate) {
+        $row = fetchOne($pdo, 'SELECT * FROM members WHERE id = :id LIMIT 1', array(':id' => $candidate));
+        if ($row !== null) {
+            return $row;
         }
+    }
 
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($row !== false) {
-            $row['_source_table'] = $table;
-            $row['_id_column'] = $idCol;
+    if ($userRow !== null && !empty($userRow['email'])) {
+        $row = fetchOne($pdo, 'SELECT * FROM members WHERE lower(email) = lower(:email) LIMIT 1', array(':email' => (string) $userRow['email']));
+        if ($row !== null) {
             return $row;
         }
     }
@@ -223,78 +197,232 @@ function getProfileRow(PDO $pdo, $userId)
     return null;
 }
 
-function valueFromRow(array $row, array $candidates, $default = '')
+function resolveClientProfileRow(PDO $pdo, int $userId, ?array $userRow, ?array $memberRow): ?array
 {
-    foreach ($candidates as $candidate) {
-        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
-            return $row[$candidate];
+    if ($userId > 0) {
+        $row = fetchOne($pdo, 'SELECT * FROM client_profiles WHERE user_id = :user_id LIMIT 1', array(':user_id' => $userId));
+        if ($row !== null) {
+            return $row;
         }
     }
 
-    return $default;
+    $fallbackIds = array();
+    if ($memberRow !== null && isset($memberRow['id']) && is_numeric($memberRow['id'])) {
+        $fallbackIds[] = (int) $memberRow['id'];
+    }
+    $fallbackIds[] = sessionInt(array('user_id'));
+    $fallbackIds[] = sessionInt(array('id'));
+    $fallbackIds[] = sessionInt(array('member_id'));
+
+    foreach (array_filter(array_unique($fallbackIds)) as $candidate) {
+        $row = fetchOne($pdo, 'SELECT * FROM client_profiles WHERE user_id = :user_id LIMIT 1', array(':user_id' => $candidate));
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    if ($userRow !== null && isset($userRow['id']) && is_numeric($userRow['id'])) {
+        return fetchOne($pdo, 'SELECT * FROM client_profiles WHERE user_id = :user_id LIMIT 1', array(':user_id' => (int) $userRow['id']));
+    }
+
+    return null;
 }
 
-function buildProfileData(array $row)
+function resolveMembershipType(PDO $pdo, int $userId): string
 {
+    if ($userId <= 0) {
+        return 'Active';
+    }
+
+    try {
+        $columnsStmt = $pdo->query('PRAGMA table_info("member_memberships")');
+        if (!$columnsStmt) {
+            return 'Active';
+        }
+
+        $columns = array();
+        foreach ($columnsStmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
+            if (isset($column['name'])) {
+                $columns[] = (string) $column['name'];
+            }
+        }
+
+        if (empty($columns)) {
+            return 'Active';
+        }
+
+        $userColumn = null;
+        foreach (array('user_id', 'member_id', 'client_id') as $candidate) {
+            if (in_array($candidate, $columns, true)) {
+                $userColumn = $candidate;
+                break;
+            }
+        }
+
+        if ($userColumn === null) {
+            return 'Active';
+        }
+
+        $nameColumn = null;
+        foreach (array('membership_name', 'plan_name', 'membership_type', 'membership', 'plan_type', 'plan_slug', 'membership_slug') as $candidate) {
+            if (in_array($candidate, $columns, true)) {
+                $nameColumn = $candidate;
+                break;
+            }
+        }
+
+        if ($nameColumn !== null) {
+            $stmt = $pdo->prepare("SELECT {$nameColumn} AS membership_name FROM member_memberships WHERE {$userColumn} = :id ORDER BY id DESC LIMIT 1");
+            if (safeExecute($stmt, array(':id' => $userId))) {
+                $value = $stmt->fetchColumn();
+                if ($value !== false && trim((string) $value) !== '') {
+                    return (string) $value;
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        return 'Active';
+    } catch (Exception $e) {
+        return 'Active';
+    }
+
+    return 'Active';
+}
+
+function buildProfileData(?array $userRow, ?array $memberRow, ?array $clientProfileRow, string $membershipType): array
+{
+    $addressLine1 = $clientProfileRow !== null ? trim((string) ($clientProfileRow['address_line1'] ?? '')) : '';
+    $addressLine2 = $clientProfileRow !== null ? trim((string) ($clientProfileRow['address_line2'] ?? '')) : '';
+
     return array(
-        'full_name' => (string) valueFromRow($row, array('full_name', 'name', 'client_name', 'member_name'), ''),
-        'email' => (string) valueFromRow($row, array('email'), ''),
-        'phone' => (string) valueFromRow($row, array('phone', 'phone_number', 'mobile', 'cell_phone'), ''),
-        'username' => (string) valueFromRow($row, array('username'), ''),
-        'address' => (string) valueFromRow($row, array('address', 'street_address'), ''),
-        'city' => (string) valueFromRow($row, array('city'), ''),
-        'state' => (string) valueFromRow($row, array('state', 'province'), ''),
-        'zip' => (string) valueFromRow($row, array('zip', 'zipcode', 'postal_code'), ''),
-        'membership_type' => (string) valueFromRow($row, array('membership_type', 'membership', 'plan_type'), 'Active'),
-        'preferred_login' => (string) valueFromRow($row, array('preferred_login'), ''),
+        'full_name' => trim((string) (($userRow['full_name'] ?? '') !== '' ? $userRow['full_name'] : '')),
+        'email' => trim((string) (($userRow['email'] ?? '') !== '' ? $userRow['email'] : ($memberRow['email'] ?? ''))),
+        'phone' => trim((string) (($userRow['phone'] ?? '') !== '' ? $userRow['phone'] : ($memberRow['phone'] ?? ''))),
+        'username' => trim((string) ($memberRow['username'] ?? '')),
+        'address' => $addressLine1,
+        'address_line2' => $addressLine2,
+        'city' => trim((string) ($clientProfileRow['city'] ?? '')),
+        'state' => trim((string) ($clientProfileRow['state'] ?? '')),
+        'zip' => trim((string) ($clientProfileRow['zip_code'] ?? '')),
+        'membership_type' => $membershipType !== '' ? $membershipType : 'Active',
+        'preferred_login' => trim((string) ($memberRow['preferred_login'] ?? '')),
     );
 }
 
-function updateProfile(PDO $pdo, array $row, array $updates)
+function saveProfile(PDO $pdo, int $userId, ?array $memberRow, string $fullName, string $phone, string $address, string $addressLine2, string $city, string $state, string $zip): array
 {
-    $table = isset($row['_source_table']) ? (string) $row['_source_table'] : '';
-    $idColumn = isset($row['_id_column']) ? (string) $row['_id_column'] : '';
-    $idValue = isset($row[$idColumn]) ? (int) $row[$idColumn] : 0;
-
-    if ($table === '' || $idColumn === '' || $idValue <= 0) {
-        return false;
+    if ($userId <= 0) {
+        return array('ok' => false, 'message' => 'Your user account could not be resolved.');
     }
 
-    $columns = getTableColumns($pdo, $table);
-    if (empty($columns)) {
-        return false;
-    }
+    try {
+        $pdo->beginTransaction();
 
-    $sets = array();
-    $params = array();
-
-    foreach ($updates as $column => $value) {
-        if (in_array($column, $columns, true)) {
-            $sets[] = $column . ' = :' . $column;
-            $params[':' . $column] = $value;
+        $userStmt = $pdo->prepare('UPDATE users SET full_name = :full_name, phone = :phone, updated_at = :updated_at WHERE id = :id');
+        if (!safeExecute($userStmt, array(
+            ':full_name' => $fullName,
+            ':phone' => $phone,
+            ':updated_at' => date('Y-m-d H:i:s'),
+            ':id' => $userId,
+        ))) {
+            $pdo->rollBack();
+            return array('ok' => false, 'message' => 'The users record could not be updated.');
         }
+
+        if ($memberRow !== null && isset($memberRow['id']) && is_numeric($memberRow['id'])) {
+            $memberStmt = $pdo->prepare('UPDATE members SET phone = :phone WHERE id = :id');
+            if (!safeExecute($memberStmt, array(
+                ':phone' => $phone,
+                ':id' => (int) $memberRow['id'],
+            ))) {
+                $pdo->rollBack();
+                return array('ok' => false, 'message' => 'The members record could not be updated.');
+            }
+        }
+
+        $existingClientProfile = fetchOne($pdo, 'SELECT * FROM client_profiles WHERE user_id = :user_id LIMIT 1', array(':user_id' => $userId));
+
+        if ($existingClientProfile !== null) {
+            $clientStmt = $pdo->prepare(
+                'UPDATE client_profiles
+                 SET address_line1 = :address_line1,
+                     address_line2 = :address_line2,
+                     city = :city,
+                     state = :state,
+                     zip_code = :zip_code,
+                     updated_at = :updated_at
+                 WHERE user_id = :user_id'
+            );
+
+            if (!safeExecute($clientStmt, array(
+                ':address_line1' => $address,
+                ':address_line2' => $addressLine2,
+                ':city' => $city,
+                ':state' => $state,
+                ':zip_code' => $zip,
+                ':updated_at' => date('Y-m-d H:i:s'),
+                ':user_id' => $userId,
+            ))) {
+                $pdo->rollBack();
+                return array('ok' => false, 'message' => 'The client profile could not be updated.');
+            }
+        } else {
+            $clientStmt = $pdo->prepare(
+                'INSERT INTO client_profiles (user_id, address_line1, address_line2, city, state, zip_code, created_at, updated_at)
+                 VALUES (:user_id, :address_line1, :address_line2, :city, :state, :zip_code, :created_at, :updated_at)'
+            );
+
+            $now = date('Y-m-d H:i:s');
+            if (!safeExecute($clientStmt, array(
+                ':user_id' => $userId,
+                ':address_line1' => $address,
+                ':address_line2' => $addressLine2,
+                ':city' => $city,
+                ':state' => $state,
+                ':zip_code' => $zip,
+                ':created_at' => $now,
+                ':updated_at' => $now,
+            ))) {
+                $pdo->rollBack();
+                return array('ok' => false, 'message' => 'The client profile could not be created.');
+            }
+        }
+
+        $pdo->commit();
+
+        $savedClientProfile = fetchOne($pdo, 'SELECT * FROM client_profiles WHERE user_id = :user_id LIMIT 1', array(':user_id' => $userId));
+        $savedAddress = trim((string) ($savedClientProfile['address_line1'] ?? ''));
+        $savedAddressLine2 = trim((string) ($savedClientProfile['address_line2'] ?? ''));
+        $savedCity = trim((string) ($savedClientProfile['city'] ?? ''));
+        $savedState = trim((string) ($savedClientProfile['state'] ?? ''));
+        $savedZip = trim((string) ($savedClientProfile['zip_code'] ?? ''));
+
+        if ($savedAddress !== $address || $savedAddressLine2 !== $addressLine2 || $savedCity !== $city || $savedState !== $state || $savedZip !== $zip) {
+            return array('ok' => false, 'message' => 'Your profile save ran, but the address fields are not being read back from the database yet.');
+        }
+
+        return array('ok' => true, 'message' => 'Your profile was updated successfully.');
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        return array('ok' => false, 'message' => 'We could not update your profile right now.');
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        return array('ok' => false, 'message' => 'We could not update your profile right now.');
     }
-
-    if (empty($sets)) {
-        return true;
-    }
-
-    if (in_array('updated_at', $columns, true) && !isset($updates['updated_at'])) {
-        $sets[] = 'updated_at = :updated_at';
-        $params[':updated_at'] = date('Y-m-d H:i:s');
-    }
-
-    $params[':id'] = $idValue;
-
-    $sql = 'UPDATE ' . $table . ' SET ' . implode(', ', $sets) . ' WHERE ' . $idColumn . ' = :id';
-    $stmt = $pdo->prepare($sql);
-
-    return safeExecute($stmt, $params);
 }
 
-$userId = currentUserId();
+$userRow = resolveUserRow($pdo);
+$memberRow = resolveMemberRow($pdo, $userRow);
+$userId = $userRow !== null && isset($userRow['id']) && is_numeric($userRow['id']) ? (int) $userRow['id'] : 0;
+
 if ($userId <= 0) {
-    redirectTo('login.php');
+    http_response_code(404);
+    echo 'Profile could not be loaded.';
+    exit;
 }
 
 $flash = isset($_SESSION['profile_flash']) ? (string) $_SESSION['profile_flash'] : '';
@@ -302,20 +430,15 @@ $flashType = isset($_SESSION['profile_flash_type']) ? (string) $_SESSION['profil
 unset($_SESSION['profile_flash'], $_SESSION['profile_flash_type']);
 
 $unreadNotifications = countUnreadNotificationsForUser($pdo, $userId);
-
-$profileRow = getProfileRow($pdo, $userId);
-if ($profileRow === null) {
-    http_response_code(404);
-    echo 'Profile could not be loaded.';
-    exit;
-}
-
-$profile = buildProfileData($profileRow);
+$clientProfileRow = resolveClientProfileRow($pdo, $userId, $userRow, $memberRow);
+$membershipType = resolveMembershipType($pdo, $userId);
+$profile = buildProfileData($userRow, $memberRow, $clientProfileRow, $membershipType);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $fullName = trim((string) (isset($_POST['full_name']) ? $_POST['full_name'] : ''));
     $phone = trim((string) (isset($_POST['phone']) ? $_POST['phone'] : ''));
     $address = trim((string) (isset($_POST['address']) ? $_POST['address'] : ''));
+    $addressLine2 = trim((string) (isset($_POST['address_line2']) ? $_POST['address_line2'] : ''));
     $city = trim((string) (isset($_POST['city']) ? $_POST['city'] : ''));
     $state = trim((string) (isset($_POST['state']) ? $_POST['state'] : ''));
     $zip = trim((string) (isset($_POST['zip']) ? $_POST['zip'] : ''));
@@ -326,41 +449,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirectTo('profile.php');
     }
 
-    $updates = array(
-        'full_name' => $fullName,
-        'name' => $fullName,
-        'client_name' => $fullName,
-        'member_name' => $fullName,
-        'phone' => $phone,
-        'phone_number' => $phone,
-        'mobile' => $phone,
-        'cell_phone' => $phone,
-        'address' => $address,
-        'street_address' => $address,
-        'city' => $city,
-        'state' => $state,
-        'province' => $state,
-        'zip' => $zip,
-        'zipcode' => $zip,
-        'postal_code' => $zip,
-    );
+    $result = saveProfile($pdo, $userId, $memberRow, $fullName, $phone, $address, $addressLine2, $city, $state, $zip);
 
-    $saved = updateProfile($pdo, $profileRow, $updates);
-
-    if ($saved) {
-        $_SESSION['name'] = $fullName;
-        $_SESSION['full_name'] = $fullName;
-        $_SESSION['profile_flash_type'] = 'success';
-        $_SESSION['profile_flash'] = 'Your profile was updated successfully.';
-    } else {
-        $_SESSION['profile_flash_type'] = 'error';
-        $_SESSION['profile_flash'] = 'We could not update your profile right now.';
-    }
-
+    $_SESSION['name'] = $fullName;
+    $_SESSION['full_name'] = $fullName;
+    $_SESSION['profile_flash_type'] = $result['ok'] ? 'success' : 'error';
+    $_SESSION['profile_flash'] = $result['message'];
     redirectTo('profile.php');
 }
 
 $displayName = $profile['full_name'] !== '' ? $profile['full_name'] : 'Member';
+$fullAddress = trim(implode(' ', array_filter(array(
+    $profile['address'],
+    $profile['address_line2'],
+    $profile['city'],
+    $profile['state'],
+    $profile['zip'],
+), static function ($value) {
+    return trim((string) $value) !== '';
+})));
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -700,12 +807,7 @@ $displayName = $profile['full_name'] !== '' ? $profile['full_name'] : 'Member';
 
                     <div class="detail-item">
                         <div class="detail-label">Address</div>
-                        <div class="detail-value">
-                            <?php
-                            $fullAddress = trim($profile['address'] . ' ' . $profile['city'] . ' ' . $profile['state'] . ' ' . $profile['zip']);
-                            echo h($fullAddress !== '' ? $fullAddress : '—');
-                            ?>
-                        </div>
+                        <div class="detail-value"><?php echo h($fullAddress !== '' ? $fullAddress : '—'); ?></div>
                     </div>
 
                     <div class="detail-item">
@@ -743,21 +845,30 @@ $displayName = $profile['full_name'] !== '' ? $profile['full_name'] : 'Member';
                     </div>
 
                     <div>
-                        <label for="city">City</label>
-                        <input type="text" id="city" name="city" value="<?php echo h($profile['city']); ?>">
+                        <label for="address_line2">Apartment / Unit</label>
+                        <input type="text" id="address_line2" name="address_line2" value="<?php echo h($profile['address_line2']); ?>">
                     </div>
                 </div>
 
                 <div class="form-grid">
                     <div>
+                        <label for="city">City</label>
+                        <input type="text" id="city" name="city" value="<?php echo h($profile['city']); ?>">
+                    </div>
+
+                    <div>
                         <label for="state">State</label>
                         <input type="text" id="state" name="state" value="<?php echo h($profile['state']); ?>">
                     </div>
+                </div>
 
+                <div class="form-grid">
                     <div>
                         <label for="zip">ZIP Code</label>
                         <input type="text" id="zip" name="zip" value="<?php echo h($profile['zip']); ?>">
                     </div>
+
+                    <div></div>
                 </div>
 
                 <div class="cta-row">
