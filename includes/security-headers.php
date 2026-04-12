@@ -29,6 +29,6 @@ header(
     "connect-src 'self' https:; " .
     "frame-ancestors 'self'; " .
     "base-uri 'self'; " .
-    "form-action 'self'; " .
+    "form-action 'self' https://dorianspetcare.com https://www.dorianspetcare.com https://checkout.stripe.com; " .
     "object-src 'none';"
 );

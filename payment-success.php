@@ -23,22 +23,6 @@ function redirect_to(string $url): never
     exit;
 }
 
-function current_member_id_safe(?PDO $pdo): int
-{
-    if (!$pdo instanceof PDO || !function_exists('currentMember')) {
-        return 0;
-    }
-
-    try {
-        $member = currentMember($pdo);
-        return (int) ($member['id'] ?? 0);
-    } catch (Throwable $e) {
-        return 0;
-    } catch (Exception $e) {
-        return 0;
-    }
-}
-
 function normalize_mode(string $value): string
 {
     $value = strtolower(trim($value));
@@ -71,17 +55,94 @@ function payment_status_is_paid(string $value): bool
     return strtolower(trim($value)) === 'paid';
 }
 
+function current_request_uri(): string
+{
+    $uri = trim((string) ($_SERVER['REQUEST_URI'] ?? 'payment-success.php'));
+    return $uri !== '' ? $uri : 'payment-success.php';
+}
+
+function current_member_candidate_ids(?PDO $pdo): array
+{
+    $ids = [];
+
+    foreach (['user_id', 'member_id', 'client_id', 'id'] as $key) {
+        if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
+            $value = (int) $_SESSION[$key];
+            if ($value > 0) {
+                $ids[] = $value;
+            }
+        }
+    }
+
+    if ($pdo instanceof PDO && function_exists('currentMember')) {
+        try {
+            $member = currentMember($pdo);
+
+            if (is_array($member)) {
+                foreach (['id', 'user_id', 'member_id', 'client_id', 'owner_id'] as $key) {
+                    if (isset($member[$key]) && is_numeric($member[$key])) {
+                        $value = (int) $member[$key];
+                        if ($value > 0) {
+                            $ids[] = $value;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
+    $ids = array_values(array_unique(array_filter($ids, static fn ($value) => is_int($value) && $value > 0)));
+    return $ids;
+}
+
+function current_member_primary_id(?PDO $pdo): int
+{
+    $ids = current_member_candidate_ids($pdo);
+    return $ids[0] ?? 0;
+}
+
+function candidate_ids_contain(array $ids, int $needle): bool
+{
+    return in_array($needle, $ids, true);
+}
+
+function hasTable(PDO $pdo, string $table): bool
+{
+    static $cache = [];
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :name LIMIT 1");
+        $stmt->execute([':name' => $table]);
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    }
+}
+
 function getTableColumns(PDO $pdo, string $table): array
 {
-    static $cache = array();
+    static $cache = [];
 
     if (isset($cache[$table])) {
         return $cache[$table];
     }
 
+    if (!hasTable($pdo, $table)) {
+        $cache[$table] = [];
+        return $cache[$table];
+    }
+
     try {
-        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
-        $columns = array();
+        $safeTable = str_replace('"', '""', $table);
+        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
+        $columns = [];
 
         if ($stmt) {
             foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -94,10 +155,7 @@ function getTableColumns(PDO $pdo, string $table): array
         $cache[$table] = $columns;
         return $cache[$table];
     } catch (Throwable $e) {
-        $cache[$table] = array();
-        return $cache[$table];
-    } catch (Exception $e) {
-        $cache[$table] = array();
+        $cache[$table] = [];
         return $cache[$table];
     }
 }
@@ -113,10 +171,11 @@ function first_existing_column(array $columns, array $candidates): ?string
     return null;
 }
 
-function safeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+function safeFetchOne(PDO $pdo, string $sql, array $params = []): ?array
 {
     try {
         $stmt = $pdo->prepare($sql);
+
         if (!$stmt->execute($params)) {
             return null;
         }
@@ -125,9 +184,160 @@ function safeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
         return is_array($row) ? $row : null;
     } catch (Throwable $e) {
         return null;
-    } catch (Exception $e) {
+    }
+}
+
+function safeExecute(PDO $pdo, string $sql, array $params = []): bool
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function booking_table(PDO $pdo): ?string
+{
+    foreach (['bookings', 'walks'] as $table) {
+        if (hasTable($pdo, $table)) {
+            return $table;
+        }
+    }
+
+    return null;
+}
+
+function booking_owner_match(array $row, array $candidateIds): ?array
+{
+    $ownerColumns = [
+        'user_id',
+        'member_id',
+        'client_id',
+        'owner_id',
+        'owner_user_id',
+        'client_user_id',
+    ];
+
+    foreach ($ownerColumns as $column) {
+        if (isset($row[$column]) && is_numeric($row[$column])) {
+            $value = (int) $row[$column];
+            if ($value > 0 && in_array($value, $candidateIds, true)) {
+                return [
+                    'column' => $column,
+                    'value' => $value,
+                ];
+            }
+        }
+    }
+
+    return null;
+}
+
+function booking_belongs_to_candidate_ids(array $row, array $candidateIds): bool
+{
+    return booking_owner_match($row, $candidateIds) !== null;
+}
+
+function load_booking_row(PDO $pdo, int $bookingId): ?array
+{
+    if ($bookingId <= 0) {
         return null;
     }
+
+    $table = booking_table($pdo);
+    if ($table === null) {
+        return null;
+    }
+
+    $columns = getTableColumns($pdo, $table);
+    $idColumn = first_existing_column($columns, ['id', 'booking_id', 'walk_id']);
+
+    if ($idColumn === null) {
+        return null;
+    }
+
+    return safeFetchOne(
+        $pdo,
+        "SELECT * FROM {$table} WHERE {$idColumn} = :id LIMIT 1",
+        [':id' => $bookingId]
+    );
+}
+
+function mark_custom_plan_paid(PDO $pdo, int $planId, int $memberId): bool
+{
+    if ($planId <= 0 || $memberId <= 0 || !hasTable($pdo, 'custom_plans')) {
+        return false;
+    }
+
+    $columns = getTableColumns($pdo, 'custom_plans');
+    $updatedAtColumn = first_existing_column($columns, ['updated_at']);
+
+    $setParts = ["payment_status = :payment_status"];
+    $params = [
+        ':payment_status' => 'paid',
+        ':id' => $planId,
+        ':member_id' => $memberId,
+    ];
+
+    if ($updatedAtColumn !== null) {
+        $setParts[] = "{$updatedAtColumn} = :updated_at";
+        $params[':updated_at'] = date('Y-m-d H:i:s');
+    }
+
+    $sql = "
+        UPDATE custom_plans
+        SET " . implode(', ', $setParts) . "
+        WHERE id = :id
+          AND member_id = :member_id
+    ";
+
+    return safeExecute($pdo, $sql, $params);
+}
+
+function mark_booking_paid(PDO $pdo, int $bookingId, array $ownerMatch): bool
+{
+    if ($bookingId <= 0 || empty($ownerMatch['column']) || empty($ownerMatch['value'])) {
+        return false;
+    }
+
+    $table = booking_table($pdo);
+    if ($table === null) {
+        return false;
+    }
+
+    $columns = getTableColumns($pdo, $table);
+    $idColumn = first_existing_column($columns, ['id', 'booking_id', 'walk_id']);
+    $paymentStatusColumn = first_existing_column($columns, ['payment_status', 'payment_state']);
+    $updatedAtColumn = first_existing_column($columns, ['updated_at']);
+
+    if ($idColumn === null || $paymentStatusColumn === null) {
+        return false;
+    }
+
+    $ownerColumn = (string) $ownerMatch['column'];
+    $ownerValue = (int) $ownerMatch['value'];
+
+    $setParts = ["{$paymentStatusColumn} = :payment_status"];
+    $params = [
+        ':payment_status' => 'paid',
+        ':id' => $bookingId,
+        ':owner_value' => $ownerValue,
+    ];
+
+    if ($updatedAtColumn !== null) {
+        $setParts[] = "{$updatedAtColumn} = :updated_at";
+        $params[':updated_at'] = date('Y-m-d H:i:s');
+    }
+
+    $sql = "
+        UPDATE {$table}
+        SET " . implode(', ', $setParts) . "
+        WHERE {$idColumn} = :id
+          AND {$ownerColumn} = :owner_value
+    ";
+
+    return safeExecute($pdo, $sql, $params);
 }
 
 function find_non_member_payment_record(PDO $pdo, int $requestId): ?array
@@ -136,18 +346,16 @@ function find_non_member_payment_record(PDO $pdo, int $requestId): ?array
         return null;
     }
 
-    $tables = array(
-        array(
+    $tables = [
+        [
             'table' => 'non_member_bookings',
-            'id_candidates' => array('id'),
-            'status_candidates' => array('payment_status', 'status'),
-        ),
-        array(
+            'id_candidates' => ['id'],
+        ],
+        [
             'table' => 'public_booking_requests',
-            'id_candidates' => array('id', 'request_id'),
-            'status_candidates' => array('payment_status', 'status'),
-        ),
-    );
+            'id_candidates' => ['id', 'request_id'],
+        ],
+    ];
 
     foreach ($tables as $config) {
         $table = (string) $config['table'];
@@ -158,34 +366,79 @@ function find_non_member_payment_record(PDO $pdo, int $requestId): ?array
         }
 
         $idColumn = first_existing_column($columns, $config['id_candidates']);
-        $statusColumn = first_existing_column($columns, $config['status_candidates']);
-
-        if ($idColumn === null || $statusColumn === null) {
+        if ($idColumn === null) {
             continue;
         }
 
         $row = safeFetchOne(
             $pdo,
             "SELECT * FROM {$table} WHERE {$idColumn} = :id LIMIT 1",
-            array(':id' => $requestId)
+            [':id' => $requestId]
         );
 
         if ($row !== null) {
-            return array(
+            return [
                 'table' => $table,
-                'status_column' => $statusColumn,
+                'id_column' => $idColumn,
                 'row' => $row,
-            );
+            ];
         }
     }
 
     return null;
 }
 
-function current_request_uri(): string
+function mark_non_member_paid(PDO $pdo, int $requestId): bool
 {
-    $uri = trim((string) ($_SERVER['REQUEST_URI'] ?? 'payment-success.php'));
-    return $uri !== '' ? $uri : 'payment-success.php';
+    $record = find_non_member_payment_record($pdo, $requestId);
+
+    if ($record === null) {
+        return false;
+    }
+
+    $table = (string) ($record['table'] ?? '');
+    $idColumn = (string) ($record['id_column'] ?? '');
+
+    if ($table === '' || $idColumn === '') {
+        return false;
+    }
+
+    $columns = getTableColumns($pdo, $table);
+    $statusColumn = first_existing_column($columns, ['status']);
+    $paymentStatusColumn = first_existing_column($columns, ['payment_status']);
+    $updatedAtColumn = first_existing_column($columns, ['updated_at']);
+
+    $setParts = [];
+    $params = [
+        ':id' => $requestId,
+    ];
+
+    if ($paymentStatusColumn !== null) {
+        $setParts[] = "{$paymentStatusColumn} = :payment_status";
+        $params[':payment_status'] = 'paid';
+    }
+
+    if ($statusColumn !== null) {
+        $setParts[] = "{$statusColumn} = :status_value";
+        $params[':status_value'] = 'Paid';
+    }
+
+    if ($updatedAtColumn !== null) {
+        $setParts[] = "{$updatedAtColumn} = :updated_at";
+        $params[':updated_at'] = date('Y-m-d H:i:s');
+    }
+
+    if (empty($setParts)) {
+        return false;
+    }
+
+    $sql = "
+        UPDATE {$table}
+        SET " . implode(', ', $setParts) . "
+        WHERE {$idColumn} = :id
+    ";
+
+    return safeExecute($pdo, $sql, $params);
 }
 
 $pdoInstance = (isset($pdo) && $pdo instanceof PDO) ? $pdo : null;
@@ -212,10 +465,10 @@ $primaryLabel = 'Return Home';
 $secondaryHref = 'index.php';
 $secondaryLabel = 'Go Back';
 
-$topLinks = array(
-    array('href' => 'index.php', 'label' => 'Home'),
-    array('href' => 'contact.php', 'label' => 'Contact'),
-);
+$topLinks = [
+    ['href' => 'index.php', 'label' => 'Home'],
+    ['href' => 'contact.php', 'label' => 'Contact'],
+];
 
 if ($sessionId === '') {
     $errorMessage = 'Invalid payment session.';
@@ -260,7 +513,7 @@ if ($sessionId === '') {
         |--------------------------------------------------------------------------
         */
         if ($mode === 'membership') {
-            $memberId = current_member_id_safe($pdoInstance);
+            $memberId = current_member_primary_id($pdoInstance);
             $planName = trim((string) ($metadata->plan_name ?? 'Founder Membership'));
 
             $viewState = 'pending';
@@ -276,14 +529,14 @@ if ($sessionId === '') {
             $secondaryHref = $memberId > 0 ? 'dashboard.php' : 'memberships.php';
             $secondaryLabel = $memberId > 0 ? 'Go to Dashboard' : 'Return to Memberships';
             $topLinks = $memberId > 0
-                ? array(
-                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
-                    array('href' => 'memberships.php', 'label' => 'Memberships'),
-                )
-                : array(
-                    array('href' => 'memberships.php', 'label' => 'Memberships'),
-                    array('href' => 'contact.php', 'label' => 'Contact'),
-                );
+                ? [
+                    ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+                    ['href' => 'memberships.php', 'label' => 'Memberships'],
+                ]
+                : [
+                    ['href' => 'memberships.php', 'label' => 'Memberships'],
+                    ['href' => 'contact.php', 'label' => 'Contact'],
+                ];
 
             $errorMessage = 'Membership payment was received, but final confirmation is still in progress.';
         }
@@ -298,9 +551,9 @@ if ($sessionId === '') {
                 throw new RuntimeException('Database connection is not available for payment verification.');
             }
 
-            $memberId = current_member_id_safe($pdoInstance);
+            $memberCandidateIds = current_member_candidate_ids($pdoInstance);
 
-            if ($memberId <= 0) {
+            if (empty($memberCandidateIds)) {
                 redirect_to('login.php');
             }
 
@@ -311,7 +564,7 @@ if ($sessionId === '') {
                 throw new RuntimeException('Invalid Stripe session metadata.');
             }
 
-            if ($stripeMemberId !== $memberId) {
+            if (!candidate_ids_contain($memberCandidateIds, $stripeMemberId)) {
                 throw new RuntimeException('This payment does not belong to the signed-in member.');
             }
 
@@ -324,10 +577,10 @@ if ($sessionId === '') {
                   AND member_id = :member_id
                 LIMIT 1
                 ",
-                array(
+                [
                     ':id' => $planId,
-                    ':member_id' => $memberId,
-                )
+                    ':member_id' => $stripeMemberId,
+                ]
             );
 
             if (!$plan) {
@@ -339,6 +592,23 @@ if ($sessionId === '') {
             if ($expectedAmountCents > 0 && $amountPaidCents > 0 && $amountPaidCents !== $expectedAmountCents) {
                 throw new RuntimeException('Paid amount does not match expected plan amount.');
             }
+
+            mark_custom_plan_paid($pdoInstance, $planId, $stripeMemberId);
+
+            $plan = safeFetchOne(
+                $pdoInstance,
+                "
+                SELECT *
+                FROM custom_plans
+                WHERE id = :id
+                  AND member_id = :member_id
+                LIMIT 1
+                ",
+                [
+                    ':id' => $planId,
+                    ':member_id' => $stripeMemberId,
+                ]
+            ) ?? $plan;
 
             $itemLabel = 'Plan';
             $itemName = (string) ($plan['plan_name'] ?? 'Custom Plan');
@@ -355,10 +625,10 @@ if ($sessionId === '') {
                 $primaryLabel = 'Refresh Page';
                 $secondaryHref = 'dashboard.php';
                 $secondaryLabel = 'Go to Dashboard';
-                $topLinks = array(
-                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
-                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
-                );
+                $topLinks = [
+                    ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+                    ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+                ];
                 $errorMessage = 'Payment was received, but your custom plan is still being finalized.';
             } else {
                 $viewState = 'success';
@@ -371,10 +641,10 @@ if ($sessionId === '') {
                 $primaryLabel = 'Go to Dashboard';
                 $secondaryHref = 'my-bookings.php';
                 $secondaryLabel = 'View Bookings';
-                $topLinks = array(
-                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
-                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
-                );
+                $topLinks = [
+                    ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+                    ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+                ];
             }
         }
 
@@ -388,9 +658,9 @@ if ($sessionId === '') {
                 throw new RuntimeException('Database connection is not available for payment verification.');
             }
 
-            $memberId = current_member_id_safe($pdoInstance);
+            $memberCandidateIds = current_member_candidate_ids($pdoInstance);
 
-            if ($memberId <= 0) {
+            if (empty($memberCandidateIds)) {
                 redirect_to('login.php');
             }
 
@@ -401,7 +671,7 @@ if ($sessionId === '') {
             $memberPlanSlug = trim((string) ($metadata->member_plan_slug ?? ''));
             $expectedAmount = (float) ($metadata->total_amount ?? 0);
 
-            if ($stripeMemberId <= 0 || $stripeMemberId !== $memberId) {
+            if ($stripeMemberId <= 0 || !candidate_ids_contain($memberCandidateIds, $stripeMemberId)) {
                 throw new RuntimeException('This overage payment does not belong to the signed-in member.');
             }
 
@@ -417,24 +687,21 @@ if ($sessionId === '') {
                 }
             }
 
-            $booking = safeFetchOne(
-                $pdoInstance,
-                "
-                SELECT *
-                FROM bookings
-                WHERE id = :id
-                  AND member_id = :member_id
-                LIMIT 1
-                ",
-                array(
-                    ':id' => $bookingId,
-                    ':member_id' => $memberId,
-                )
-            );
+            $booking = load_booking_row($pdoInstance, $bookingId);
 
-            if (!$booking) {
+            if (!$booking || !booking_belongs_to_candidate_ids($booking, $memberCandidateIds)) {
                 throw new RuntimeException('Matching booking was not found.');
             }
+
+            $ownerMatch = booking_owner_match($booking, $memberCandidateIds);
+
+            if ($ownerMatch === null) {
+                throw new RuntimeException('This booking does not belong to the signed-in member.');
+            }
+
+            mark_booking_paid($pdoInstance, $bookingId, $ownerMatch);
+
+            $booking = load_booking_row($pdoInstance, $bookingId) ?? $booking;
 
             unset($_SESSION['service_payment_portal']);
 
@@ -455,10 +722,10 @@ if ($sessionId === '') {
                 $primaryLabel = 'Refresh Page';
                 $secondaryHref = 'my-bookings.php';
                 $secondaryLabel = 'View Bookings';
-                $topLinks = array(
-                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
-                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
-                );
+                $topLinks = [
+                    ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+                    ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+                ];
                 $errorMessage = 'Payment was received, but your booking status is still being finalized.';
             } else {
                 $viewState = 'success';
@@ -471,10 +738,10 @@ if ($sessionId === '') {
                 $primaryLabel = 'View Bookings';
                 $secondaryHref = 'dashboard.php';
                 $secondaryLabel = 'Go to Dashboard';
-                $topLinks = array(
-                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
-                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
-                );
+                $topLinks = [
+                    ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+                    ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+                ];
             }
         }
 
@@ -512,11 +779,19 @@ if ($sessionId === '') {
                 throw new RuntimeException('Matching non-member booking record was not found.');
             }
 
+            mark_non_member_paid($pdoInstance, $requestId);
+            $record = find_non_member_payment_record($pdoInstance, $requestId) ?? $record;
+
             unset($_SESSION['non_member_payment_portal']);
 
-            $statusColumn = (string) ($record['status_column'] ?? '');
-            $row = is_array($record['row'] ?? null) ? $record['row'] : array();
-            $statusValue = $statusColumn !== '' ? (string) ($row[$statusColumn] ?? '') : '';
+            $row = is_array($record['row'] ?? null) ? $record['row'] : [];
+            $statusValue = '';
+
+            if (isset($row['payment_status'])) {
+                $statusValue = (string) $row['payment_status'];
+            } elseif (isset($row['status'])) {
+                $statusValue = strtolower(trim((string) $row['status'])) === 'paid' ? 'paid' : (string) $row['status'];
+            }
 
             $itemLabel = 'Booking';
             $itemName = service_label_from_type($serviceType);
@@ -540,10 +815,10 @@ if ($sessionId === '') {
                 $primaryLabel = 'Refresh Page';
                 $secondaryHref = 'contact.php';
                 $secondaryLabel = 'Contact Us';
-                $topLinks = array(
-                    array('href' => 'non-member-booking.php', 'label' => 'Booking'),
-                    array('href' => 'contact.php', 'label' => 'Contact'),
-                );
+                $topLinks = [
+                    ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+                    ['href' => 'contact.php', 'label' => 'Contact'],
+                ];
                 $errorMessage = 'Payment was received, but your booking request is still being finalized.';
             } else {
                 $viewState = 'success';
@@ -556,10 +831,10 @@ if ($sessionId === '') {
                 $primaryLabel = 'Book Another Service';
                 $secondaryHref = 'contact.php';
                 $secondaryLabel = 'Contact Us';
-                $topLinks = array(
-                    array('href' => 'non-member-booking.php', 'label' => 'Booking'),
-                    array('href' => 'contact.php', 'label' => 'Contact'),
-                );
+                $topLinks = [
+                    ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+                    ['href' => 'contact.php', 'label' => 'Contact'],
+                ];
             }
         }
     } catch (Throwable $e) {
@@ -570,37 +845,37 @@ if ($sessionId === '') {
             $primaryLabel = 'Member Login';
             $secondaryHref = 'customize-plan.php';
             $secondaryLabel = 'Back to Plans';
-            $topLinks = array(
-                array('href' => 'login.php', 'label' => 'Login'),
-                array('href' => 'customize-plan.php', 'label' => 'Plans'),
-            );
+            $topLinks = [
+                ['href' => 'login.php', 'label' => 'Login'],
+                ['href' => 'customize-plan.php', 'label' => 'Plans'],
+            ];
         } elseif ($mode === 'service_overage') {
             $primaryHref = 'login.php';
             $primaryLabel = 'Member Login';
             $secondaryHref = 'my-bookings.php';
             $secondaryLabel = 'View Bookings';
-            $topLinks = array(
-                array('href' => 'login.php', 'label' => 'Login'),
-                array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
-            );
+            $topLinks = [
+                ['href' => 'login.php', 'label' => 'Login'],
+                ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
+            ];
         } elseif ($mode === 'non_member') {
             $primaryHref = 'non-member-booking.php';
             $primaryLabel = 'Back to Booking';
             $secondaryHref = 'contact.php';
             $secondaryLabel = 'Contact Us';
-            $topLinks = array(
-                array('href' => 'non-member-booking.php', 'label' => 'Booking'),
-                array('href' => 'contact.php', 'label' => 'Contact'),
-            );
+            $topLinks = [
+                ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+                ['href' => 'contact.php', 'label' => 'Contact'],
+            ];
         } elseif ($mode === 'membership') {
             $primaryHref = 'memberships.php';
             $primaryLabel = 'Return to Memberships';
             $secondaryHref = 'contact.php';
             $secondaryLabel = 'Contact Us';
-            $topLinks = array(
-                array('href' => 'memberships.php', 'label' => 'Memberships'),
-                array('href' => 'contact.php', 'label' => 'Contact'),
-            );
+            $topLinks = [
+                ['href' => 'memberships.php', 'label' => 'Memberships'],
+                ['href' => 'contact.php', 'label' => 'Contact'],
+            ];
         }
     }
 }

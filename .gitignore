@@ -86,3 +86,6 @@ backups/
 backups/
 
 bulk_add_bootstrap.py
+
+# Local-only Stripe secrets
+includes/stripe-env.php
