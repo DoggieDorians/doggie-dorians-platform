@@ -3,37 +3,76 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/stripe-config.php';
 require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/includes/membership-ledger.php';
 
-if (!defined('STRIPE_SECRET_KEY') || trim((string) STRIPE_SECRET_KEY) === '') {
-    http_response_code(500);
-    exit('Stripe secret key not configured');
+function dd_webhook_fail(string $logMessage, int $statusCode = 500, string $publicMessage = 'Webhook request failed.'): never
+{
+    error_log($logMessage);
+    http_response_code($statusCode);
+    exit($publicMessage);
 }
 
-if (!defined('STRIPE_WEBHOOK_SECRET') || trim((string) STRIPE_WEBHOOK_SECRET) === '') {
-    http_response_code(500);
-    exit('Stripe webhook secret not configured');
+function dd_webhook_has_table(PDO $pdo, string $table): bool
+{
+    try {
+        $stmt = $pdo->prepare("
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = :name
+            LIMIT 1
+        ");
+        $stmt->execute([
+            ':name' => $table,
+        ]);
+
+        return (bool) $stmt->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
-if (!isset($pdo) || !($pdo instanceof PDO)) {
-    http_response_code(500);
-    exit('Database connection is not available.');
+function dd_webhook_table_columns(PDO $pdo, string $table): array
+{
+    if (!dd_webhook_has_table($pdo, $table)) {
+        return [];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $columns = [];
+
+        if ($stmt) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (isset($row['name']) && is_string($row['name'])) {
+                    $columns[] = $row['name'];
+                }
+            }
+        }
+
+        return $columns;
+    } catch (Throwable $e) {
+        return [];
+    }
 }
 
-\Stripe\Stripe::setApiKey((string) STRIPE_SECRET_KEY);
+function dd_webhook_first_existing_column(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
 
-$payload = @file_get_contents('php://input');
-$sigHeader = $_SERVER['HTTP_STRIPE_SIGNATURE'] ?? '';
-
-if ($payload === false || $payload === '') {
-    http_response_code(400);
-    exit('Missing webhook payload');
+    return null;
 }
 
-if ($sigHeader === '') {
-    http_response_code(400);
-    exit('Missing Stripe signature');
+function dd_webhook_require_rows_affected(PDOStatement $stmt, string $message): void
+{
+    if ($stmt->rowCount() < 1) {
+        throw new RuntimeException($message);
+    }
 }
 
 function dd_webhook_ensure_events_table(PDO $pdo): void
@@ -59,7 +98,7 @@ function dd_webhook_event_already_processed(PDO $pdo, string $eventId): bool
         ':event_id' => $eventId,
     ]);
 
-    return (bool)$stmt->fetchColumn();
+    return (bool) $stmt->fetchColumn();
 }
 
 function dd_webhook_mark_event_processed(PDO $pdo, string $eventId, string $eventType): void
@@ -93,6 +132,11 @@ function dd_webhook_mark_custom_plan_paid(PDO $pdo, array $metadata): void
         ':id' => $planId,
         ':member_id' => $memberId,
     ]);
+
+    dd_webhook_require_rows_affected(
+        $stmt,
+        'Custom plan payment could not be matched to a database record.'
+    );
 }
 
 function dd_webhook_mark_service_overage_paid(PDO $pdo, array $metadata): void
@@ -114,6 +158,11 @@ function dd_webhook_mark_service_overage_paid(PDO $pdo, array $metadata): void
         ':id' => $bookingId,
         ':member_id' => $memberId,
     ]);
+
+    dd_webhook_require_rows_affected(
+        $stmt,
+        'Service overage payment could not be matched to a booking record.'
+    );
 }
 
 function dd_webhook_mark_non_member_paid(PDO $pdo, array $metadata): void
@@ -124,14 +173,52 @@ function dd_webhook_mark_non_member_paid(PDO $pdo, array $metadata): void
         throw new RuntimeException('Invalid non-member webhook metadata.');
     }
 
-    $stmt = $pdo->prepare("
-        UPDATE non_member_bookings
-        SET status = 'Paid'
-        WHERE id = :id
-    ");
-    $stmt->execute([
-        ':id' => $requestId,
-    ]);
+    $tableConfigs = [
+        [
+            'table' => 'non_member_bookings',
+            'id_candidates' => ['id'],
+            'status_candidates' => ['status', 'payment_status'],
+        ],
+        [
+            'table' => 'public_booking_requests',
+            'id_candidates' => ['id', 'request_id'],
+            'status_candidates' => ['status', 'payment_status'],
+        ],
+    ];
+
+    foreach ($tableConfigs as $config) {
+        $table = $config['table'];
+        $columns = dd_webhook_table_columns($pdo, $table);
+
+        if (empty($columns)) {
+            continue;
+        }
+
+        $idColumn = dd_webhook_first_existing_column($columns, $config['id_candidates']);
+        $statusColumn = dd_webhook_first_existing_column($columns, $config['status_candidates']);
+
+        if ($idColumn === null || $statusColumn === null) {
+            continue;
+        }
+
+        $paidValue = $statusColumn === 'payment_status' ? 'paid' : 'Paid';
+
+        $stmt = $pdo->prepare("
+            UPDATE {$table}
+            SET {$statusColumn} = :paid_value
+            WHERE {$idColumn} = :id
+        ");
+        $stmt->execute([
+            ':paid_value' => $paidValue,
+            ':id' => $requestId,
+        ]);
+
+        if ($stmt->rowCount() > 0) {
+            return;
+        }
+    }
+
+    throw new RuntimeException('Non-member payment could not be matched to a booking record.');
 }
 
 function dd_webhook_handle_success(PDO $pdo, array $session): string
@@ -175,32 +262,56 @@ function dd_webhook_handle_success(PDO $pdo, array $session): string
     }
 }
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    dd_webhook_fail('Stripe webhook database connection is not available.', 500, 'Server configuration error.');
+}
+
+$stripeSecretKey = trim((string) dd_stripe_secret_key());
+$webhookSecret = trim((string) dd_stripe_webhook_secret());
+
+if ($stripeSecretKey === '') {
+    dd_webhook_fail('Stripe webhook secret key missing from stripe-config.', 500, 'Server configuration error.');
+}
+
+if ($webhookSecret === '') {
+    dd_webhook_fail('Stripe webhook signing secret missing from stripe-config.', 500, 'Server configuration error.');
+}
+
+\Stripe\Stripe::setApiKey($stripeSecretKey);
+
+$payload = file_get_contents('php://input');
+$sigHeader = trim((string) ($_SERVER['HTTP_STRIPE_SIGNATURE'] ?? ''));
+
+if (!is_string($payload) || $payload === '') {
+    http_response_code(400);
+    exit('Missing webhook payload');
+}
+
+if ($sigHeader === '') {
+    http_response_code(400);
+    exit('Missing Stripe signature');
+}
+
 try {
     $event = \Stripe\Webhook::constructEvent(
         $payload,
         $sigHeader,
-        (string) STRIPE_WEBHOOK_SECRET
+        $webhookSecret
     );
 } catch (\UnexpectedValueException $e) {
-    error_log('Stripe webhook invalid payload: ' . $e->getMessage());
-    http_response_code(400);
-    exit('Invalid payload');
+    dd_webhook_fail('Stripe webhook invalid payload: ' . $e->getMessage(), 400, 'Invalid payload');
 } catch (\Stripe\Exception\SignatureVerificationException $e) {
-    error_log('Stripe webhook invalid signature: ' . $e->getMessage());
-    http_response_code(400);
-    exit('Invalid signature');
+    dd_webhook_fail('Stripe webhook invalid signature: ' . $e->getMessage(), 400, 'Invalid signature');
 }
 
 try {
     dd_webhook_ensure_events_table($pdo);
 } catch (Throwable $e) {
-    error_log('Stripe webhook event table error: ' . $e->getMessage());
-    http_response_code(500);
-    exit('Webhook event storage failed');
+    dd_webhook_fail('Stripe webhook event table error: ' . $e->getMessage(), 500, 'Webhook event storage failed');
 }
 
-$eventId = (string)($event->id ?? '');
-$eventType = (string)($event->type ?? '');
+$eventId = (string) ($event->id ?? '');
+$eventType = (string) ($event->type ?? '');
 
 if ($eventId !== '' && dd_webhook_event_already_processed($pdo, $eventId)) {
     http_response_code(200);
@@ -222,15 +333,37 @@ try {
                 $eventType === 'checkout.session.completed'
                 && (($session['payment_status'] ?? '') !== 'paid')
             ) {
-                dd_webhook_mark_event_processed($pdo, $eventId, $eventType);
+                if ($eventId !== '') {
+                    dd_webhook_mark_event_processed($pdo, $eventId, $eventType);
+                }
+
                 http_response_code(200);
                 exit('Checkout completed but not paid');
             }
 
-            $message = dd_webhook_handle_success($pdo, $session);
+            $startedTransaction = false;
 
-            if ($eventId !== '') {
-                dd_webhook_mark_event_processed($pdo, $eventId, $eventType);
+            try {
+                if (!$pdo->inTransaction()) {
+                    $pdo->beginTransaction();
+                    $startedTransaction = true;
+                }
+
+                $message = dd_webhook_handle_success($pdo, $session);
+
+                if ($eventId !== '') {
+                    dd_webhook_mark_event_processed($pdo, $eventId, $eventType);
+                }
+
+                if ($startedTransaction && $pdo->inTransaction()) {
+                    $pdo->commit();
+                }
+            } catch (Throwable $e) {
+                if ($startedTransaction && $pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+
+                throw $e;
             }
 
             http_response_code(200);
@@ -240,6 +373,7 @@ try {
             if ($eventId !== '') {
                 dd_webhook_mark_event_processed($pdo, $eventId, $eventType);
             }
+
             http_response_code(200);
             exit('Async payment failed event noted');
 
@@ -247,11 +381,10 @@ try {
             if ($eventId !== '') {
                 dd_webhook_mark_event_processed($pdo, $eventId, $eventType);
             }
+
             http_response_code(200);
             exit('Event ignored');
     }
 } catch (Throwable $e) {
-    error_log('Stripe webhook handler error: ' . $e->getMessage());
-    http_response_code(500);
-    exit('Webhook handler failed');
+    dd_webhook_fail('Stripe webhook handler error: ' . $e->getMessage(), 500, 'Webhook handler failed');
 }

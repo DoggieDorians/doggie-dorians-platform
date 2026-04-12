@@ -2,8 +2,8 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/stripe-config.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
 function h(mixed $value): string
@@ -118,11 +118,19 @@ function safeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
 
 function getBaseUrl(): string
 {
+    if (function_exists('dd_stripe_public_base_url')) {
+        $baseUrl = trim((string) dd_stripe_public_base_url());
+        if ($baseUrl !== '') {
+            return rtrim($baseUrl, '/');
+        }
+    }
+
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || ((string)($_SERVER['SERVER_PORT'] ?? '') === '443');
+        || ((string) ($_SERVER['SERVER_PORT'] ?? '') === '443')
+        || (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
 
     $scheme = $https ? 'https' : 'http';
-    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
 
     return $scheme . '://' . $host;
 }
@@ -138,6 +146,27 @@ function currentMemberIdFromSession(): int
     return 0;
 }
 
+function membershipCsrfToken(): string
+{
+    $token = (string) ($_SESSION['membership_csrf_token'] ?? '');
+
+    if ($token === '') {
+        $token = bin2hex(random_bytes(32));
+        $_SESSION['membership_csrf_token'] = $token;
+    }
+
+    return $token;
+}
+
+function membershipPriceId(string $key): string
+{
+    if (function_exists('dd_env')) {
+        return trim((string) (dd_env($key, '') ?? ''));
+    }
+
+    return '';
+}
+
 function founderPlanCatalog(): array
 {
     return array(
@@ -147,7 +176,7 @@ function founderPlanCatalog(): array
             'price' => 250,
             'value' => 300,
             'tag' => 'Founding Walk Access',
-            'stripe_price_id' => 'YOUR_STRIPE_PRICE_ID_WALK',
+            'stripe_price_id' => membershipPriceId('STRIPE_PRICE_ID_FOUNDER_WALK'),
             'summary' => 'Built for clients who mainly want recurring walks, premium booking access, and a cleaner high-touch membership experience.',
             'features' => array(
                 '12 included 30-minute walks each month',
@@ -165,7 +194,7 @@ function founderPlanCatalog(): array
             'price' => 499,
             'value' => 650,
             'tag' => 'Most Popular',
-            'stripe_price_id' => 'YOUR_STRIPE_PRICE_ID_CARE',
+            'stripe_price_id' => membershipPriceId('STRIPE_PRICE_ID_FOUNDER_CARE'),
             'summary' => 'For clients who want stronger recurring support across walks, daycare, and drop-ins with founder-level priority.',
             'features' => array(
                 '16 included 30-minute walks each month',
@@ -183,7 +212,7 @@ function founderPlanCatalog(): array
             'price' => 899,
             'value' => 1100,
             'tag' => 'Highest Tier',
-            'stripe_price_id' => 'YOUR_STRIPE_PRICE_ID_ELITE',
+            'stripe_price_id' => membershipPriceId('STRIPE_PRICE_ID_FOUNDER_ELITE'),
             'summary' => 'Your most exclusive founder package for premium recurring care, elevated flexibility, and top-tier access.',
             'features' => array(
                 '20 included 30-minute walks each month',
@@ -467,20 +496,6 @@ function lookupMembershipPlanId(PDO $pdo, string $slug, string $name): int
     return 0;
 }
 
-function getStripeSecretKey(): string
-{
-    if (defined('STRIPE_SECRET_KEY') && is_string(STRIPE_SECRET_KEY) && STRIPE_SECRET_KEY !== '') {
-        return STRIPE_SECRET_KEY;
-    }
-
-    $env = getenv('STRIPE_SECRET_KEY');
-    if (is_string($env) && $env !== '') {
-        return $env;
-    }
-
-    return 'YOUR_STRIPE_SECRET_KEY';
-}
-
 $isLoggedIn = isset($_SESSION['member_id']) || isset($_SESSION['user_id']) || isset($_SESSION['user']) || isset($_SESSION['email']);
 
 if (!$isLoggedIn) {
@@ -510,102 +525,128 @@ $plans = array_values($plansBySlug);
 
 $error = '';
 $success = '';
-$selectedPlanSlug = trim((string)($_GET['plan'] ?? ''));
+$selectedPlanSlug = trim((string) ($_GET['plan'] ?? ''));
 $checkoutReady = false;
 $checkoutPayload = $_SESSION['pending_membership_checkout'] ?? null;
+$csrfToken = membershipCsrfToken();
 
 ensureFounderMembershipPlans($pdo);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $selectedPlanSlug = trim((string)($_POST['plan'] ?? ''));
-    $tosAccepted = isset($_POST['agree_tos']) && (string)$_POST['agree_tos'] === '1';
+    $postedToken = (string) ($_POST['membership_csrf_token'] ?? '');
 
-    if (!isset($plansBySlug[$selectedPlanSlug])) {
-        $error = 'Please choose a membership before continuing.';
-    } elseif (!$tosAccepted) {
-        $error = 'You must agree to the Membership Terms of Service before continuing.';
-    } elseif ($currentMemberId <= 0) {
-        $error = 'Your account session is missing a member ID. Please log out and sign back in.';
-    } elseif (!ensureFounderMembershipPlans($pdo)) {
-        $error = 'Founder membership plans could not be prepared in the database.';
+    if ($postedToken === '' || !hash_equals($csrfToken, $postedToken)) {
+        $error = 'Your session expired. Please refresh the page and try again.';
     } else {
-        $plan = $plansBySlug[$selectedPlanSlug];
-        $planId = lookupMembershipPlanId($pdo, $plan['slug'], $plan['name']);
+        $selectedPlanSlug = trim((string) ($_POST['plan'] ?? ''));
+        $tosAccepted = isset($_POST['agree_tos']) && (string) $_POST['agree_tos'] === '1';
 
-        if ($planId <= 0) {
-            $error = 'The selected membership plan could not be matched to the database.';
+        if (!isset($plansBySlug[$selectedPlanSlug])) {
+            $error = 'Please choose a membership before continuing.';
+        } elseif (!$tosAccepted) {
+            $error = 'You must agree to the Membership Terms of Service before continuing.';
+        } elseif ($currentMemberId <= 0) {
+            $error = 'Your account session is missing a member ID. Please log out and sign back in.';
+        } elseif (!ensureFounderMembershipPlans($pdo)) {
+            $error = 'Founder membership plans could not be prepared in the database.';
         } else {
-            $_SESSION['pending_membership_checkout'] = array(
-                'type' => 'membership',
-                'plan_id' => $planId,
-                'plan_slug' => $plan['slug'],
-                'plan_name' => $plan['name'],
-                'monthly_price' => (int)$plan['price'],
-                'stripe_price_id' => (string)$plan['stripe_price_id'],
-                'member_id' => $currentMemberId,
-                'tos_version' => $tosVersion,
-                'tos_accepted' => true,
-                'tos_accepted_at' => date('c'),
-                'started_from' => 'memberships.php',
-            );
+            $plan = $plansBySlug[$selectedPlanSlug];
+            $planId = lookupMembershipPlanId($pdo, $plan['slug'], $plan['name']);
 
-            $checkoutPayload = $_SESSION['pending_membership_checkout'];
-            $checkoutReady = true;
-
-            $stripeSecretKey = getStripeSecretKey();
-            $stripePriceId = (string)$plan['stripe_price_id'];
-
-            if (
-                $stripeSecretKey === '' ||
-                $stripeSecretKey === 'YOUR_STRIPE_SECRET_KEY' ||
-                $stripePriceId === '' ||
-                strpos($stripePriceId, 'YOUR_STRIPE_PRICE_ID_') === 0
-            ) {
-                $success = 'Membership selected and Terms accepted. This account is now ready for Stripe checkout wiring in the next step.';
+            if ($planId <= 0) {
+                $error = 'The selected membership plan could not be matched to the database.';
             } else {
-                try {
-                    \Stripe\Stripe::setApiKey($stripeSecretKey);
+                $_SESSION['pending_membership_checkout'] = array(
+                    'type' => 'membership',
+                    'plan_id' => $planId,
+                    'plan_slug' => $plan['slug'],
+                    'plan_name' => $plan['name'],
+                    'monthly_price' => (int) $plan['price'],
+                    'stripe_price_id' => (string) $plan['stripe_price_id'],
+                    'member_id' => $currentMemberId,
+                    'tos_version' => $tosVersion,
+                    'tos_accepted' => true,
+                    'tos_accepted_at' => date('c'),
+                    'started_from' => 'memberships.php',
+                );
 
-                    $baseUrl = getBaseUrl();
+                $checkoutPayload = $_SESSION['pending_membership_checkout'];
+                $checkoutReady = true;
 
-                    $checkoutSession = \Stripe\Checkout\Session::create(array(
-                        'mode' => 'subscription',
-                        'payment_method_types' => array('card'),
-                        'line_items' => array(array(
-                            'price' => $stripePriceId,
-                            'quantity' => 1,
-                        )),
-                        'success_url' => $baseUrl . '/dashboard.php?membership_checkout=success',
-                        'cancel_url' => $baseUrl . '/memberships.php?plan=' . rawurlencode($plan['slug']) . '&membership_checkout=cancelled#selection',
-                        'metadata' => array(
+                $stripeSecretKey = trim((string) dd_stripe_secret_key());
+                $stripePriceId = trim((string) $plan['stripe_price_id']);
+
+                if ($stripeSecretKey === '') {
+                    $error = 'Membership checkout is temporarily unavailable. Please try again shortly.';
+                } elseif ($stripePriceId === '') {
+                    $error = 'This membership is not yet available for checkout. Please contact support for assistance.';
+                } else {
+                    try {
+                        \Stripe\Stripe::setApiKey($stripeSecretKey);
+
+                        $baseUrl = getBaseUrl();
+                        $memberEmail = !empty($_SESSION['email']) && is_string($_SESSION['email'])
+                            ? trim((string) $_SESSION['email'])
+                            : '';
+
+                        $metadata = array(
                             'ledger_action' => 'membership_signup',
-                            'member_id' => (string)$currentMemberId,
-                            'plan_id' => (string)$planId,
+                            'member_id' => (string) $currentMemberId,
+                            'plan_id' => (string) $planId,
                             'plan_slug' => $plan['slug'],
                             'plan_name' => $plan['name'],
                             'tos_version' => $tosVersion,
-                        ),
-                        'customer_email' => !empty($_SESSION['email']) && is_string($_SESSION['email']) ? (string)$_SESSION['email'] : null,
-                        'allow_promotion_codes' => false,
-                    ));
+                        );
 
-                    if (!empty($checkoutSession->url) && is_string($checkoutSession->url)) {
-                        redirectTo($checkoutSession->url);
+                        $checkoutParams = array(
+                            'mode' => 'subscription',
+                            'line_items' => array(
+                                array(
+                                    'price' => $stripePriceId,
+                                    'quantity' => 1,
+                                ),
+                            ),
+                            'success_url' => $baseUrl . '/dashboard.php?membership_checkout=success',
+                            'cancel_url' => $baseUrl . '/memberships.php?plan=' . rawurlencode($plan['slug']) . '&membership_checkout=cancelled#selection',
+                            'metadata' => $metadata,
+                            'subscription_data' => array(
+                                'metadata' => $metadata,
+                            ),
+                            'client_reference_id' => (string) $currentMemberId,
+                            'allow_promotion_codes' => false,
+                        );
+
+                        if ($memberEmail !== '') {
+                            $checkoutParams['customer_email'] = $memberEmail;
+                        }
+
+                        $checkoutSession = \Stripe\Checkout\Session::create($checkoutParams);
+
+                        if (!empty($checkoutSession->url) && is_string($checkoutSession->url)) {
+                            redirectTo($checkoutSession->url);
+                        }
+
+                        $error = 'Secure checkout could not be started right now. Please try again.';
+                    } catch (Throwable $e) {
+                        error_log('Membership Stripe checkout error: ' . $e->getMessage());
+                        $error = 'Secure checkout could not be started right now. Please try again.';
+                    } catch (Exception $e) {
+                        error_log('Membership Stripe checkout error: ' . $e->getMessage());
+                        $error = 'Secure checkout could not be started right now. Please try again.';
                     }
-
-                    $success = 'Membership selected and Terms accepted. Checkout session was prepared, but Stripe did not return a redirect URL.';
-                } catch (Throwable $e) {
-                    $error = 'Stripe checkout could not be started: ' . $e->getMessage();
-                } catch (Exception $e) {
-                    $error = 'Stripe checkout could not be started: ' . $e->getMessage();
                 }
             }
         }
     }
 }
 
-if (!$checkoutReady && is_array($checkoutPayload) && !empty($checkoutPayload['plan_slug']) && isset($plansBySlug[$checkoutPayload['plan_slug']])) {
-    $selectedPlanSlug = (string)$checkoutPayload['plan_slug'];
+if (
+    !$checkoutReady
+    && is_array($checkoutPayload)
+    && !empty($checkoutPayload['plan_slug'])
+    && isset($plansBySlug[$checkoutPayload['plan_slug']])
+) {
+    $selectedPlanSlug = (string) $checkoutPayload['plan_slug'];
     $checkoutReady = true;
 }
 
@@ -1204,11 +1245,11 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
                             </div>
 
                             <div class="plan-price">
-                                <strong>$<?php echo number_format((int)$plan['price']); ?></strong>
+                                <strong>$<?php echo number_format((int) $plan['price']); ?></strong>
                                 <span>/ month</span>
                             </div>
 
-                            <div class="value-note">Estimated membership value: $<?php echo number_format((int)$plan['value']); ?>+</div>
+                            <div class="value-note">Estimated membership value: $<?php echo number_format((int) $plan['value']); ?>+</div>
 
                             <ul class="feature-list">
                                 <?php foreach ($plan['features'] as $feature): ?>
@@ -1226,7 +1267,7 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
 
             <section class="selection-panel" id="selection">
                 <div class="card selection-summary">
-                    <div class="eyebrow">Membership Checkout Prep</div>
+                    <div class="eyebrow">Membership Checkout</div>
                     <h2><?php echo $selectedPlan ? 'Confirm Your Selection' : 'Select Your Membership'; ?></h2>
                     <p class="sub">
                         Confirm your membership selection and prepare for a seamless, secure checkout experience.
@@ -1242,7 +1283,7 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
                                 </div>
                                 <div class="summary-row">
                                     <span>Recurring price</span>
-                                    <strong>$<?php echo number_format((int)$selectedPlan['price']); ?>/month</strong>
+                                    <strong>$<?php echo number_format((int) $selectedPlan['price']); ?>/month</strong>
                                 </div>
                                 <div class="summary-row">
                                     <span>Terms version</span>
@@ -1250,7 +1291,7 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
                                 </div>
                                 <div class="summary-row">
                                     <span>Status</span>
-                                    <strong><?php echo $checkoutReady ? 'Ready for checkout integration' : 'Waiting for terms acceptance'; ?></strong>
+                                    <strong><?php echo $checkoutReady ? 'Ready for secure checkout' : 'Waiting for terms acceptance'; ?></strong>
                                 </div>
                             </div>
 
@@ -1268,17 +1309,17 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
 
                     <?php if ($checkoutReady && is_array($checkoutPayload) && $selectedPlan): ?>
                         <div class="ready-box">
-                            <h3>Membership Ready for Activation</h3>
+                            <h3>Selection Saved</h3>
                             <p class="sub">
-                                Your membership selection has been secured and is ready for final activation through checkout.
+                                Your membership selection and terms acceptance have been saved to your secure checkout session.
                             </p>
 
                             <div class="ready-meta">
-                                <div><strong>Plan:</strong> <?php echo h((string)$checkoutPayload['plan_name']); ?></div>
-                                <div><strong>Plan ID:</strong> <?php echo h((string)$checkoutPayload['plan_id']); ?></div>
+                                <div><strong>Plan:</strong> <?php echo h((string) $checkoutPayload['plan_name']); ?></div>
+                                <div><strong>Plan ID:</strong> <?php echo h((string) $checkoutPayload['plan_id']); ?></div>
                                 <div><strong>TOS Accepted:</strong> Yes</div>
-                                <div><strong>TOS Version:</strong> <?php echo h((string)$checkoutPayload['tos_version']); ?></div>
-                                <div><strong>Accepted At:</strong> <?php echo h((string)$checkoutPayload['tos_accepted_at']); ?></div>
+                                <div><strong>TOS Version:</strong> <?php echo h((string) $checkoutPayload['tos_version']); ?></div>
+                                <div><strong>Accepted At:</strong> <?php echo h((string) $checkoutPayload['tos_accepted_at']); ?></div>
                             </div>
 
                             <div style="margin-top:18px;">
@@ -1296,6 +1337,7 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
                     </p>
 
                     <form method="post" action="memberships.php<?php echo $selectedPlan ? '?plan=' . rawurlencode($selectedPlan['slug']) : ''; ?>#selection" class="stack" style="margin-top: 18px;">
+                        <input type="hidden" name="membership_csrf_token" value="<?php echo h($csrfToken); ?>">
                         <input type="hidden" name="plan" value="<?php echo h($selectedPlan['slug'] ?? ''); ?>">
 
                         <div class="tos-box">

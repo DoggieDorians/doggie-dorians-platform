@@ -17,16 +17,26 @@ function money_fmt(float $amount): string
     return '$' . number_format($amount, 2);
 }
 
-function redirect_to(string $url): void
+function redirect_to(string $url): never
 {
     header('Location: ' . $url);
     exit;
 }
 
-function current_member_id(PDO $pdo): int
+function current_member_id_safe(?PDO $pdo): int
 {
-    $member = currentMember($pdo);
-    return (int)($member['id'] ?? 0);
+    if (!$pdo instanceof PDO || !function_exists('currentMember')) {
+        return 0;
+    }
+
+    try {
+        $member = currentMember($pdo);
+        return (int) ($member['id'] ?? 0);
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
 }
 
 function normalize_mode(string $value): string
@@ -37,6 +47,7 @@ function normalize_mode(string $value): string
         'custom_plan' => 'custom_plan',
         'service_overage' => 'service_overage',
         'non_member' => 'non_member',
+        'membership' => 'membership',
         default => '',
     };
 }
@@ -55,263 +66,542 @@ function service_label_from_type(string $serviceType): string
     };
 }
 
-$sessionId = trim((string) ($_GET['session_id'] ?? ''));
-
-if ($sessionId === '') {
-    http_response_code(400);
-    exit('Invalid payment session.');
+function payment_status_is_paid(string $value): bool
+{
+    return strtolower(trim($value)) === 'paid';
 }
 
+function getTableColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $columns = array();
+
+        if ($stmt) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (isset($row['name'])) {
+                    $columns[] = (string) $row['name'];
+                }
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    } catch (Exception $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function first_existing_column(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function safeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    } catch (Exception $e) {
+        return null;
+    }
+}
+
+function find_non_member_payment_record(PDO $pdo, int $requestId): ?array
+{
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    $tables = array(
+        array(
+            'table' => 'non_member_bookings',
+            'id_candidates' => array('id'),
+            'status_candidates' => array('payment_status', 'status'),
+        ),
+        array(
+            'table' => 'public_booking_requests',
+            'id_candidates' => array('id', 'request_id'),
+            'status_candidates' => array('payment_status', 'status'),
+        ),
+    );
+
+    foreach ($tables as $config) {
+        $table = (string) $config['table'];
+        $columns = getTableColumns($pdo, $table);
+
+        if (empty($columns)) {
+            continue;
+        }
+
+        $idColumn = first_existing_column($columns, $config['id_candidates']);
+        $statusColumn = first_existing_column($columns, $config['status_candidates']);
+
+        if ($idColumn === null || $statusColumn === null) {
+            continue;
+        }
+
+        $row = safeFetchOne(
+            $pdo,
+            "SELECT * FROM {$table} WHERE {$idColumn} = :id LIMIT 1",
+            array(':id' => $requestId)
+        );
+
+        if ($row !== null) {
+            return array(
+                'table' => $table,
+                'status_column' => $statusColumn,
+                'row' => $row,
+            );
+        }
+    }
+
+    return null;
+}
+
+function current_request_uri(): string
+{
+    $uri = trim((string) ($_SERVER['REQUEST_URI'] ?? 'payment-success.php'));
+    return $uri !== '' ? $uri : 'payment-success.php';
+}
+
+$pdoInstance = (isset($pdo) && $pdo instanceof PDO) ? $pdo : null;
+$sessionId = trim((string) ($_GET['session_id'] ?? ''));
 $stripeKey = trim((string) dd_stripe_secret_key());
 
-if ($stripeKey === '') {
-    error_log('Stripe key missing in payment-success.php');
-    http_response_code(500);
-    exit('Payment system configuration error.');
-}
+$viewState = 'error';
+$statusBadgeClass = 'error';
+$statusBadgeLabel = 'Verification Issue';
 
-$verifiedPaid = false;
-$errorMessage = '';
-$mode = normalize_mode((string)($_GET['mode'] ?? ''));
+$errorMessage = 'We could not verify this payment yet. Please contact support if this persists.';
+$mode = normalize_mode((string) ($_GET['mode'] ?? ''));
+
 $pageTitle = 'Payment Verification';
 $headline = 'We couldn’t confirm this payment yet';
 $bodyText = 'There was a problem verifying the Stripe session for this payment.';
+
 $amountPaid = 0.00;
 $itemLabel = 'Purchase';
 $itemName = 'Payment';
+
 $primaryHref = 'index.php';
 $primaryLabel = 'Return Home';
 $secondaryHref = 'index.php';
 $secondaryLabel = 'Go Back';
-$topLinks = [
-    ['href' => 'index.php', 'label' => 'Home'],
-    ['href' => 'contact.php', 'label' => 'Contact'],
-];
 
-try {
-    \Stripe\Stripe::setApiKey($stripeKey);
+$topLinks = array(
+    array('href' => 'index.php', 'label' => 'Home'),
+    array('href' => 'contact.php', 'label' => 'Contact'),
+);
 
-    $session = \Stripe\Checkout\Session::retrieve($sessionId);
+if ($sessionId === '') {
+    $errorMessage = 'Invalid payment session.';
+} elseif ($stripeKey === '') {
+    error_log('Stripe key missing in payment-success.php');
+    $errorMessage = 'Payment system configuration error.';
+} else {
+    try {
+        \Stripe\Stripe::setApiKey($stripeKey);
 
-    if (!$session) {
-        throw new RuntimeException('Stripe session not found.');
-    }
+        $session = \Stripe\Checkout\Session::retrieve($sessionId);
 
-    $paymentStatus = (string) ($session->payment_status ?? '');
-    $amountPaidCents = (int) ($session->amount_total ?? 0);
-    $metadata = $session->metadata ?? new stdClass();
-
-    if ($mode === '') {
-        $mode = normalize_mode((string)($metadata->mode ?? ''));
-    }
-
-    if ($mode === '') {
-        throw new RuntimeException('Invalid Stripe session mode.');
-    }
-
-    if ($paymentStatus !== 'paid') {
-        throw new RuntimeException('Stripe has not marked this payment as paid.');
-    }
-
-    $amountPaid = $amountPaidCents > 0 ? ($amountPaidCents / 100) : 0.00;
-
-    /*
-    |--------------------------------------------------------------------------
-    | Custom Plan Success
-    |--------------------------------------------------------------------------
-    */
-    if ($mode === 'custom_plan') {
-        $memberId = current_member_id($pdo);
-
-        if ($memberId <= 0) {
-            redirect_to('login.php');
+        if (!$session) {
+            throw new RuntimeException('Stripe session not found.');
         }
 
-        $planId = (int) ($metadata->custom_plan_id ?? 0);
-        $stripeMemberId = (int) ($metadata->member_id ?? 0);
+        $paymentStatus = (string) ($session->payment_status ?? '');
+        $amountPaidCents = (int) ($session->amount_total ?? 0);
+        $metadata = $session->metadata ?? new stdClass();
 
-        if ($planId <= 0 || $stripeMemberId <= 0) {
-            throw new RuntimeException('Invalid Stripe session metadata.');
+        if ($mode === '') {
+            $mode = normalize_mode((string) ($metadata->mode ?? ''));
         }
 
-        if ($stripeMemberId !== $memberId) {
-            throw new RuntimeException('This payment does not belong to the signed-in member.');
+        if ($mode === '' && (($metadata->ledger_action ?? '') === 'membership_signup')) {
+            $mode = 'membership';
         }
 
-        $stmt = $pdo->prepare("
-            SELECT *
-            FROM custom_plans
-            WHERE id = :id
-              AND member_id = :member_id
-            LIMIT 1
-        ");
-        $stmt->execute([
-            ':id' => $planId,
-            ':member_id' => $memberId,
-        ]);
-
-        $plan = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$plan) {
-            throw new RuntimeException('Matching custom plan was not found.');
+        if ($mode === '') {
+            throw new RuntimeException('Invalid Stripe session mode.');
         }
 
-        $expectedAmountCents = (int) round((float) ($plan['monthly_total'] ?? 0) * 100);
-
-        if ($expectedAmountCents > 0 && $amountPaidCents > 0 && $amountPaidCents !== $expectedAmountCents) {
-            throw new RuntimeException('Paid amount does not match expected plan amount.');
+        if ($paymentStatus !== 'paid') {
+            throw new RuntimeException('Stripe has not marked this payment as paid.');
         }
 
-        $verifiedPaid = true;
-        $pageTitle = 'Payment Successful';
-        $headline = 'Payment Successful';
-        $bodyText = 'Your custom plan has been verified with Stripe and activated successfully.';
-        $itemLabel = 'Plan';
-        $itemName = (string) ($plan['plan_name'] ?? 'Custom Plan');
-        $amountPaid = (float) ($plan['monthly_total'] ?? $amountPaid);
-        $primaryHref = 'dashboard.php';
-        $primaryLabel = 'Go to Dashboard';
-        $secondaryHref = 'my-bookings.php';
-        $secondaryLabel = 'View Bookings';
-        $topLinks = [
-            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
-            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
-        ];
-    }
+        $amountPaid = $amountPaidCents > 0 ? ($amountPaidCents / 100) : 0.00;
 
-    /*
-    |--------------------------------------------------------------------------
-    | Member Service Overage Success
-    |--------------------------------------------------------------------------
-    */
-    if ($mode === 'service_overage') {
-        $memberId = current_member_id($pdo);
+        /*
+        |--------------------------------------------------------------------------
+        | Membership Success Fallback
+        |--------------------------------------------------------------------------
+        */
+        if ($mode === 'membership') {
+            $memberId = current_member_id_safe($pdoInstance);
+            $planName = trim((string) ($metadata->plan_name ?? 'Founder Membership'));
 
-        if ($memberId <= 0) {
-            redirect_to('login.php');
+            $viewState = 'pending';
+            $statusBadgeClass = 'pending';
+            $statusBadgeLabel = 'Payment Received';
+            $pageTitle = 'Membership Payment Received';
+            $headline = 'Your membership payment was received';
+            $bodyText = 'Stripe received your membership payment. Your account is being finalized and your membership should appear shortly.';
+            $itemLabel = 'Membership';
+            $itemName = $planName !== '' ? $planName : 'Founder Membership';
+            $primaryHref = current_request_uri();
+            $primaryLabel = 'Refresh Page';
+            $secondaryHref = $memberId > 0 ? 'dashboard.php' : 'memberships.php';
+            $secondaryLabel = $memberId > 0 ? 'Go to Dashboard' : 'Return to Memberships';
+            $topLinks = $memberId > 0
+                ? array(
+                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
+                    array('href' => 'memberships.php', 'label' => 'Memberships'),
+                )
+                : array(
+                    array('href' => 'memberships.php', 'label' => 'Memberships'),
+                    array('href' => 'contact.php', 'label' => 'Contact'),
+                );
+
+            $errorMessage = 'Membership payment was received, but final confirmation is still in progress.';
         }
 
-        $stripeMemberId = (int) ($metadata->member_id ?? 0);
-        $bookingId = (int) ($metadata->booking_id ?? 0);
-        $serviceType = (string) ($metadata->service_type ?? '');
-        $overageUnits = (int) ($metadata->overage_units ?? 0);
-        $memberPlanSlug = trim((string) ($metadata->member_plan_slug ?? ''));
-        $expectedAmount = (float) ($metadata->total_amount ?? 0);
+        /*
+        |--------------------------------------------------------------------------
+        | Custom Plan Success
+        |--------------------------------------------------------------------------
+        */
+        if ($mode === 'custom_plan') {
+            if (!$pdoInstance instanceof PDO) {
+                throw new RuntimeException('Database connection is not available for payment verification.');
+            }
 
-        if ($stripeMemberId <= 0 || $stripeMemberId !== $memberId) {
-            throw new RuntimeException('This overage payment does not belong to the signed-in member.');
-        }
+            $memberId = current_member_id_safe($pdoInstance);
 
-        if ($expectedAmount > 0) {
-            $expectedAmountCents = (int) round($expectedAmount * 100);
+            if ($memberId <= 0) {
+                redirect_to('login.php');
+            }
 
-            if ($amountPaidCents > 0 && $expectedAmountCents !== $amountPaidCents) {
-                throw new RuntimeException('Paid amount does not match expected overage total.');
+            $planId = (int) ($metadata->custom_plan_id ?? 0);
+            $stripeMemberId = (int) ($metadata->member_id ?? 0);
+
+            if ($planId <= 0 || $stripeMemberId <= 0) {
+                throw new RuntimeException('Invalid Stripe session metadata.');
+            }
+
+            if ($stripeMemberId !== $memberId) {
+                throw new RuntimeException('This payment does not belong to the signed-in member.');
+            }
+
+            $plan = safeFetchOne(
+                $pdoInstance,
+                "
+                SELECT *
+                FROM custom_plans
+                WHERE id = :id
+                  AND member_id = :member_id
+                LIMIT 1
+                ",
+                array(
+                    ':id' => $planId,
+                    ':member_id' => $memberId,
+                )
+            );
+
+            if (!$plan) {
+                throw new RuntimeException('Matching custom plan was not found.');
+            }
+
+            $expectedAmountCents = (int) round((float) ($plan['monthly_total'] ?? 0) * 100);
+
+            if ($expectedAmountCents > 0 && $amountPaidCents > 0 && $amountPaidCents !== $expectedAmountCents) {
+                throw new RuntimeException('Paid amount does not match expected plan amount.');
+            }
+
+            $itemLabel = 'Plan';
+            $itemName = (string) ($plan['plan_name'] ?? 'Custom Plan');
+            $amountPaid = (float) ($plan['monthly_total'] ?? $amountPaid);
+
+            if (!payment_status_is_paid((string) ($plan['payment_status'] ?? ''))) {
+                $viewState = 'pending';
+                $statusBadgeClass = 'pending';
+                $statusBadgeLabel = 'Payment Received';
+                $pageTitle = 'Payment Received';
+                $headline = 'We’re finalizing your custom plan';
+                $bodyText = 'Stripe received your payment, but your plan is still being activated in your account.';
+                $primaryHref = current_request_uri();
+                $primaryLabel = 'Refresh Page';
+                $secondaryHref = 'dashboard.php';
+                $secondaryLabel = 'Go to Dashboard';
+                $topLinks = array(
+                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
+                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
+                );
+                $errorMessage = 'Payment was received, but your custom plan is still being finalized.';
+            } else {
+                $viewState = 'success';
+                $statusBadgeClass = 'success';
+                $statusBadgeLabel = 'Payment Confirmed';
+                $pageTitle = 'Payment Successful';
+                $headline = 'Payment Successful';
+                $bodyText = 'Your custom plan has been verified with Stripe and activated successfully.';
+                $primaryHref = 'dashboard.php';
+                $primaryLabel = 'Go to Dashboard';
+                $secondaryHref = 'my-bookings.php';
+                $secondaryLabel = 'View Bookings';
+                $topLinks = array(
+                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
+                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
+                );
             }
         }
 
-        unset($_SESSION['service_payment_portal']);
+        /*
+        |--------------------------------------------------------------------------
+        | Member Service Overage Success
+        |--------------------------------------------------------------------------
+        */
+        if ($mode === 'service_overage') {
+            if (!$pdoInstance instanceof PDO) {
+                throw new RuntimeException('Database connection is not available for payment verification.');
+            }
 
-        $verifiedPaid = true;
-        $pageTitle = 'Payment Successful';
-        $headline = 'Member Overage Paid';
-        $bodyText = 'Your member overage payment has been verified successfully and the uncovered portion of your booking has been paid.';
-        $itemLabel = 'Service';
-        $itemName = service_label_from_type($serviceType) . ($overageUnits > 0 ? ' × ' . $overageUnits : '');
-        if ($memberPlanSlug !== '') {
-            $itemName .= ' · ' . ucwords(str_replace('_', ' ', $memberPlanSlug));
-        }
-        $primaryHref = 'my-bookings.php';
-        $primaryLabel = 'View Bookings';
-        $secondaryHref = 'dashboard.php';
-        $secondaryLabel = 'Go to Dashboard';
-        $topLinks = [
-            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
-            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
-        ];
-    }
+            $memberId = current_member_id_safe($pdoInstance);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Non-Member Success
-    |--------------------------------------------------------------------------
-    */
-    if ($mode === 'non_member') {
-        $requestId = (int) ($metadata->request_id ?? 0);
-        $serviceType = (string) ($metadata->service_type ?? '');
-        $fullName = trim((string) ($metadata->full_name ?? ''));
-        $dogName = trim((string) ($metadata->dog_name ?? ''));
-        $expectedAmount = (float) ($metadata->total_amount ?? 0);
+            if ($memberId <= 0) {
+                redirect_to('login.php');
+            }
 
-        if ($expectedAmount > 0) {
-            $expectedAmountCents = (int) round($expectedAmount * 100);
+            $stripeMemberId = (int) ($metadata->member_id ?? 0);
+            $bookingId = (int) ($metadata->booking_id ?? 0);
+            $serviceType = (string) ($metadata->service_type ?? '');
+            $overageUnits = (int) ($metadata->overage_units ?? 0);
+            $memberPlanSlug = trim((string) ($metadata->member_plan_slug ?? ''));
+            $expectedAmount = (float) ($metadata->total_amount ?? 0);
 
-            if ($amountPaidCents > 0 && $expectedAmountCents !== $amountPaidCents) {
-                throw new RuntimeException('Paid amount does not match expected non-member total.');
+            if ($stripeMemberId <= 0 || $stripeMemberId !== $memberId) {
+                throw new RuntimeException('This overage payment does not belong to the signed-in member.');
+            }
+
+            if ($bookingId <= 0) {
+                throw new RuntimeException('Invalid overage booking reference.');
+            }
+
+            if ($expectedAmount > 0) {
+                $expectedAmountCents = (int) round($expectedAmount * 100);
+
+                if ($amountPaidCents > 0 && $expectedAmountCents !== $amountPaidCents) {
+                    throw new RuntimeException('Paid amount does not match expected overage total.');
+                }
+            }
+
+            $booking = safeFetchOne(
+                $pdoInstance,
+                "
+                SELECT *
+                FROM bookings
+                WHERE id = :id
+                  AND member_id = :member_id
+                LIMIT 1
+                ",
+                array(
+                    ':id' => $bookingId,
+                    ':member_id' => $memberId,
+                )
+            );
+
+            if (!$booking) {
+                throw new RuntimeException('Matching booking was not found.');
+            }
+
+            unset($_SESSION['service_payment_portal']);
+
+            $itemLabel = 'Service';
+            $itemName = service_label_from_type($serviceType) . ($overageUnits > 0 ? ' × ' . $overageUnits : '');
+            if ($memberPlanSlug !== '') {
+                $itemName .= ' · ' . ucwords(str_replace('_', ' ', $memberPlanSlug));
+            }
+
+            if (!payment_status_is_paid((string) ($booking['payment_status'] ?? ''))) {
+                $viewState = 'pending';
+                $statusBadgeClass = 'pending';
+                $statusBadgeLabel = 'Payment Received';
+                $pageTitle = 'Payment Received';
+                $headline = 'We’re finalizing your booking payment';
+                $bodyText = 'Stripe received your payment, but your booking is still being updated in your account.';
+                $primaryHref = current_request_uri();
+                $primaryLabel = 'Refresh Page';
+                $secondaryHref = 'my-bookings.php';
+                $secondaryLabel = 'View Bookings';
+                $topLinks = array(
+                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
+                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
+                );
+                $errorMessage = 'Payment was received, but your booking status is still being finalized.';
+            } else {
+                $viewState = 'success';
+                $statusBadgeClass = 'success';
+                $statusBadgeLabel = 'Payment Confirmed';
+                $pageTitle = 'Payment Successful';
+                $headline = 'Member Overage Paid';
+                $bodyText = 'Your member overage payment has been verified successfully and the uncovered portion of your booking has been paid.';
+                $primaryHref = 'my-bookings.php';
+                $primaryLabel = 'View Bookings';
+                $secondaryHref = 'dashboard.php';
+                $secondaryLabel = 'Go to Dashboard';
+                $topLinks = array(
+                    array('href' => 'dashboard.php', 'label' => 'Dashboard'),
+                    array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
+                );
             }
         }
 
-        unset($_SESSION['non_member_payment_portal']);
+        /*
+        |--------------------------------------------------------------------------
+        | Non-Member Success
+        |--------------------------------------------------------------------------
+        */
+        if ($mode === 'non_member') {
+            if (!$pdoInstance instanceof PDO) {
+                throw new RuntimeException('Database connection is not available for payment verification.');
+            }
 
-        $verifiedPaid = true;
-        $pageTitle = 'Payment Successful';
-        $headline = 'Non-Member Booking Paid';
-        $bodyText = 'Your non-member booking payment has been verified successfully. Your request is now marked as paid and ready for follow-up.';
-        $itemLabel = 'Booking';
-        $itemName = service_label_from_type($serviceType);
+            $requestId = (int) ($metadata->request_id ?? 0);
+            $serviceType = (string) ($metadata->service_type ?? '');
+            $fullName = trim((string) ($metadata->full_name ?? ''));
+            $dogName = trim((string) ($metadata->dog_name ?? ''));
+            $expectedAmount = (float) ($metadata->total_amount ?? 0);
 
-        if ($dogName !== '') {
-            $itemName .= ' · ' . $dogName;
+            if ($requestId <= 0) {
+                throw new RuntimeException('Invalid non-member request reference.');
+            }
+
+            if ($expectedAmount > 0) {
+                $expectedAmountCents = (int) round($expectedAmount * 100);
+
+                if ($amountPaidCents > 0 && $expectedAmountCents !== $amountPaidCents) {
+                    throw new RuntimeException('Paid amount does not match expected non-member total.');
+                }
+            }
+
+            $record = find_non_member_payment_record($pdoInstance, $requestId);
+
+            if ($record === null) {
+                throw new RuntimeException('Matching non-member booking record was not found.');
+            }
+
+            unset($_SESSION['non_member_payment_portal']);
+
+            $statusColumn = (string) ($record['status_column'] ?? '');
+            $row = is_array($record['row'] ?? null) ? $record['row'] : array();
+            $statusValue = $statusColumn !== '' ? (string) ($row[$statusColumn] ?? '') : '';
+
+            $itemLabel = 'Booking';
+            $itemName = service_label_from_type($serviceType);
+
+            if ($dogName !== '') {
+                $itemName .= ' · ' . $dogName;
+            }
+
+            if ($fullName !== '') {
+                $itemName .= ' · ' . $fullName;
+            }
+
+            if (!payment_status_is_paid($statusValue)) {
+                $viewState = 'pending';
+                $statusBadgeClass = 'pending';
+                $statusBadgeLabel = 'Payment Received';
+                $pageTitle = 'Payment Received';
+                $headline = 'We’re finalizing your booking request';
+                $bodyText = 'Stripe received your payment, but your booking request is still being updated.';
+                $primaryHref = current_request_uri();
+                $primaryLabel = 'Refresh Page';
+                $secondaryHref = 'contact.php';
+                $secondaryLabel = 'Contact Us';
+                $topLinks = array(
+                    array('href' => 'non-member-booking.php', 'label' => 'Booking'),
+                    array('href' => 'contact.php', 'label' => 'Contact'),
+                );
+                $errorMessage = 'Payment was received, but your booking request is still being finalized.';
+            } else {
+                $viewState = 'success';
+                $statusBadgeClass = 'success';
+                $statusBadgeLabel = 'Payment Confirmed';
+                $pageTitle = 'Payment Successful';
+                $headline = 'Non-Member Booking Paid';
+                $bodyText = 'Your non-member booking payment has been verified successfully. Your request is now marked as paid and ready for follow-up.';
+                $primaryHref = 'non-member-booking.php';
+                $primaryLabel = 'Book Another Service';
+                $secondaryHref = 'contact.php';
+                $secondaryLabel = 'Contact Us';
+                $topLinks = array(
+                    array('href' => 'non-member-booking.php', 'label' => 'Booking'),
+                    array('href' => 'contact.php', 'label' => 'Contact'),
+                );
+            }
         }
+    } catch (Throwable $e) {
+        error_log('payment-success.php error: ' . $e->getMessage());
 
-        if ($fullName !== '') {
-            $itemName .= ' · ' . $fullName;
+        if ($mode === 'custom_plan') {
+            $primaryHref = 'login.php';
+            $primaryLabel = 'Member Login';
+            $secondaryHref = 'customize-plan.php';
+            $secondaryLabel = 'Back to Plans';
+            $topLinks = array(
+                array('href' => 'login.php', 'label' => 'Login'),
+                array('href' => 'customize-plan.php', 'label' => 'Plans'),
+            );
+        } elseif ($mode === 'service_overage') {
+            $primaryHref = 'login.php';
+            $primaryLabel = 'Member Login';
+            $secondaryHref = 'my-bookings.php';
+            $secondaryLabel = 'View Bookings';
+            $topLinks = array(
+                array('href' => 'login.php', 'label' => 'Login'),
+                array('href' => 'my-bookings.php', 'label' => 'My Bookings'),
+            );
+        } elseif ($mode === 'non_member') {
+            $primaryHref = 'non-member-booking.php';
+            $primaryLabel = 'Back to Booking';
+            $secondaryHref = 'contact.php';
+            $secondaryLabel = 'Contact Us';
+            $topLinks = array(
+                array('href' => 'non-member-booking.php', 'label' => 'Booking'),
+                array('href' => 'contact.php', 'label' => 'Contact'),
+            );
+        } elseif ($mode === 'membership') {
+            $primaryHref = 'memberships.php';
+            $primaryLabel = 'Return to Memberships';
+            $secondaryHref = 'contact.php';
+            $secondaryLabel = 'Contact Us';
+            $topLinks = array(
+                array('href' => 'memberships.php', 'label' => 'Memberships'),
+                array('href' => 'contact.php', 'label' => 'Contact'),
+            );
         }
-
-        $primaryHref = 'non-member-booking.php';
-        $primaryLabel = 'Book Another Service';
-        $secondaryHref = 'contact.php';
-        $secondaryLabel = 'Contact Us';
-        $topLinks = [
-            ['href' => 'non-member-booking.php', 'label' => 'Booking'],
-            ['href' => 'contact.php', 'label' => 'Contact'],
-        ];
-    }
-
-    if (!$verifiedPaid) {
-        throw new RuntimeException('Payment mode was not handled.');
-    }
-} catch (\Throwable $e) {
-    error_log('payment-success.php error: ' . $e->getMessage());
-    $errorMessage = 'We could not verify this payment yet. Please contact support if this persists.';
-
-    if ($mode === 'custom_plan') {
-        $primaryHref = 'login.php';
-        $primaryLabel = 'Member Login';
-        $secondaryHref = 'customize-plan.php';
-        $secondaryLabel = 'Back to Plans';
-        $topLinks = [
-            ['href' => 'login.php', 'label' => 'Login'],
-            ['href' => 'customize-plan.php', 'label' => 'Plans'],
-        ];
-    } elseif ($mode === 'service_overage') {
-        $primaryHref = 'login.php';
-        $primaryLabel = 'Member Login';
-        $secondaryHref = 'my-bookings.php';
-        $secondaryLabel = 'View Bookings';
-        $topLinks = [
-            ['href' => 'login.php', 'label' => 'Login'],
-            ['href' => 'my-bookings.php', 'label' => 'My Bookings'],
-        ];
-    } elseif ($mode === 'non_member') {
-        $primaryHref = 'non-member-booking.php';
-        $primaryLabel = 'Back to Booking';
-        $secondaryHref = 'contact.php';
-        $secondaryLabel = 'Contact Us';
-        $topLinks = [
-            ['href' => 'non-member-booking.php', 'label' => 'Booking'],
-            ['href' => 'contact.php', 'label' => 'Contact'],
-        ];
     }
 }
 ?>
@@ -320,7 +610,7 @@ try {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= $verifiedPaid ? h($pageTitle) : 'Payment Verification' ?> | Doggie Dorian’s</title>
+    <title><?= $viewState === 'success' ? h($pageTitle) : 'Payment Verification' ?> | Doggie Dorian’s</title>
     <style>
         * { box-sizing: border-box; }
 
@@ -445,6 +735,12 @@ try {
             background: rgba(212,175,55,0.14);
             color: #f2d471;
             border: 1px solid rgba(212,175,55,0.25);
+        }
+
+        .status-badge.pending {
+            background: rgba(212,175,55,0.10);
+            color: #f2d471;
+            border: 1px solid rgba(212,175,55,0.18);
         }
 
         .status-badge.error {
@@ -637,7 +933,7 @@ try {
 
                 <div class="top-actions">
                     <?php foreach ($topLinks as $link): ?>
-                        <a href="<?= h((string)$link['href']) ?>" class="top-link"><?= h((string)$link['label']) ?></a>
+                        <a href="<?= h((string) $link['href']) ?>" class="top-link"><?= h((string) $link['label']) ?></a>
                     <?php endforeach; ?>
                 </div>
             </div>
@@ -646,37 +942,34 @@ try {
         <main class="success-main">
             <div class="success-shell">
                 <section class="success-card">
-                    <?php if ($verifiedPaid): ?>
-                        <div class="status-badge success">Payment Confirmed</div>
-                        <h1 class="success-title"><?= h($headline) ?></h1>
-                        <p class="success-text"><?= h($bodyText) ?></p>
+                    <div class="status-badge <?= h($statusBadgeClass) ?>"><?= h($statusBadgeLabel) ?></div>
+                    <h1 class="success-title"><?= h($headline) ?></h1>
+                    <p class="success-text"><?= h($bodyText) ?></p>
 
+                    <?php if ($amountPaid > 0): ?>
                         <div class="amount-panel">
                             <div class="amount-label">Amount Paid</div>
                             <div class="amount-value"><?= h(money_fmt($amountPaid)) ?></div>
                         </div>
+                    <?php endif; ?>
 
+                    <?php if ($itemName !== ''): ?>
                         <div class="plan-box">
                             <span class="plan-label"><?= h($itemLabel) ?></span>
                             <div class="plan-name"><?= h($itemName) ?></div>
                         </div>
-
-                        <div class="success-actions">
-                            <a href="<?= h($primaryHref) ?>" class="btn-primary"><?= h($primaryLabel) ?></a>
-                            <a href="<?= h($secondaryHref) ?>" class="btn-secondary"><?= h($secondaryLabel) ?></a>
-                        </div>
-                    <?php else: ?>
-                        <div class="status-badge error">Verification Issue</div>
-                        <h1 class="success-title"><?= h($headline) ?></h1>
-                        <p class="success-text"><?= h($bodyText) ?></p>
-
-                        <div class="debug-box"><?= h($errorMessage !== '' ? $errorMessage : 'Unknown error.') ?></div>
-
-                        <div class="success-actions">
-                            <a href="<?= h($primaryHref) ?>" class="btn-primary"><?= h($primaryLabel) ?></a>
-                            <a href="<?= h($secondaryHref) ?>" class="btn-secondary"><?= h($secondaryLabel) ?></a>
-                        </div>
                     <?php endif; ?>
+
+                    <?php if ($viewState === 'error'): ?>
+                        <div class="debug-box"><?= h($errorMessage !== '' ? $errorMessage : 'Unknown error.') ?></div>
+                    <?php elseif ($viewState === 'pending'): ?>
+                        <div class="debug-box"><?= h($errorMessage !== '' ? $errorMessage : 'Your payment is still being finalized.') ?></div>
+                    <?php endif; ?>
+
+                    <div class="success-actions">
+                        <a href="<?= h($primaryHref) ?>" class="btn-primary"><?= h($primaryLabel) ?></a>
+                        <a href="<?= h($secondaryHref) ?>" class="btn-secondary"><?= h($secondaryLabel) ?></a>
+                    </div>
                 </section>
             </div>
         </main>

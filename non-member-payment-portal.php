@@ -7,7 +7,7 @@ require_once __DIR__ . '/db.php';
 if (!function_exists('h')) {
     function h($value): string
     {
-        return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+        return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
     }
 }
 
@@ -19,11 +19,158 @@ if (!function_exists('money_fmt')) {
 }
 
 if (!function_exists('portal_redirect')) {
-    function portal_redirect(string $url): void
+    function portal_redirect(string $url): never
     {
         header('Location: ' . $url);
         exit;
     }
+}
+
+function normalize_service_type(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    return match ($value) {
+        'walk', 'walks' => 'walk',
+        'drop_in', 'drop-in', 'dropin', 'drop in' => 'drop_in',
+        'daycare', 'day care' => 'daycare',
+        'boarding', 'board' => 'boarding',
+        'sitting', 'pet sitting', 'in-home sitting', 'in_home_sitting' => 'sitting',
+        default => '',
+    };
+}
+
+function normalize_dog_size(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    return match ($value) {
+        'small', 'small dog' => 'small',
+        'medium', 'medium dog' => 'medium',
+        'large', 'large dog' => 'large',
+        default => '',
+    };
+}
+
+function get_table_columns(PDO $pdo, string $table): array
+{
+    static $cache = [];
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $columns = [];
+
+        if ($stmt) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (isset($row['name'])) {
+                    $columns[] = (string) $row['name'];
+                }
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = [];
+        return $cache[$table];
+    } catch (Exception $e) {
+        $cache[$table] = [];
+        return $cache[$table];
+    }
+}
+
+function first_existing_column(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function safe_fetch_one(PDO $pdo, string $sql, array $params = []): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    } catch (Exception $e) {
+        return null;
+    }
+}
+
+function find_non_member_request_record(PDO $pdo, int $requestId): ?array
+{
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    $tables = [
+        [
+            'table' => 'public_booking_requests',
+            'id_candidates' => ['id', 'request_id'],
+        ],
+        [
+            'table' => 'non_member_bookings',
+            'id_candidates' => ['id', 'request_id'],
+        ],
+    ];
+
+    foreach ($tables as $config) {
+        $table = (string) $config['table'];
+        $columns = get_table_columns($pdo, $table);
+
+        if (empty($columns)) {
+            continue;
+        }
+
+        $idColumn = first_existing_column($columns, $config['id_candidates']);
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $row = safe_fetch_one(
+            $pdo,
+            "SELECT * FROM {$table} WHERE {$idColumn} = :id LIMIT 1",
+            [':id' => $requestId]
+        );
+
+        if (is_array($row)) {
+            return [
+                'table' => $table,
+                'row' => $row,
+            ];
+        }
+    }
+
+    return null;
+}
+
+function boolish_label(string $value, string $trueLabel = 'Yes', string $falseLabel = 'No'): string
+{
+    $value = strtolower(trim($value));
+
+    if (in_array($value, ['1', 'true', 'yes', 'y', 'on'], true)) {
+        return $trueLabel;
+    }
+
+    if (in_array($value, ['0', 'false', 'no', 'n', 'off'], true)) {
+        return $falseLabel;
+    }
+
+    return trim($value) !== '' ? $value : $falseLabel;
 }
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -35,92 +182,83 @@ if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-$csrfToken = $_SESSION['csrf_token'];
+$csrfToken = (string) $_SESSION['csrf_token'];
 
 $sessionPortal = $_SESSION['non_member_payment_portal'] ?? null;
 if (!is_array($sessionPortal)) {
     $sessionPortal = null;
 }
 
-$requestId = (int)($_GET['request_id'] ?? $_POST['request_id'] ?? 0);
-$fullName = trim((string)($_GET['full_name'] ?? $_POST['full_name'] ?? ''));
-$email = trim((string)($_GET['email'] ?? $_POST['email'] ?? ''));
-$phone = trim((string)($_GET['phone'] ?? $_POST['phone'] ?? ''));
-$dogName = trim((string)($_GET['dog_name'] ?? $_POST['dog_name'] ?? ''));
-$dogSize = trim((string)($_GET['dog_size'] ?? $_POST['dog_size'] ?? ''));
-$serviceType = strtolower(trim((string)($_GET['service_type'] ?? $_POST['service_type'] ?? '')));
-$dateStart = trim((string)($_GET['date_start'] ?? $_POST['date_start'] ?? ''));
-$dateEnd = trim((string)($_GET['date_end'] ?? $_POST['date_end'] ?? ''));
-$walkDuration = trim((string)($_GET['walk_duration'] ?? $_POST['walk_duration'] ?? ''));
-$pricingType = trim((string)($_GET['pricing_type'] ?? $_POST['pricing_type'] ?? 'non_member'));
-$discountLabel = trim((string)($_GET['discount_label'] ?? $_POST['discount_label'] ?? 'standard_non_member'));
-$quantity = (int)($_GET['quantity'] ?? $_POST['quantity'] ?? 0);
-$unitPrice = (float)($_GET['unit_price'] ?? $_POST['unit_price'] ?? 0);
-$totalAmount = (float)($_GET['total_amount'] ?? $_POST['total_amount'] ?? $_GET['estimated_price'] ?? $_POST['estimated_price'] ?? 0);
+$requestId = (int) ($_GET['request_id'] ?? $_POST['request_id'] ?? 0);
+$fullName = trim((string) ($_GET['full_name'] ?? $_POST['full_name'] ?? ''));
+$email = trim((string) ($_GET['email'] ?? $_POST['email'] ?? ''));
+$phone = trim((string) ($_GET['phone'] ?? $_POST['phone'] ?? ''));
+$dogName = trim((string) ($_GET['dog_name'] ?? $_POST['dog_name'] ?? ''));
+$dogSize = normalize_dog_size((string) ($_GET['dog_size'] ?? $_POST['dog_size'] ?? ''));
+$serviceType = normalize_service_type((string) ($_GET['service_type'] ?? $_POST['service_type'] ?? ''));
+$dateStart = trim((string) ($_GET['date_start'] ?? $_POST['date_start'] ?? ''));
+$dateEnd = trim((string) ($_GET['date_end'] ?? $_POST['date_end'] ?? ''));
+$walkDuration = trim((string) ($_GET['walk_duration'] ?? $_POST['walk_duration'] ?? ''));
+$pricingType = trim((string) ($_GET['pricing_type'] ?? $_POST['pricing_type'] ?? 'non_member'));
+$discountLabel = trim((string) ($_GET['discount_label'] ?? $_POST['discount_label'] ?? 'standard_non_member'));
+$quantity = (int) ($_GET['quantity'] ?? $_POST['quantity'] ?? 0);
+$unitPrice = (float) ($_GET['unit_price'] ?? $_POST['unit_price'] ?? 0);
+$totalAmount = (float) ($_GET['total_amount'] ?? $_POST['total_amount'] ?? $_GET['estimated_price'] ?? $_POST['estimated_price'] ?? 0);
 
-$dropInHours = trim((string)($_GET['drop_in_hours'] ?? $_POST['drop_in_hours'] ?? ''));
-$dropInAddWalk = trim((string)($_GET['drop_in_add_walk'] ?? $_POST['drop_in_add_walk'] ?? ''));
-$daycareProvideFood = trim((string)($_GET['daycare_provide_food'] ?? $_POST['daycare_provide_food'] ?? ''));
-$daycareExtraWalks = trim((string)($_GET['daycare_extra_walks'] ?? $_POST['daycare_extra_walks'] ?? ''));
-$sittingExtraWalks = trim((string)($_GET['sitting_extra_walks'] ?? $_POST['sitting_extra_walks'] ?? ''));
+$dropInHours = trim((string) ($_GET['drop_in_hours'] ?? $_POST['drop_in_hours'] ?? ''));
+$dropInAddWalk = trim((string) ($_GET['drop_in_add_walk'] ?? $_POST['drop_in_add_walk'] ?? ''));
+$daycareProvideFood = trim((string) ($_GET['daycare_provide_food'] ?? $_POST['daycare_provide_food'] ?? ''));
+$daycareExtraWalks = trim((string) ($_GET['daycare_extra_walks'] ?? $_POST['daycare_extra_walks'] ?? ''));
+$sittingExtraWalks = trim((string) ($_GET['sitting_extra_walks'] ?? $_POST['sitting_extra_walks'] ?? ''));
 
 if ($sessionPortal !== null) {
-    $requestId = (int)($sessionPortal['request_id'] ?? $requestId);
-    $fullName = trim((string)($sessionPortal['full_name'] ?? $fullName));
-    $email = trim((string)($sessionPortal['email'] ?? $email));
-    $phone = trim((string)($sessionPortal['phone'] ?? $phone));
-    $dogName = trim((string)($sessionPortal['dog_name'] ?? $dogName));
-    $dogSize = trim((string)($sessionPortal['dog_size'] ?? $dogSize));
-    $serviceType = strtolower(trim((string)($sessionPortal['service_type'] ?? $serviceType)));
-    $dateStart = trim((string)($sessionPortal['date_start'] ?? $dateStart));
-    $dateEnd = trim((string)($sessionPortal['date_end'] ?? $dateEnd));
-    $walkDuration = trim((string)($sessionPortal['walk_duration'] ?? $walkDuration));
-    $pricingType = trim((string)($sessionPortal['pricing_type'] ?? $pricingType));
-    $discountLabel = trim((string)($sessionPortal['discount_label'] ?? $discountLabel));
-    $quantity = (int)($sessionPortal['quantity'] ?? $quantity);
-    $unitPrice = (float)($sessionPortal['unit_price'] ?? $unitPrice);
-    $totalAmount = (float)($sessionPortal['total_amount'] ?? $totalAmount);
-    $dropInHours = trim((string)($sessionPortal['drop_in_hours'] ?? $dropInHours));
-    $dropInAddWalk = trim((string)($sessionPortal['drop_in_add_walk'] ?? $dropInAddWalk));
-    $daycareProvideFood = trim((string)($sessionPortal['daycare_provide_food'] ?? $daycareProvideFood));
-    $daycareExtraWalks = trim((string)($sessionPortal['daycare_extra_walks'] ?? $daycareExtraWalks));
-    $sittingExtraWalks = trim((string)($sessionPortal['sitting_extra_walks'] ?? $sittingExtraWalks));
+    $requestId = (int) ($sessionPortal['request_id'] ?? $requestId);
+    $fullName = trim((string) ($sessionPortal['full_name'] ?? $fullName));
+    $email = trim((string) ($sessionPortal['email'] ?? $email));
+    $phone = trim((string) ($sessionPortal['phone'] ?? $phone));
+    $dogName = trim((string) ($sessionPortal['dog_name'] ?? $dogName));
+    $dogSize = normalize_dog_size((string) ($sessionPortal['dog_size'] ?? $dogSize));
+    $serviceType = normalize_service_type((string) ($sessionPortal['service_type'] ?? $serviceType));
+    $dateStart = trim((string) ($sessionPortal['date_start'] ?? $dateStart));
+    $dateEnd = trim((string) ($sessionPortal['date_end'] ?? $dateEnd));
+    $walkDuration = trim((string) ($sessionPortal['walk_duration'] ?? $walkDuration));
+    $pricingType = trim((string) ($sessionPortal['pricing_type'] ?? $pricingType));
+    $discountLabel = trim((string) ($sessionPortal['discount_label'] ?? $discountLabel));
+    $quantity = (int) ($sessionPortal['quantity'] ?? $quantity);
+    $unitPrice = (float) ($sessionPortal['unit_price'] ?? $unitPrice);
+    $totalAmount = (float) ($sessionPortal['total_amount'] ?? $totalAmount);
+    $dropInHours = trim((string) ($sessionPortal['drop_in_hours'] ?? $dropInHours));
+    $dropInAddWalk = trim((string) ($sessionPortal['drop_in_add_walk'] ?? $dropInAddWalk));
+    $daycareProvideFood = trim((string) ($sessionPortal['daycare_provide_food'] ?? $daycareProvideFood));
+    $daycareExtraWalks = trim((string) ($sessionPortal['daycare_extra_walks'] ?? $daycareExtraWalks));
+    $sittingExtraWalks = trim((string) ($sessionPortal['sitting_extra_walks'] ?? $sittingExtraWalks));
 }
 
 if ($requestId > 0) {
-    try {
-        $stmt = $pdo->prepare("
-            SELECT *
-            FROM public_booking_requests
-            WHERE id = :id
-            LIMIT 1
-        ");
-        $stmt->execute([':id' => $requestId]);
-        $requestRow = $stmt->fetch(PDO::FETCH_ASSOC);
+    $record = find_non_member_request_record($pdo, $requestId);
 
-        if ($requestRow) {
-            $fullName = trim((string)($requestRow['full_name'] ?? $fullName));
-            $email = trim((string)($requestRow['email'] ?? $email));
-            $phone = trim((string)($requestRow['phone'] ?? $phone));
-            $dogName = trim((string)($requestRow['dog_name'] ?? $dogName));
-            $dogSize = trim((string)($requestRow['dog_size'] ?? $dogSize));
-            $serviceType = strtolower(trim((string)($requestRow['service_type'] ?? $serviceType)));
-            $dateStart = trim((string)($requestRow['date_start'] ?? $dateStart));
-            $dateEnd = trim((string)($requestRow['date_end'] ?? $dateEnd));
-            $walkDuration = trim((string)($requestRow['walk_duration'] ?? $walkDuration));
-            $pricingType = trim((string)($requestRow['pricing_type'] ?? $pricingType));
-            $discountLabel = trim((string)($requestRow['discount_label'] ?? $discountLabel));
-            $quantity = (int)($requestRow['quantity'] ?? $quantity);
-            $unitPrice = (float)($requestRow['unit_price'] ?? $unitPrice);
-            $totalAmount = (float)($requestRow['estimated_price'] ?? $totalAmount);
-        }
-    } catch (Throwable $e) {
-        // Keep page usable even if table/lookup is unavailable.
+    if ($record !== null) {
+        $requestRow = $record['row'];
+
+        $fullName = trim((string) ($requestRow['full_name'] ?? $fullName));
+        $email = trim((string) ($requestRow['email'] ?? $email));
+        $phone = trim((string) ($requestRow['phone'] ?? $phone));
+        $dogName = trim((string) ($requestRow['dog_name'] ?? $dogName));
+        $dogSize = normalize_dog_size((string) ($requestRow['dog_size'] ?? $dogSize));
+        $serviceType = normalize_service_type((string) ($requestRow['service_type'] ?? $serviceType));
+        $dateStart = trim((string) ($requestRow['date_start'] ?? $dateStart));
+        $dateEnd = trim((string) ($requestRow['date_end'] ?? $dateEnd));
+        $walkDuration = trim((string) ($requestRow['walk_duration'] ?? $walkDuration));
+        $pricingType = trim((string) ($requestRow['pricing_type'] ?? $pricingType));
+        $discountLabel = trim((string) ($requestRow['discount_label'] ?? $discountLabel));
+        $quantity = (int) ($requestRow['quantity'] ?? $quantity);
+        $unitPrice = (float) ($requestRow['unit_price'] ?? $unitPrice);
+        $totalAmount = (float) ($requestRow['estimated_price'] ?? $requestRow['total_amount'] ?? $totalAmount);
     }
 }
 
 if ($quantity <= 0 && $unitPrice > 0 && $totalAmount > 0) {
-    $quantity = (int)max(1, round($totalAmount / $unitPrice));
+    $quantity = (int) max(1, round($totalAmount / $unitPrice));
 }
 
 if ($totalAmount <= 0 && $unitPrice > 0 && $quantity > 0) {
@@ -135,14 +273,10 @@ if ($serviceType === '' || $totalAmount <= 0) {
 
 $serviceTypeMap = [
     'walk' => 'Walk',
-    'walks' => 'Walk',
     'drop_in' => 'Drop-In',
-    'drop-in' => 'Drop-In',
-    'dropin' => 'Drop-In',
     'daycare' => 'Daycare',
     'boarding' => 'Boarding',
     'sitting' => 'Pet Sitting',
-    'service' => 'Service',
 ];
 
 $serviceLabel = $serviceTypeMap[$serviceType] ?? ucwords(str_replace(['_', '-'], ' ', $serviceType));
@@ -174,10 +308,10 @@ if ($dropInHours !== '') {
     $serviceDetails[] = ['label' => 'Drop-In Hours', 'value' => $dropInHours];
 }
 if ($dropInAddWalk !== '') {
-    $serviceDetails[] = ['label' => 'Walk Add-On', 'value' => $dropInAddWalk];
+    $serviceDetails[] = ['label' => 'Walk Add-On', 'value' => boolish_label($dropInAddWalk)];
 }
 if ($daycareProvideFood !== '') {
-    $serviceDetails[] = ['label' => 'Food Provided', 'value' => $daycareProvideFood];
+    $serviceDetails[] = ['label' => 'Food Provided', 'value' => boolish_label($daycareProvideFood)];
 }
 if ($daycareExtraWalks !== '') {
     $serviceDetails[] = ['label' => 'Extra Walks', 'value' => $daycareExtraWalks];
@@ -194,7 +328,7 @@ $summaryRows = [
     ['label' => 'Service Type', 'value' => $serviceLabel],
     ['label' => 'Pricing Type', 'value' => $pricingType !== '' ? ucwords(str_replace('_', ' ', $pricingType)) : 'Non Member'],
     ['label' => 'Rate', 'value' => $unitPrice > 0 ? money_fmt($unitPrice) : 'Calculated Total'],
-    ['label' => 'Quantity', 'value' => (string)max(1, $quantity)],
+    ['label' => 'Quantity', 'value' => (string) max(1, $quantity)],
 ];
 
 if ($discountLabel !== '') {
@@ -719,14 +853,14 @@ if ($requestId > 0) {
                         <div class="services-list">
                             <div class="service-item">
                                 <span class="service-label"><?= h($serviceDescription) ?></span>
-                                <span class="service-qty"><?= (int)max(1, $quantity) ?></span>
+                                <span class="service-qty"><?= (int) max(1, $quantity) ?></span>
                             </div>
 
                             <?php if (!empty($serviceDetails)): ?>
                                 <?php foreach ($serviceDetails as $detail): ?>
                                     <div class="service-item">
-                                        <span class="service-label"><?= h((string)$detail['label']) ?></span>
-                                        <span class="service-qty"><?= h((string)$detail['value']) ?></span>
+                                        <span class="service-label"><?= h((string) $detail['label']) ?></span>
+                                        <span class="service-qty"><?= h((string) $detail['value']) ?></span>
                                     </div>
                                 <?php endforeach; ?>
                             <?php else: ?>
@@ -756,8 +890,8 @@ if ($requestId > 0) {
                     <div class="summary-grid">
                         <?php foreach ($summaryRows as $row): ?>
                             <div class="summary-row">
-                                <span class="summary-row-label"><?= h((string)$row['label']) ?></span>
-                                <span class="summary-row-value"><?= h((string)$row['value']) ?></span>
+                                <span class="summary-row-label"><?= h((string) $row['label']) ?></span>
+                                <span class="summary-row-value"><?= h((string) $row['value']) ?></span>
                             </div>
                         <?php endforeach; ?>
                     </div>
@@ -770,7 +904,7 @@ if ($requestId > 0) {
                         <form method="POST" action="create-checkout-session.php">
                             <input type="hidden" name="mode" value="non_member">
                             <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                            <input type="hidden" name="request_id" value="<?= (int)$requestId ?>">
+                            <input type="hidden" name="request_id" value="<?= (int) $requestId ?>">
                             <input type="hidden" name="full_name" value="<?= h($fullName) ?>">
                             <input type="hidden" name="email" value="<?= h($email) ?>">
                             <input type="hidden" name="phone" value="<?= h($phone) ?>">
@@ -782,7 +916,7 @@ if ($requestId > 0) {
                             <input type="hidden" name="walk_duration" value="<?= h($walkDuration) ?>">
                             <input type="hidden" name="pricing_type" value="<?= h($pricingType) ?>">
                             <input type="hidden" name="discount_label" value="<?= h($discountLabel) ?>">
-                            <input type="hidden" name="quantity" value="<?= (int)max(1, $quantity) ?>">
+                            <input type="hidden" name="quantity" value="<?= (int) max(1, $quantity) ?>">
                             <input type="hidden" name="unit_price" value="<?= h(number_format($unitPrice, 2, '.', '')) ?>">
                             <input type="hidden" name="total_amount" value="<?= h(number_format($totalAmount, 2, '.', '')) ?>">
                             <input type="hidden" name="estimated_price" value="<?= h(number_format($totalAmount, 2, '.', '')) ?>">

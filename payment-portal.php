@@ -38,15 +38,451 @@ if (empty($_SESSION['csrf_token'])) {
 
 $csrfToken = $_SESSION['csrf_token'];
 
-$member = currentMember($pdo);
+function currentPortalUserId(): int
+{
+    $keys = array('user_id', 'member_id', 'client_id', 'id');
 
-if (!$member || (int)($member['id'] ?? 0) <= 0) {
+    foreach ($keys as $key) {
+        if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
+            return (int) $_SESSION[$key];
+        }
+    }
+
+    return 0;
+}
+
+function hasTable(PDO $pdo, string $table): bool
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
+        $stmt->execute(array(':name' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    } catch (Exception $e) {
+        $cache[$table] = false;
+        return false;
+    }
+}
+
+function getTableColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    if (!hasTable($pdo, $table)) {
+        $cache[$table] = array();
+        return array();
+    }
+
+    try {
+        $safeTable = str_replace('"', '""', $table);
+        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
+        $columns = array();
+
+        if ($stmt) {
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $row) {
+                if (isset($row['name'])) {
+                    $columns[] = (string) $row['name'];
+                }
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $columns;
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return array();
+    } catch (Exception $e) {
+        $cache[$table] = array();
+        return array();
+    }
+}
+
+function hasColumn(PDO $pdo, string $table, string $column): bool
+{
+    return in_array($column, getTableColumns($pdo, $table), true);
+}
+
+function firstExistingColumn(PDO $pdo, string $table, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (hasColumn($pdo, $table, $candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function safeExecute(PDOStatement $stmt, array $params = array()): bool
+{
+    try {
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        return false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function bookingTable(PDO $pdo): ?string
+{
+    $candidates = array('bookings', 'walks');
+
+    foreach ($candidates as $candidate) {
+        if (hasTable($pdo, $candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function normalizePortalServiceType(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    if ($value === 'drop_in' || $value === 'dropin') {
+        return 'drop-in';
+    }
+
+    if ($value === 'in_home_sitting' || $value === 'in-home-sitting') {
+        return 'sitting';
+    }
+
+    return $value;
+}
+
+function rowFirstValue(array $row, array $candidates, $default = '')
+{
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
+            return $row[$candidate];
+        }
+    }
+
+    return $default;
+}
+
+function rowFirstInt(array $row, array $candidates, int $default = 0): int
+{
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $row) && is_numeric($row[$candidate])) {
+            return (int) $row[$candidate];
+        }
+    }
+
+    return $default;
+}
+
+function rowFirstFloat(array $row, array $candidates, float $default = 0.0): float
+{
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $row) && is_numeric($row[$candidate])) {
+            return (float) $row[$candidate];
+        }
+    }
+
+    return $default;
+}
+
+function extractBookingMetaJsonFromText(string $text): ?string
+{
+    $text = trim($text);
+    if ($text === '') {
+        return null;
+    }
+
+    if (preg_match('/Booking details:\s*(\{.*\})/s', $text, $matches)) {
+        return (string) $matches[1];
+    }
+
+    if ($text !== '' && $text[0] === '{' && substr($text, -1) === '}') {
+        return $text;
+    }
+
+    return null;
+}
+
+function decodeBookingMetaFromRow(array $row): array
+{
+    $jsonCandidates = array(
+        'booking_meta',
+        'booking_meta_json',
+        'meta',
+        'metadata',
+        'booking_details_json',
+    );
+
+    foreach ($jsonCandidates as $candidate) {
+        if (!empty($row[$candidate]) && is_string($row[$candidate])) {
+            $decoded = json_decode((string) $row[$candidate], true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+    }
+
+    $textCandidates = array(
+        'notes',
+        'special_instructions',
+        'instructions',
+        'care_notes',
+        'client_notes',
+    );
+
+    foreach ($textCandidates as $candidate) {
+        if (empty($row[$candidate]) || !is_string($row[$candidate])) {
+            continue;
+        }
+
+        $json = extractBookingMetaJsonFromText((string) $row[$candidate]);
+        if ($json === null) {
+            continue;
+        }
+
+        $decoded = json_decode($json, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+    }
+
+    return array();
+}
+
+function bookingBelongsToUser(array $row, int $userId): bool
+{
+    if ($userId <= 0) {
+        return false;
+    }
+
+    $ownerColumns = array(
+        'user_id',
+        'member_id',
+        'client_id',
+        'owner_id',
+        'owner_user_id',
+        'client_user_id',
+    );
+
+    foreach ($ownerColumns as $column) {
+        if (isset($row[$column]) && is_numeric($row[$column]) && (int) $row[$column] === $userId) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function loadBookingRow(PDO $pdo, int $bookingId): ?array
+{
+    if ($bookingId <= 0) {
+        return null;
+    }
+
+    $table = bookingTable($pdo);
+    if ($table === null) {
+        return null;
+    }
+
+    $idColumn = firstExistingColumn($pdo, $table, array('id', 'booking_id', 'walk_id'));
+    if ($idColumn === null) {
+        return null;
+    }
+
+    $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE {$idColumn} = :id LIMIT 1");
+    if (!safeExecute($stmt, array(':id' => $bookingId))) {
+        return null;
+    }
+
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return is_array($row) ? $row : null;
+}
+
+function buildDurationLabelFromBooking(string $serviceType, array $row, array $meta): string
+{
+    $serviceType = normalizePortalServiceType($serviceType);
+
+    if ($serviceType === 'walk') {
+        $minutes = rowFirstInt($row, array('duration_minutes', 'duration', 'minutes'), 0);
+        if ($minutes <= 0 && isset($meta['duration_minutes']) && is_numeric($meta['duration_minutes'])) {
+            $minutes = (int) $meta['duration_minutes'];
+        }
+        if ($minutes > 0) {
+            return $minutes . ' Minutes';
+        }
+    }
+
+    if ($serviceType === 'drop-in') {
+        $hours = 0;
+
+        if (isset($meta['drop_in_hours']) && is_numeric($meta['drop_in_hours'])) {
+            $hours = (int) $meta['drop_in_hours'];
+        } elseif (isset($meta['quantity']) && is_numeric($meta['quantity'])) {
+            $hours = (int) $meta['quantity'];
+        }
+
+        if ($hours > 0) {
+            return $hours . ' Hour' . ($hours === 1 ? '' : 's');
+        }
+    }
+
+    return '';
+}
+
+function buildServiceOverageContextFromBooking(array $row, array $meta, int $bookingId): array
+{
+    $serviceType = normalizePortalServiceType((string) rowFirstValue($row, array(
+        'service_type',
+        'type',
+        'booking_type',
+        'category',
+        'service',
+    ), ''));
+
+    if ($serviceType === '' && !empty($meta['service_type'])) {
+        $serviceType = normalizePortalServiceType((string) $meta['service_type']);
+    }
+
+    $quantity = rowFirstInt($row, array('quantity'), 0);
+    if ($quantity <= 0 && isset($meta['required_units']) && is_numeric($meta['required_units'])) {
+        $quantity = (int) $meta['required_units'];
+    }
+
+    $overageUnits = 0;
+    if (isset($meta['overage_units']) && is_numeric($meta['overage_units'])) {
+        $overageUnits = max(0, (int) $meta['overage_units']);
+    }
+    if ($overageUnits <= 0 && $quantity > 0) {
+        $overageUnits = $quantity;
+    }
+
+    $unitPrice = rowFirstFloat($row, array('unit_price'), 0.0);
+    if ($unitPrice <= 0 && isset($meta['unit_price']) && is_numeric($meta['unit_price'])) {
+        $unitPrice = (float) $meta['unit_price'];
+    }
+
+    $totalAmount = rowFirstFloat($row, array(
+        'price',
+        'total_price',
+        'amount_due',
+        'amount',
+    ), 0.0);
+
+    if ($totalAmount <= 0 && isset($meta['overage_total']) && is_numeric($meta['overage_total'])) {
+        $totalAmount = (float) $meta['overage_total'];
+    }
+
+    if ($unitPrice <= 0 && $totalAmount > 0 && $overageUnits > 0) {
+        $unitPrice = $totalAmount / $overageUnits;
+    }
+
+    $bookingDate = trim((string) rowFirstValue($row, array(
+        'service_date',
+        'booking_date',
+        'walk_date',
+        'date',
+        'scheduled_date',
+        'start_date',
+        'check_in_date',
+    ), ''));
+
+    $bookingTime = trim((string) rowFirstValue($row, array(
+        'service_time',
+        'booking_time',
+        'walk_time',
+        'time',
+        'scheduled_time',
+        'start_time',
+    ), ''));
+
+    $petName = trim((string) rowFirstValue($row, array('pet_name', 'dog_name'), ''));
+    $petSize = trim((string) rowFirstValue($row, array('pet_size', 'dog_size', 'size'), ''));
+
+    $memberPlanSlug = trim((string) ($meta['member_plan_slug'] ?? ''));
+    $creditType = trim((string) ($meta['credit_type'] ?? ''));
+    $includedCredits = isset($meta['included_credits']) && is_numeric($meta['included_credits']) ? (int) $meta['included_credits'] : 0;
+
+    $remainingCredits = 0;
+    if (isset($meta['remaining_credits_after']) && is_numeric($meta['remaining_credits_after'])) {
+        $remainingCredits = (int) $meta['remaining_credits_after'];
+    } elseif (isset($meta['remaining_credits']) && is_numeric($meta['remaining_credits'])) {
+        $remainingCredits = (int) $meta['remaining_credits'];
+    }
+
+    $bookingReference = '#' . $bookingId;
+    $durationLabel = buildDurationLabelFromBooking($serviceType, $row, $meta);
+
+    return array(
+        'booking_id' => $bookingId,
+        'booking_reference' => $bookingReference,
+        'service_type' => $serviceType,
+        'quantity' => $quantity,
+        'overage_units' => $overageUnits,
+        'unit_price' => round($unitPrice, 2),
+        'total_amount' => round($totalAmount, 2),
+        'booking_date' => $bookingDate,
+        'booking_time' => $bookingTime,
+        'pet_name' => $petName,
+        'pet_size' => $petSize,
+        'duration_label' => $durationLabel,
+        'member_plan_slug' => $memberPlanSlug,
+        'credit_type' => $creditType,
+        'included_credits' => $includedCredits,
+        'remaining_credits' => $remainingCredits,
+    );
+}
+
+function mergeServiceContext(array $base, array $fallback): array
+{
+    foreach ($fallback as $key => $value) {
+        if (!array_key_exists($key, $base)) {
+            $base[$key] = $value;
+            continue;
+        }
+
+        $baseValue = $base[$key];
+
+        if (
+            $baseValue === ''
+            || $baseValue === null
+            || $baseValue === 0
+            || $baseValue === 0.0
+        ) {
+            if ($value !== '' && $value !== null) {
+                $base[$key] = $value;
+            }
+        }
+    }
+
+    return $base;
+}
+
+$member = function_exists('currentMember') ? currentMember($pdo) : null;
+$memberRowId = is_array($member) ? (int)($member['id'] ?? 0) : 0;
+$memberId = currentPortalUserId();
+if ($memberId <= 0) {
+    $memberId = $memberRowId;
+}
+
+if ($memberId <= 0) {
     $_SESSION['custom_plan_flash_type'] = 'error';
     $_SESSION['custom_plan_flash_message'] = 'Please sign in to access your payment portal.';
     portal_redirect('login.php');
 }
-
-$memberId = (int)($member['id'] ?? 0);
 
 $paymentContext = null;
 $portalMode = 'service_overage';
@@ -78,31 +514,94 @@ $includedCredits = (int)($_GET['included_credits'] ?? $_POST['included_credits']
 $remainingCredits = (int)($_GET['remaining_credits'] ?? $_POST['remaining_credits'] ?? 0);
 $overageUnits = (int)($_GET['overage_units'] ?? $_POST['overage_units'] ?? 0);
 
+$serviceContext = null;
+
+if ($bookingId > 0) {
+    $bookingRow = loadBookingRow($pdo, $bookingId);
+
+    if ($bookingRow && bookingBelongsToUser($bookingRow, $memberId)) {
+        $bookingMeta = decodeBookingMetaFromRow($bookingRow);
+        $serviceContext = buildServiceOverageContextFromBooking($bookingRow, $bookingMeta, $bookingId);
+    }
+}
+
 if ($sessionOverage !== null) {
     $sessionMemberId = (int)($sessionOverage['member_id'] ?? 0);
 
     if ($sessionMemberId > 0 && $sessionMemberId === $memberId) {
-        $serviceType = strtolower(trim((string)($sessionOverage['service_type'] ?? $serviceType)));
-        $quantity = (int)($sessionOverage['quantity'] ?? $quantity);
-        $unitPrice = (float)($sessionOverage['unit_price'] ?? $unitPrice);
-        $totalAmount = (float)($sessionOverage['total_amount'] ?? $totalAmount);
-        $bookingDate = trim((string)($sessionOverage['booking_date'] ?? $bookingDate));
-        $bookingTime = trim((string)($sessionOverage['booking_time'] ?? $bookingTime));
-        $petName = trim((string)($sessionOverage['pet_name'] ?? $petName));
-        $petSize = trim((string)($sessionOverage['pet_size'] ?? $petSize));
-        $durationLabel = trim((string)($sessionOverage['duration_label'] ?? $durationLabel));
-        $bookingReference = trim((string)($sessionOverage['booking_reference'] ?? $bookingReference));
-        $bookingId = (int)($sessionOverage['booking_id'] ?? $bookingId);
-        $memberPlanSlug = trim((string)($sessionOverage['member_plan_slug'] ?? $memberPlanSlug));
-        $creditType = trim((string)($sessionOverage['credit_type'] ?? $creditType));
-        $includedCredits = (int)($sessionOverage['included_credits'] ?? $includedCredits);
-        $remainingCredits = (int)($sessionOverage['remaining_credits'] ?? $remainingCredits);
-        $overageUnits = (int)($sessionOverage['overage_units'] ?? $overageUnits);
+        $sessionContext = array(
+            'booking_id' => (int)($sessionOverage['booking_id'] ?? $bookingId),
+            'booking_reference' => trim((string)($sessionOverage['booking_reference'] ?? $bookingReference)),
+            'service_type' => normalizePortalServiceType((string)($sessionOverage['service_type'] ?? $serviceType)),
+            'quantity' => (int)($sessionOverage['quantity'] ?? $quantity),
+            'overage_units' => (int)($sessionOverage['overage_units'] ?? $overageUnits),
+            'unit_price' => round((float)($sessionOverage['unit_price'] ?? $unitPrice), 2),
+            'total_amount' => round((float)($sessionOverage['total_amount'] ?? $totalAmount), 2),
+            'booking_date' => trim((string)($sessionOverage['booking_date'] ?? $bookingDate)),
+            'booking_time' => trim((string)($sessionOverage['booking_time'] ?? $bookingTime)),
+            'pet_name' => trim((string)($sessionOverage['pet_name'] ?? $petName)),
+            'pet_size' => trim((string)($sessionOverage['pet_size'] ?? $petSize)),
+            'duration_label' => trim((string)($sessionOverage['duration_label'] ?? $durationLabel)),
+            'member_plan_slug' => trim((string)($sessionOverage['member_plan_slug'] ?? $memberPlanSlug)),
+            'credit_type' => trim((string)($sessionOverage['credit_type'] ?? $creditType)),
+            'included_credits' => (int)($sessionOverage['included_credits'] ?? $includedCredits),
+            'remaining_credits' => (int)($sessionOverage['remaining_credits'] ?? $remainingCredits),
+        );
+
+        if ($serviceContext === null) {
+            $serviceContext = $sessionContext;
+        } else {
+            $serviceContext = mergeServiceContext($serviceContext, $sessionContext);
+        }
     }
+}
+
+if ($serviceContext === null && ($serviceType !== '' || $totalAmount > 0 || $bookingId > 0)) {
+    $serviceContext = array(
+        'booking_id' => $bookingId,
+        'booking_reference' => $bookingReference,
+        'service_type' => normalizePortalServiceType($serviceType),
+        'quantity' => $quantity,
+        'overage_units' => $overageUnits,
+        'unit_price' => round($unitPrice, 2),
+        'total_amount' => round($totalAmount, 2),
+        'booking_date' => $bookingDate,
+        'booking_time' => $bookingTime,
+        'pet_name' => $petName,
+        'pet_size' => $petSize,
+        'duration_label' => $durationLabel,
+        'member_plan_slug' => $memberPlanSlug,
+        'credit_type' => $creditType,
+        'included_credits' => $includedCredits,
+        'remaining_credits' => $remainingCredits,
+    );
+}
+
+if ($serviceContext !== null) {
+    $bookingId = (int)($serviceContext['booking_id'] ?? $bookingId);
+    $bookingReference = trim((string)($serviceContext['booking_reference'] ?? $bookingReference));
+    $serviceType = normalizePortalServiceType((string)($serviceContext['service_type'] ?? $serviceType));
+    $quantity = (int)($serviceContext['quantity'] ?? $quantity);
+    $overageUnits = (int)($serviceContext['overage_units'] ?? $overageUnits);
+    $unitPrice = (float)($serviceContext['unit_price'] ?? $unitPrice);
+    $totalAmount = (float)($serviceContext['total_amount'] ?? $totalAmount);
+    $bookingDate = trim((string)($serviceContext['booking_date'] ?? $bookingDate));
+    $bookingTime = trim((string)($serviceContext['booking_time'] ?? $bookingTime));
+    $petName = trim((string)($serviceContext['pet_name'] ?? $petName));
+    $petSize = trim((string)($serviceContext['pet_size'] ?? $petSize));
+    $durationLabel = trim((string)($serviceContext['duration_label'] ?? $durationLabel));
+    $memberPlanSlug = trim((string)($serviceContext['member_plan_slug'] ?? $memberPlanSlug));
+    $creditType = trim((string)($serviceContext['credit_type'] ?? $creditType));
+    $includedCredits = (int)($serviceContext['included_credits'] ?? $includedCredits);
+    $remainingCredits = (int)($serviceContext['remaining_credits'] ?? $remainingCredits);
 }
 
 if ($overageUnits <= 0 && $quantity > 0) {
     $overageUnits = $quantity;
+}
+
+if ($quantity <= 0 && $overageUnits > 0) {
+    $quantity = $overageUnits;
 }
 
 if ($totalAmount <= 0 && $unitPrice > 0 && $overageUnits > 0) {
@@ -111,11 +610,12 @@ if ($totalAmount <= 0 && $unitPrice > 0 && $overageUnits > 0) {
 
 if ($requestedPortalMode === 'custom_plan') {
     $portalMode = 'custom_plan';
-} elseif ($requestedPortalMode === 'service_overage') {
-    $portalMode = 'service_overage';
-} elseif ($sessionOverage !== null && $totalAmount > 0) {
-    $portalMode = 'service_overage';
-} elseif ($serviceType !== '' && $totalAmount > 0) {
+} elseif (
+    $requestedPortalMode === 'service_overage'
+    || $bookingId > 0
+    || $sessionOverage !== null
+    || ($serviceType !== '' && $totalAmount > 0)
+) {
     $portalMode = 'service_overage';
 } else {
     $portalMode = 'custom_plan';
@@ -240,14 +740,6 @@ if ($portalMode === 'custom_plan') {
 
     $serviceLabel = $serviceTypeMap[$serviceType] ?? ($serviceType !== '' ? ucwords(str_replace(['_', '-'], ' ', $serviceType)) : 'Service');
     $creditLabel = $creditType !== '' ? ucwords(str_replace(['_', '-'], ' ', $creditType)) : $serviceLabel . ' Credits';
-
-    if ($overageUnits <= 0 && $quantity > 0) {
-        $overageUnits = $quantity;
-    }
-
-    if ($quantity <= 0 && $overageUnits > 0) {
-        $quantity = $overageUnits;
-    }
 
     if ($totalAmount <= 0 || $overageUnits <= 0) {
         $_SESSION['custom_plan_flash_type'] = 'error';

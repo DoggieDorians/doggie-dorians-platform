@@ -5,13 +5,13 @@ declare(strict_types=1);
  * Doggie Dorian's
  * Secure Stripe configuration loader
  *
- * Loads Stripe secrets from a private server-side file
- * located outside the public web root.
+ * Loads Stripe secrets from a protected file inside /includes,
+ * which is blocked from direct public access on this host.
  */
 
 function dd_private_stripe_env_path(): string
 {
-    return '/homepages/39/d4299671946/private/stripe-env.php';
+    return __DIR__ . '/stripe-env.php';
 }
 
 function dd_fail_stripe_config(string $logMessage): never
@@ -54,7 +54,7 @@ function dd_env(string $key, ?string $default = null): ?string
         return $default;
     }
 
-    $value = trim((string)$value);
+    $value = trim((string) $value);
 
     if ($value === '') {
         return $default;

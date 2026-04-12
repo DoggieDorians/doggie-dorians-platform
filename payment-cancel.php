@@ -7,19 +7,7 @@ require_once __DIR__ . '/includes/member_config.php';
 
 function h($value): string
 {
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
-}
-
-function redirect_to(string $url): void
-{
-    header('Location: ' . $url);
-    exit;
-}
-
-function current_member_id(PDO $pdo): int
-{
-    $member = currentMember($pdo);
-    return (int)($member['id'] ?? 0);
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
 function normalize_mode(string $value): string
@@ -30,11 +18,33 @@ function normalize_mode(string $value): string
         'custom_plan' => 'custom_plan',
         'service_overage' => 'service_overage',
         'non_member' => 'non_member',
+        'membership' => 'membership',
         default => '',
     };
 }
 
-$mode = normalize_mode((string)($_GET['mode'] ?? ''));
+function current_member_id_safe(?PDO $pdo): int
+{
+    if (!$pdo instanceof PDO) {
+        return 0;
+    }
+
+    if (!function_exists('currentMember')) {
+        return 0;
+    }
+
+    try {
+        $member = currentMember($pdo);
+        return (int) ($member['id'] ?? 0);
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+$pdoInstance = (isset($pdo) && $pdo instanceof PDO) ? $pdo : null;
+$mode = normalize_mode((string) ($_GET['mode'] ?? ''));
 
 /*
 |--------------------------------------------------------------------------
@@ -44,10 +54,13 @@ $mode = normalize_mode((string)($_GET['mode'] ?? ''));
 $pageTitle = 'Checkout Cancelled';
 $headline = 'No payment was completed';
 $bodyText = 'Your checkout was canceled before Stripe confirmed payment.';
+$infoValue = 'Payment remains unpaid';
+
 $primaryHref = 'index.php';
 $primaryLabel = 'Return Home';
 $secondaryHref = 'index.php';
 $secondaryLabel = 'Go Back';
+
 $topLinks = [
     ['href' => 'index.php', 'label' => 'Home'],
     ['href' => 'contact.php', 'label' => 'Contact'],
@@ -59,7 +72,11 @@ $topLinks = [
 |--------------------------------------------------------------------------
 */
 if ($mode === 'custom_plan') {
-    $memberId = current_member_id($pdo);
+    $memberId = current_member_id_safe($pdoInstance);
+
+    $headline = 'Custom plan checkout cancelled';
+    $bodyText = 'Your custom plan checkout was canceled before Stripe confirmed payment.';
+    $infoValue = 'Custom plan remains unpaid';
 
     if ($memberId <= 0) {
         $primaryHref = 'login.php';
@@ -71,7 +88,7 @@ if ($mode === 'custom_plan') {
             ['href' => 'customize-plan.php', 'label' => 'Plans'],
         ];
     } else {
-        $planId = (int)($_GET['plan_id'] ?? 0);
+        $planId = (int) ($_GET['plan_id'] ?? 0);
 
         $primaryHref = $planId > 0
             ? 'payment-portal.php?plan_id=' . $planId
@@ -94,7 +111,11 @@ if ($mode === 'custom_plan') {
 |--------------------------------------------------------------------------
 */
 if ($mode === 'service_overage') {
-    $memberId = current_member_id($pdo);
+    $memberId = current_member_id_safe($pdoInstance);
+
+    $headline = 'Member overage checkout cancelled';
+    $bodyText = 'Your member overage checkout was canceled before Stripe confirmed payment.';
+    $infoValue = 'Overage balance remains unpaid';
 
     if ($memberId <= 0) {
         $primaryHref = 'login.php';
@@ -106,7 +127,7 @@ if ($mode === 'service_overage') {
             ['href' => 'book-service.php', 'label' => 'Book Service'],
         ];
     } else {
-        $bookingId = (int)($_GET['booking_id'] ?? 0);
+        $bookingId = (int) ($_GET['booking_id'] ?? 0);
 
         $primaryHref = 'payment-portal.php';
         $primaryLabel = 'Return to Payment Portal';
@@ -131,7 +152,11 @@ if ($mode === 'service_overage') {
 |--------------------------------------------------------------------------
 */
 if ($mode === 'non_member') {
-    $requestId = (int)($_GET['request_id'] ?? 0);
+    $requestId = (int) ($_GET['request_id'] ?? 0);
+
+    $headline = 'Non-member checkout cancelled';
+    $bodyText = 'Your non-member booking checkout was canceled before Stripe confirmed payment.';
+    $infoValue = 'Booking request remains unpaid';
 
     $primaryHref = 'non-member-payment-portal.php';
     $primaryLabel = 'Return to Payment Portal';
@@ -147,6 +172,43 @@ if ($mode === 'non_member') {
         ['href' => 'non-member-booking.php', 'label' => 'Booking'],
         ['href' => 'contact.php', 'label' => 'Contact'],
     ];
+}
+
+/*
+|--------------------------------------------------------------------------
+| MEMBERSHIP CANCEL
+|--------------------------------------------------------------------------
+*/
+if ($mode === 'membership') {
+    $memberId = current_member_id_safe($pdoInstance);
+    $selectedPlan = trim((string) ($_GET['plan'] ?? ''));
+
+    $headline = 'Membership checkout cancelled';
+    $bodyText = 'Your founder membership checkout was canceled before Stripe confirmed payment.';
+    $infoValue = 'Membership remains inactive';
+
+    $primaryHref = 'memberships.php';
+    if ($selectedPlan !== '') {
+        $primaryHref .= '?plan=' . rawurlencode($selectedPlan) . '#selection';
+    }
+
+    $primaryLabel = 'Return to Memberships';
+
+    if ($memberId > 0) {
+        $secondaryHref = 'dashboard.php';
+        $secondaryLabel = 'Go to Dashboard';
+        $topLinks = [
+            ['href' => 'dashboard.php', 'label' => 'Dashboard'],
+            ['href' => 'memberships.php', 'label' => 'Memberships'],
+        ];
+    } else {
+        $secondaryHref = 'login.php';
+        $secondaryLabel = 'Member Login';
+        $topLinks = [
+            ['href' => 'login.php', 'label' => 'Login'],
+            ['href' => 'memberships.php', 'label' => 'Memberships'],
+        ];
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -419,7 +481,7 @@ if ($mode === 'non_member') {
 
                 <div class="top-actions">
                     <?php foreach ($topLinks as $link): ?>
-                        <a href="<?= h((string)$link['href']) ?>" class="top-link"><?= h((string)$link['label']) ?></a>
+                        <a href="<?= h((string) $link['href']) ?>" class="top-link"><?= h((string) $link['label']) ?></a>
                     <?php endforeach; ?>
                 </div>
             </div>
@@ -438,7 +500,7 @@ if ($mode === 'non_member') {
 
                     <div class="info-box">
                         <span class="info-label">Status</span>
-                        <div class="info-value">Payment remains unpaid</div>
+                        <div class="info-value"><?= h($infoValue) ?></div>
                     </div>
 
                     <div class="cancel-actions">

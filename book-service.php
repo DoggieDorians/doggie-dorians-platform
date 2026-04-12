@@ -1,16 +1,12 @@
 <?php
 declare(strict_types=1);
 
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+error_reporting(E_ALL);
 require_once __DIR__ . '/includes/bootstrap.php';
-
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/includes/pricing.php';
-
-$referralInclude = __DIR__ . '/includes/referral.php';
-if (is_file($referralInclude)) {
-    require_once $referralInclude;
-}
-require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/member_config.php';
 require_once __DIR__ . '/includes/pricing.php';
 
 $referralInclude = __DIR__ . '/includes/referral.php';
@@ -24,15 +20,23 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
-function h($value)
-{
-    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-function redirectTo($url)
-{
-    header('Location: ' . $url);
-    exit;
+if (!function_exists('h')) {
+    function h($value)
+    {
+        return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('redirectTo')) {
+    function redirectTo($url)
+    {
+        header('Location: ' . $url);
+        exit;
+    }
 }
 
 function hasTable(PDO $pdo, $table)
@@ -145,6 +149,40 @@ function normalizeServiceTypeLocal($value)
     }
 
     return 'walk';
+}
+
+function normalizeServiceTypeForPortal($value)
+{
+    $value = normalizeServiceTypeLocal($value);
+
+    if ($value === 'drop-in') {
+        return 'drop_in';
+    }
+
+    return $value;
+}
+
+function normalizeCreditTypeForService($serviceType)
+{
+    $serviceType = normalizeServiceTypeLocal($serviceType);
+
+    if ($serviceType === 'walk') {
+        return 'walk';
+    }
+    if ($serviceType === 'boarding') {
+        return 'boarding';
+    }
+    if ($serviceType === 'daycare') {
+        return 'daycare';
+    }
+    if ($serviceType === 'drop-in') {
+        return 'drop_in';
+    }
+    if ($serviceType === 'sitting') {
+        return 'sitting';
+    }
+
+    return 'service';
 }
 
 function serviceLabel($serviceType)
@@ -495,6 +533,305 @@ function serializeBookingMeta(array $meta)
     return json_encode($clean, JSON_UNESCAPED_SLASHES);
 }
 
+function mapMembershipNameToSlug($value)
+{
+    $value = strtolower(trim((string) $value));
+    $value = str_replace(array('&', '-', '/'), ' ', $value);
+    $value = preg_replace('/\s+/', ' ', $value);
+
+    $map = array(
+        'founder walk club' => 'founder_walk_club',
+        'founder care club' => 'founder_care_club',
+        'founder elite club' => 'founder_elite_club',
+    );
+
+    if (isset($map[$value])) {
+        return $map[$value];
+    }
+
+    $value = preg_replace('/[^a-z0-9]+/', '_', $value);
+    $value = trim($value, '_');
+
+    return $value;
+}
+
+function resolveMemberPlanSlug(array $member)
+{
+    $candidateKeys = array(
+        'membership_plan_slug',
+        'plan_slug',
+        'membership_slug',
+        'selected_plan_slug',
+        'current_plan_slug',
+        'membership_type',
+        'membership_name',
+        'plan_name',
+    );
+
+    foreach ($candidateKeys as $key) {
+        if (!isset($member[$key])) {
+            continue;
+        }
+
+        $value = trim((string) $member[$key]);
+        if ($value === '') {
+            continue;
+        }
+
+        if (strpos($value, ' ') !== false || strpos($value, '-') !== false) {
+            return mapMembershipNameToSlug($value);
+        }
+
+        return strtolower(trim($value));
+    }
+
+    return '';
+}
+
+function defaultPlanCredits($planSlug)
+{
+    $defaults = array(
+        'founder_walk_club' => array(
+            'walk' => 12,
+            'daycare' => 0,
+            'drop_in' => 0,
+            'boarding' => 0,
+            'sitting' => 0,
+        ),
+        'founder_care_club' => array(
+            'walk' => 16,
+            'daycare' => 2,
+            'drop_in' => 2,
+            'boarding' => 0,
+            'sitting' => 0,
+        ),
+        'founder_elite_club' => array(
+            'walk' => 20,
+            'daycare' => 4,
+            'drop_in' => 4,
+            'boarding' => 3,
+            'sitting' => 0,
+        ),
+    );
+
+    return isset($defaults[$planSlug]) ? $defaults[$planSlug] : array();
+}
+
+function creditColumnCandidates($creditType)
+{
+    if ($creditType === 'walk') {
+        return array(
+            'remaining' => array('remaining_walk_credits', 'walk_credits_remaining', 'remaining_walks', 'walks_remaining', 'walk_credits', 'monthly_walks_remaining'),
+            'included' => array('included_walks', 'walks_included', 'monthly_walks', 'walk_allowance'),
+        );
+    }
+
+    if ($creditType === 'daycare') {
+        return array(
+            'remaining' => array('remaining_daycare_credits', 'daycare_credits_remaining', 'remaining_daycare_days', 'daycare_days_remaining', 'daycare_credits'),
+            'included' => array('included_daycare_days', 'daycare_days_included', 'daycare_allowance'),
+        );
+    }
+
+    if ($creditType === 'drop_in') {
+        return array(
+            'remaining' => array('remaining_drop_in_credits', 'drop_in_credits_remaining', 'remaining_drop_ins', 'drop_ins_remaining', 'drop_in_credits'),
+            'included' => array('included_drop_ins', 'drop_ins_included', 'drop_in_allowance'),
+        );
+    }
+
+    if ($creditType === 'boarding') {
+        return array(
+            'remaining' => array('remaining_boarding_credits', 'boarding_credits_remaining', 'remaining_boarding_nights', 'boarding_nights_remaining', 'boarding_credits'),
+            'included' => array('included_boarding_nights', 'boarding_nights_included', 'boarding_allowance'),
+        );
+    }
+
+    if ($creditType === 'sitting') {
+        return array(
+            'remaining' => array('remaining_sitting_credits', 'sitting_credits_remaining', 'sitting_credits'),
+            'included' => array('included_sitting_visits', 'sitting_visits_included', 'sitting_allowance'),
+        );
+    }
+
+    return array(
+        'remaining' => array(),
+        'included' => array(),
+    );
+}
+
+function firstNumericValueFromArray(array $row, array $candidates)
+{
+    foreach ($candidates as $candidate) {
+        if (isset($row[$candidate]) && is_numeric($row[$candidate])) {
+            return array(
+                'column' => $candidate,
+                'value' => max(0, (int) $row[$candidate]),
+            );
+        }
+    }
+
+    return null;
+}
+
+function resolveMemberCreditState(PDO $pdo, array $member, $userId, $creditType)
+{
+    $userId = (int) $userId;
+    $candidateMap = creditColumnCandidates($creditType);
+    $planSlug = resolveMemberPlanSlug($member);
+    $defaultCredits = defaultPlanCredits($planSlug);
+    $defaultValue = isset($defaultCredits[$creditType]) ? (int) $defaultCredits[$creditType] : 0;
+
+    $state = array(
+        'plan_slug' => $planSlug,
+        'included' => 0,
+        'remaining' => 0,
+        'source' => 'none',
+        'balance_table' => null,
+        'balance_id_column' => null,
+        'balance_column' => null,
+    );
+
+    $remainingFromMember = firstNumericValueFromArray($member, $candidateMap['remaining']);
+    $includedFromMember = firstNumericValueFromArray($member, $candidateMap['included']);
+
+    if ($includedFromMember !== null) {
+        $state['included'] = (int) $includedFromMember['value'];
+    } elseif ($defaultValue > 0) {
+        $state['included'] = $defaultValue;
+    }
+
+    if ($remainingFromMember !== null) {
+        $state['remaining'] = (int) $remainingFromMember['value'];
+        $state['source'] = 'member_row';
+    }
+
+    $tables = array('users', 'members', 'client_profiles');
+
+    foreach ($tables as $table) {
+        if (!hasTable($pdo, $table)) {
+            continue;
+        }
+
+        $columns = getTableColumns($pdo, $table);
+        if (empty($columns)) {
+            continue;
+        }
+
+        $idColumn = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $remainingColumn = null;
+        foreach ($candidateMap['remaining'] as $candidate) {
+            if (in_array($candidate, $columns, true)) {
+                $remainingColumn = $candidate;
+                break;
+            }
+        }
+
+        $includedColumn = null;
+        foreach ($candidateMap['included'] as $candidate) {
+            if (in_array($candidate, $columns, true)) {
+                $includedColumn = $candidate;
+                break;
+            }
+        }
+
+        if ($remainingColumn === null && $includedColumn === null) {
+            continue;
+        }
+
+        $selectParts = array();
+        if ($remainingColumn !== null) {
+            $selectParts[] = $remainingColumn . ' AS remaining_value';
+        }
+        if ($includedColumn !== null) {
+            $selectParts[] = $includedColumn . ' AS included_value';
+        }
+
+        $stmt = $pdo->prepare("SELECT " . implode(', ', $selectParts) . " FROM {$table} WHERE {$idColumn} = :id LIMIT 1");
+        if (!safeExecute($stmt, array(':id' => $userId))) {
+            continue;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            continue;
+        }
+
+        if (isset($row['included_value']) && is_numeric($row['included_value'])) {
+            $state['included'] = max(0, (int) $row['included_value']);
+        }
+
+        if (isset($row['remaining_value']) && is_numeric($row['remaining_value'])) {
+            $state['remaining'] = max(0, (int) $row['remaining_value']);
+            $state['source'] = 'table_balance';
+            $state['balance_table'] = $table;
+            $state['balance_id_column'] = $idColumn;
+            $state['balance_column'] = $remainingColumn;
+            return $state;
+        }
+    }
+
+    if ($state['source'] === 'member_row') {
+        return $state;
+    }
+
+    $state['remaining'] = 0;
+    $state['source'] = 'none';
+    return $state;
+}
+
+function applyMemberCredits(PDO $pdo, array $creditState, $userId, $creditsUsed)
+{
+    $userId = (int) $userId;
+    $creditsUsed = max(0, (int) $creditsUsed);
+    $remainingBefore = max(0, (int) $creditState['remaining']);
+
+    if ($creditsUsed <= 0) {
+        return $remainingBefore;
+    }
+
+    $remainingAfter = max(0, $remainingBefore - $creditsUsed);
+
+    if (
+        $creditState['source'] === 'table_balance'
+        && !empty($creditState['balance_table'])
+        && !empty($creditState['balance_id_column'])
+        && !empty($creditState['balance_column'])
+    ) {
+        try {
+            $table = (string) $creditState['balance_table'];
+            $idColumn = (string) $creditState['balance_id_column'];
+            $balanceColumn = (string) $creditState['balance_column'];
+
+            $updateParts = array($balanceColumn . ' = :remaining');
+            if (hasColumn($pdo, $table, 'updated_at')) {
+                $updateParts[] = 'updated_at = :updated_at';
+            }
+
+            $sql = "UPDATE {$table} SET " . implode(', ', $updateParts) . " WHERE {$idColumn} = :id";
+            $params = array(
+                ':remaining' => $remainingAfter,
+                ':id' => $userId,
+            );
+
+            if (hasColumn($pdo, $table, 'updated_at')) {
+                $params[':updated_at'] = date('Y-m-d H:i:s');
+            }
+
+            $stmt = $pdo->prepare($sql);
+            safeExecute($stmt, $params);
+        } catch (Throwable $e) {
+        } catch (Exception $e) {
+        }
+    }
+
+    return $remainingAfter;
+}
+
 function insertBooking(PDO $pdo, array $payload)
 {
     $table = bookingTable($pdo);
@@ -524,6 +861,7 @@ function insertBooking(PDO $pdo, array $payload)
     $discountLabel = isset($payload['discount_label']) ? (string) $payload['discount_label'] : 'standard_member';
     $quantity = isset($payload['quantity']) ? (int) $payload['quantity'] : 1;
     $unitPrice = isset($payload['unit_price']) ? (float) $payload['unit_price'] : $price;
+    $paymentStatus = isset($payload['payment_status']) ? (string) $payload['payment_status'] : 'pending';
     $bookingMeta = isset($payload['booking_meta']) && is_array($payload['booking_meta']) ? $payload['booking_meta'] : array();
     $metaJson = !empty($bookingMeta) ? serializeBookingMeta($bookingMeta) : '';
 
@@ -591,12 +929,17 @@ function insertBooking(PDO $pdo, array $payload)
         'price' => $price,
         'total_price' => $price,
         'amount' => $price,
+        'amount_due' => $price,
         'unit_price' => $unitPrice,
 
         'status' => 'pending',
         'booking_status' => 'pending',
         'service_status' => 'pending',
         'walk_status' => 'pending',
+
+        'payment_status' => $paymentStatus,
+        'payment_state' => $paymentStatus,
+        'payment_required' => $paymentStatus === 'pending' ? 1 : 0,
 
         'pricing_type' => $pricingType,
         'label' => $discountLabel,
@@ -657,7 +1000,29 @@ if (!isLoggedInMember()) {
 }
 
 $userId = currentUserId();
+$memberRecord = array();
+
+if (function_exists('currentMember')) {
+    try {
+        $row = currentMember($pdo);
+        if (is_array($row)) {
+            $memberRecord = $row;
+        }
+    } catch (Throwable $e) {
+        $memberRecord = array();
+    } catch (Exception $e) {
+        $memberRecord = array();
+    }
+}
+
 $clientName = getUserDisplayName($pdo, $userId);
+if ($clientName === '' && !empty($memberRecord['full_name'])) {
+    $clientName = (string) $memberRecord['full_name'];
+}
+if ($clientName === '' && !empty($memberRecord['name'])) {
+    $clientName = (string) $memberRecord['name'];
+}
+
 $pets = getPetsForUser($pdo, $userId);
 $memberConfig = memberServiceConfig();
 
@@ -678,8 +1043,11 @@ $formData = array(
 );
 
 $error = '';
+$csrfToken = (string) $_SESSION['csrf_token'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $postedCsrf = (string) (isset($_POST['csrf_token']) ? $_POST['csrf_token'] : '');
+
     $formData['service_type'] = normalizeServiceTypeLocal(isset($_POST['service_type']) ? $_POST['service_type'] : 'walk');
     $formData['pet_id'] = trim((string) (isset($_POST['pet_id']) ? $_POST['pet_id'] : ''));
     $formData['service_date'] = trim((string) (isset($_POST['service_date']) ? $_POST['service_date'] : ''));
@@ -714,7 +1082,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if ($selectedPet === null) {
+    if ($postedCsrf === '' || !hash_equals($csrfToken, $postedCsrf)) {
+        $error = 'Your session expired. Please refresh the page and try again.';
+    } elseif ($selectedPet === null) {
         $error = 'Please choose a valid pet.';
     } elseif ($serviceDate === '') {
         $error = 'Please choose a service date.';
@@ -742,11 +1112,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
 
             $pricingResult = calculateMemberBookingPricing($pricingInput);
-            $price = (float) $pricingResult['total_price'];
+            $fullServiceTotal = (float) $pricingResult['total_price'];
+            $baseUnitPrice = (float) $pricingResult['unit_price'];
+            $requiredUnits = max(1, (int) $pricingResult['quantity']);
+            $creditType = normalizeCreditTypeForService($serviceType);
+
+            $creditState = resolveMemberCreditState($pdo, $memberRecord, $userId, $creditType);
+            $includedCredits = max(0, (int) $creditState['included']);
+            $remainingCreditsBefore = max(0, (int) $creditState['remaining']);
+            $creditsApplied = min($requiredUnits, $remainingCreditsBefore);
+            $overageUnits = max(0, $requiredUnits - $creditsApplied);
+            $remainingCreditsAfter = applyMemberCredits($pdo, $creditState, $userId, $creditsApplied);
+
+            $overageTotal = 0.00;
+            $overageUnitPrice = $baseUnitPrice;
+
+            if ($overageUnits > 0) {
+                if ($serviceType === 'drop-in') {
+                    $overagePricing = dd_get_service_pricing('drop_in', true, array(
+                        'quantity' => $overageUnits,
+                        'add_walk' => ($formData['drop_in_add_walk'] === '1'),
+                    ));
+                    $overageTotal = (float) $overagePricing['total_price'];
+                    $overageUnitPrice = (float) $overagePricing['unit_price'];
+                } else {
+                    $overageTotal = round($baseUnitPrice * $overageUnits, 2);
+                }
+            }
+
+            $paymentRequired = $overageUnits > 0 && $overageTotal > 0;
+            $memberPlanSlug = isset($creditState['plan_slug']) ? (string) $creditState['plan_slug'] : '';
+            $durationLabel = '';
+
+            if ($serviceType === 'walk' && $duration > 0) {
+                $durationLabel = $duration . ' Minutes';
+            } elseif ($serviceType === 'drop-in' && $dropInHours > 0) {
+                $durationLabel = $dropInHours . ' Hour' . ($dropInHours === 1 ? '' : 's');
+            }
 
             $bookingMeta = array(
                 'service_type' => $serviceType,
                 'member_pricing' => 1,
+                'member_plan_slug' => $memberPlanSlug,
+                'credit_type' => $creditType,
+                'included_credits' => $includedCredits,
+                'remaining_credits_before' => $remainingCreditsBefore,
+                'remaining_credits_after' => $remainingCreditsAfter,
+                'credits_applied' => $creditsApplied,
+                'required_units' => $requiredUnits,
+                'overage_units' => $overageUnits,
+                'full_service_total' => round($fullServiceTotal, 2),
+                'overage_total' => round($overageTotal, 2),
+                'payment_required' => $paymentRequired ? 1 : 0,
             );
 
             if ($serviceType === 'drop-in') {
@@ -777,11 +1194,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'service_time' => $serviceTime,
                 'duration_minutes' => (int) $pricingResult['duration'],
                 'notes' => $notes,
-                'price' => $price,
-                'pricing_type' => (string) $pricingResult['pricing_type'],
+                'price' => $paymentRequired ? $overageTotal : 0.00,
+                'pricing_type' => $paymentRequired ? 'member_overage' : 'member_credits',
                 'discount_label' => (string) $pricingResult['discount_label'],
-                'quantity' => (int) $pricingResult['quantity'],
-                'unit_price' => (float) $pricingResult['unit_price'],
+                'quantity' => $requiredUnits,
+                'unit_price' => $paymentRequired ? $overageUnitPrice : 0.00,
+                'payment_status' => $paymentRequired ? 'pending' : 'paid',
                 'referral_code' => $referralCode,
                 'booking_meta' => $bookingMeta,
             ));
@@ -790,6 +1208,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error = $insert['message'];
             } else {
                 $bookingId = (int) $insert['booking_id'];
+                $bookingReference = $bookingId > 0 ? ('#' . $bookingId) : 'Pending';
 
                 if (
                     $bookingId > 0
@@ -803,15 +1222,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $userId,
                             $referralCode,
                             $serviceType,
-                            $price
+                            $paymentRequired ? $overageTotal : 0.00
                         );
                     } catch (Throwable $e) {
                     } catch (Exception $e) {
                     }
                 }
 
+                if ($paymentRequired) {
+                    $_SESSION['service_payment_portal'] = array(
+                        'member_id' => $userId,
+                        'booking_id' => $bookingId,
+                        'booking_reference' => $bookingReference,
+                        'service_type' => normalizeServiceTypeForPortal($serviceType),
+                        'credit_type' => $creditType,
+                        'member_plan_slug' => $memberPlanSlug,
+                        'quantity' => $requiredUnits,
+                        'overage_units' => $overageUnits,
+                        'unit_price' => round((float) $overageUnitPrice, 2),
+                        'total_amount' => round((float) $overageTotal, 2),
+                        'booking_date' => $serviceDate,
+                        'booking_time' => $serviceTime,
+                        'pet_name' => (string) $selectedPet['pet_name'],
+                        'pet_size' => isset($selectedPet['size']) ? (string) $selectedPet['size'] : '',
+                        'duration_label' => $durationLabel,
+                        'included_credits' => $includedCredits,
+                        'remaining_credits' => $remainingCreditsAfter,
+                    );
+
+                    if ($bookingId > 0) {
+                        writeNotification(
+                            $pdo,
+                            $userId,
+                            $bookingId,
+                            'Payment Required',
+                            'Your ' . serviceLabel($serviceType) . ' booking was created, but additional payment is required before checkout is complete.'
+                        );
+                    }
+
+                    redirectTo('payment-portal.php?mode=service_overage&booking_id=' . $bookingId);
+                }
+
                 if ($bookingId > 0) {
                     $message = 'Your ' . serviceLabel($serviceType) . ' booking has been created and is pending confirmation.';
+                    if ($creditsApplied > 0) {
+                        $message .= ' Included member credits were applied to this booking.';
+                    }
                     if ($referralCode !== '') {
                         $message .= ' Referral code ' . $referralCode . ' was applied.';
                     }
@@ -1348,6 +1804,8 @@ $pricingMatrix = dd_pricing_matrix();
                 <?php endif; ?>
 
                 <form method="post" action="book-service.php<?php echo $formData['service_type'] === 'walk' ? '?service=walk' : ''; ?>" novalidate>
+                    <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
+
                     <div class="grid">
                         <div class="field-shell">
                             <label for="service_type">Service Type</label>
