@@ -1,6 +1,0 @@
-put book-service.php
-put payment-portal.php
-put create-checkout-session.php
-put payment-cancel.php
-put payment-success.php
-bye

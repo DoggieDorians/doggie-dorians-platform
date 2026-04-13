@@ -264,8 +264,109 @@ function load_booking_row(PDO $pdo, int $bookingId): ?array
     );
 }
 
-function mark_custom_plan_paid(PDO $pdo, int $planId, int $memberId): bool
+function current_payment_timestamp(): string
 {
+    return date('Y-m-d H:i:s');
+}
+
+function stripe_payment_intent_id($session): string
+{
+    $paymentIntent = $session->payment_intent ?? '';
+
+    if (is_string($paymentIntent)) {
+        return trim($paymentIntent);
+    }
+
+    if (is_object($paymentIntent) && isset($paymentIntent->id)) {
+        return trim((string) $paymentIntent->id);
+    }
+
+    return '';
+}
+
+function stripe_payment_reference($session): string
+{
+    $paymentIntentId = stripe_payment_intent_id($session);
+    if ($paymentIntentId !== '') {
+        return $paymentIntentId;
+    }
+
+    return trim((string) ($session->id ?? ''));
+}
+
+function stripe_payment_notes($session): string
+{
+    $parts = ['Paid via Stripe Checkout'];
+
+    $sessionId = trim((string) ($session->id ?? ''));
+    if ($sessionId !== '') {
+        $parts[] = 'Session ' . $sessionId;
+    }
+
+    $paymentIntentId = stripe_payment_intent_id($session);
+    if ($paymentIntentId !== '') {
+        $parts[] = 'Payment Intent ' . $paymentIntentId;
+    }
+
+    return implode(' | ', $parts);
+}
+
+function append_payment_update_parts(
+    array &$setParts,
+    array &$params,
+    array $columns,
+    array $statusCandidates,
+    string $paymentStatus,
+    string $paymentMethod,
+    string $paymentPaidAt,
+    string $paymentReference,
+    string $paymentNotes
+): bool {
+    $statusColumn = first_existing_column($columns, $statusCandidates);
+
+    if ($statusColumn === null) {
+        return false;
+    }
+
+    $setParts[] = "{$statusColumn} = :payment_status";
+    $params[':payment_status'] = $paymentStatus;
+
+    $paymentMethodColumn = first_existing_column($columns, ['payment_method']);
+    if ($paymentMethodColumn !== null && $paymentMethod !== '') {
+        $setParts[] = "{$paymentMethodColumn} = :payment_method";
+        $params[':payment_method'] = $paymentMethod;
+    }
+
+    $paymentPaidAtColumn = first_existing_column($columns, ['payment_paid_at']);
+    if ($paymentPaidAtColumn !== null && $paymentPaidAt !== '') {
+        $setParts[] = "{$paymentPaidAtColumn} = :payment_paid_at";
+        $params[':payment_paid_at'] = $paymentPaidAt;
+    }
+
+    $paymentReferenceColumn = first_existing_column($columns, ['payment_reference']);
+    if ($paymentReferenceColumn !== null && $paymentReference !== '') {
+        $setParts[] = "{$paymentReferenceColumn} = :payment_reference";
+        $params[':payment_reference'] = $paymentReference;
+    }
+
+    $paymentNotesColumn = first_existing_column($columns, ['payment_notes']);
+    if ($paymentNotesColumn !== null && $paymentNotes !== '') {
+        $setParts[] = "{$paymentNotesColumn} = :payment_notes";
+        $params[':payment_notes'] = $paymentNotes;
+    }
+
+    return true;
+}
+
+function mark_custom_plan_paid(
+    PDO $pdo,
+    int $planId,
+    int $memberId,
+    string $paymentMethod,
+    string $paymentPaidAt,
+    string $paymentReference,
+    string $paymentNotes = ''
+): bool {
     if ($planId <= 0 || $memberId <= 0 || !hasTable($pdo, 'custom_plans')) {
         return false;
     }
@@ -273,16 +374,29 @@ function mark_custom_plan_paid(PDO $pdo, int $planId, int $memberId): bool
     $columns = getTableColumns($pdo, 'custom_plans');
     $updatedAtColumn = first_existing_column($columns, ['updated_at']);
 
-    $setParts = ["payment_status = :payment_status"];
+    $setParts = [];
     $params = [
-        ':payment_status' => 'paid',
         ':id' => $planId,
         ':member_id' => $memberId,
     ];
 
+    if (!append_payment_update_parts(
+        $setParts,
+        $params,
+        $columns,
+        ['payment_status'],
+        'paid',
+        $paymentMethod,
+        $paymentPaidAt,
+        $paymentReference,
+        $paymentNotes
+    )) {
+        return false;
+    }
+
     if ($updatedAtColumn !== null) {
         $setParts[] = "{$updatedAtColumn} = :updated_at";
-        $params[':updated_at'] = date('Y-m-d H:i:s');
+        $params[':updated_at'] = current_payment_timestamp();
     }
 
     $sql = "
@@ -295,8 +409,15 @@ function mark_custom_plan_paid(PDO $pdo, int $planId, int $memberId): bool
     return safeExecute($pdo, $sql, $params);
 }
 
-function mark_booking_paid(PDO $pdo, int $bookingId, array $ownerMatch): bool
-{
+function mark_booking_paid(
+    PDO $pdo,
+    int $bookingId,
+    array $ownerMatch,
+    string $paymentMethod,
+    string $paymentPaidAt,
+    string $paymentReference,
+    string $paymentNotes = ''
+): bool {
     if ($bookingId <= 0 || empty($ownerMatch['column']) || empty($ownerMatch['value'])) {
         return false;
     }
@@ -308,26 +429,38 @@ function mark_booking_paid(PDO $pdo, int $bookingId, array $ownerMatch): bool
 
     $columns = getTableColumns($pdo, $table);
     $idColumn = first_existing_column($columns, ['id', 'booking_id', 'walk_id']);
-    $paymentStatusColumn = first_existing_column($columns, ['payment_status', 'payment_state']);
     $updatedAtColumn = first_existing_column($columns, ['updated_at']);
 
-    if ($idColumn === null || $paymentStatusColumn === null) {
+    if ($idColumn === null) {
         return false;
     }
 
     $ownerColumn = (string) $ownerMatch['column'];
     $ownerValue = (int) $ownerMatch['value'];
 
-    $setParts = ["{$paymentStatusColumn} = :payment_status"];
+    $setParts = [];
     $params = [
-        ':payment_status' => 'paid',
         ':id' => $bookingId,
         ':owner_value' => $ownerValue,
     ];
 
+    if (!append_payment_update_parts(
+        $setParts,
+        $params,
+        $columns,
+        ['payment_status', 'payment_state'],
+        'paid',
+        $paymentMethod,
+        $paymentPaidAt,
+        $paymentReference,
+        $paymentNotes
+    )) {
+        return false;
+    }
+
     if ($updatedAtColumn !== null) {
         $setParts[] = "{$updatedAtColumn} = :updated_at";
-        $params[':updated_at'] = date('Y-m-d H:i:s');
+        $params[':updated_at'] = current_payment_timestamp();
     }
 
     $sql = "
@@ -388,8 +521,14 @@ function find_non_member_payment_record(PDO $pdo, int $requestId): ?array
     return null;
 }
 
-function mark_non_member_paid(PDO $pdo, int $requestId): bool
-{
+function mark_non_member_paid(
+    PDO $pdo,
+    int $requestId,
+    string $paymentMethod,
+    string $paymentPaidAt,
+    string $paymentReference,
+    string $paymentNotes = ''
+): bool {
     $record = find_non_member_payment_record($pdo, $requestId);
 
     if ($record === null) {
@@ -404,8 +543,6 @@ function mark_non_member_paid(PDO $pdo, int $requestId): bool
     }
 
     $columns = getTableColumns($pdo, $table);
-    $statusColumn = first_existing_column($columns, ['status']);
-    $paymentStatusColumn = first_existing_column($columns, ['payment_status']);
     $updatedAtColumn = first_existing_column($columns, ['updated_at']);
 
     $setParts = [];
@@ -413,19 +550,23 @@ function mark_non_member_paid(PDO $pdo, int $requestId): bool
         ':id' => $requestId,
     ];
 
-    if ($paymentStatusColumn !== null) {
-        $setParts[] = "{$paymentStatusColumn} = :payment_status";
-        $params[':payment_status'] = 'paid';
-    }
-
-    if ($statusColumn !== null) {
-        $setParts[] = "{$statusColumn} = :status_value";
-        $params[':status_value'] = 'Paid';
+    if (!append_payment_update_parts(
+        $setParts,
+        $params,
+        $columns,
+        ['payment_status'],
+        'paid',
+        $paymentMethod,
+        $paymentPaidAt,
+        $paymentReference,
+        $paymentNotes
+    )) {
+        return false;
     }
 
     if ($updatedAtColumn !== null) {
         $setParts[] = "{$updatedAtColumn} = :updated_at";
-        $params[':updated_at'] = date('Y-m-d H:i:s');
+        $params[':updated_at'] = current_payment_timestamp();
     }
 
     if (empty($setParts)) {
@@ -488,6 +629,11 @@ if ($sessionId === '') {
         $paymentStatus = (string) ($session->payment_status ?? '');
         $amountPaidCents = (int) ($session->amount_total ?? 0);
         $metadata = $session->metadata ?? new stdClass();
+
+        $stripePaymentMethod = 'stripe';
+        $stripePaymentPaidAt = current_payment_timestamp();
+        $stripePaymentReference = stripe_payment_reference($session);
+        $stripePaymentNotes = stripe_payment_notes($session);
 
         if ($mode === '') {
             $mode = normalize_mode((string) ($metadata->mode ?? ''));
@@ -593,7 +739,15 @@ if ($sessionId === '') {
                 throw new RuntimeException('Paid amount does not match expected plan amount.');
             }
 
-            mark_custom_plan_paid($pdoInstance, $planId, $stripeMemberId);
+            mark_custom_plan_paid(
+                $pdoInstance,
+                $planId,
+                $stripeMemberId,
+                $stripePaymentMethod,
+                $stripePaymentPaidAt,
+                $stripePaymentReference,
+                $stripePaymentNotes
+            );
 
             $plan = safeFetchOne(
                 $pdoInstance,
@@ -699,7 +853,15 @@ if ($sessionId === '') {
                 throw new RuntimeException('This booking does not belong to the signed-in member.');
             }
 
-            mark_booking_paid($pdoInstance, $bookingId, $ownerMatch);
+            mark_booking_paid(
+                $pdoInstance,
+                $bookingId,
+                $ownerMatch,
+                $stripePaymentMethod,
+                $stripePaymentPaidAt,
+                $stripePaymentReference,
+                $stripePaymentNotes
+            );
 
             $booking = load_booking_row($pdoInstance, $bookingId) ?? $booking;
 
@@ -711,7 +873,9 @@ if ($sessionId === '') {
                 $itemName .= ' · ' . ucwords(str_replace('_', ' ', $memberPlanSlug));
             }
 
-            if (!payment_status_is_paid((string) ($booking['payment_status'] ?? ''))) {
+            $bookingPaymentStatus = (string) ($booking['payment_status'] ?? $booking['payment_state'] ?? '');
+
+            if (!payment_status_is_paid($bookingPaymentStatus)) {
                 $viewState = 'pending';
                 $statusBadgeClass = 'pending';
                 $statusBadgeLabel = 'Payment Received';
@@ -779,19 +943,21 @@ if ($sessionId === '') {
                 throw new RuntimeException('Matching non-member booking record was not found.');
             }
 
-            mark_non_member_paid($pdoInstance, $requestId);
+            mark_non_member_paid(
+                $pdoInstance,
+                $requestId,
+                $stripePaymentMethod,
+                $stripePaymentPaidAt,
+                $stripePaymentReference,
+                $stripePaymentNotes
+            );
+
             $record = find_non_member_payment_record($pdoInstance, $requestId) ?? $record;
 
             unset($_SESSION['non_member_payment_portal']);
 
             $row = is_array($record['row'] ?? null) ? $record['row'] : [];
-            $statusValue = '';
-
-            if (isset($row['payment_status'])) {
-                $statusValue = (string) $row['payment_status'];
-            } elseif (isset($row['status'])) {
-                $statusValue = strtolower(trim((string) $row['status'])) === 'paid' ? 'paid' : (string) $row['status'];
-            }
+            $statusValue = (string) ($row['payment_status'] ?? '');
 
             $itemLabel = 'Booking';
             $itemName = service_label_from_type($serviceType);

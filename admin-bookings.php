@@ -476,7 +476,7 @@ function cleanDisplayNotesText($text)
             continue;
         }
 
-        $cleanLines[] = rtrim((string) $line);
+        $cleanLines[] = trim((string) $line);
     }
 
     return trim(implode("\n", $cleanLines));
@@ -1051,7 +1051,7 @@ function fetchMemberBookings(PDO $pdo)
             'payment_method' => normalizePaymentMethod((string) valueFromRow($row, array('payment_method'), '')),
             'payment_paid_at' => (string) valueFromRow($row, array('payment_paid_at'), ''),
             'payment_reference' => (string) valueFromRow($row, array('payment_reference'), ''),
-            'payment_notes' => (string) valueFromRow($row, array('payment_notes'), ''),
+            'payment_notes' => cleanDisplayNotesText((string) valueFromRow($row, array('payment_notes'), '')),
             'notes' => $cleanNotes,
             'created_at' => (string) valueFromRow($row, array('created_at'), ''),
             'raw' => $row,
@@ -1089,8 +1089,8 @@ function fetchPublicBookings(PDO $pdo)
             'payment_method' => normalizePaymentMethod((string) valueFromRow($row, array('payment_method'), '')),
             'payment_paid_at' => (string) valueFromRow($row, array('payment_paid_at'), ''),
             'payment_reference' => (string) valueFromRow($row, array('payment_reference'), ''),
-            'payment_notes' => (string) valueFromRow($row, array('payment_notes'), ''),
-            'notes' => (string) valueFromRow($row, array('notes'), ''),
+            'payment_notes' => cleanDisplayNotesText((string) valueFromRow($row, array('payment_notes'), '')),
+            'notes' => cleanDisplayNotesText((string) valueFromRow($row, array('notes'), '')),
             'created_at' => (string) valueFromRow($row, array('created_at'), ''),
             'raw' => $row,
         );
@@ -1667,7 +1667,12 @@ foreach ($allBookings as $booking) {
         .detail-copy {
             color: rgba(244,241,234,0.74);
             line-height: 1.65;
-            white-space: pre-wrap;
+            white-space: normal;
+        }
+
+        .detail-copy strong {
+            display: block;
+            margin-bottom: 6px;
         }
 
         .admin-grid {
@@ -1971,14 +1976,14 @@ foreach ($allBookings as $booking) {
                         <?php if (trim((string) $booking['notes']) !== ''): ?>
                             <div class="detail-copy">
                                 <strong style="color:#f3e5c7;">Notes:</strong>
-                                <?php echo h($booking['notes']); ?>
+                                <?php echo nl2br(h(trim((string) $booking['notes']))); ?>
                             </div>
                         <?php endif; ?>
 
                         <?php if (trim((string) $booking['payment_notes']) !== ''): ?>
                             <div class="detail-copy">
                                 <strong style="color:#f3e5c7;">Payment Notes:</strong>
-                                <?php echo h($booking['payment_notes']); ?>
+                                <?php echo nl2br(h(trim((string) $booking['payment_notes']))); ?>
                             </div>
                         <?php endif; ?>
 
@@ -2110,19 +2115,6 @@ foreach ($allBookings as $booking) {
 
                                         <div class="btn-row">
                                             <button type="submit" class="btn btn-gold">Save Payment Details</button>
-
-                                            <?php if (!$isMemberBooking && isset($booking['email']) && trim((string) $booking['email']) !== ''): ?>
-                                                <button
-                                                    type="submit"
-                                                    formmethod="post"
-                                                    formaction="process-admin-non-member-booking-update.php"
-                                                    name="action"
-                                                    value="send_email"
-                                                    class="btn btn-light"
-                                                >Email Client</button>
-                                                <input type="hidden" formmethod="post" formaction="process-admin-non-member-booking-update.php" name="id" value="<?php echo (int) $booking['id']; ?>">
-                                            <?php endif; ?>
-
                                             <a class="btn btn-light" href="admin-dashboard.php">Back to Dashboard</a>
                                         </div>
                                     </form>

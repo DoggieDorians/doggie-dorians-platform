@@ -5,156 +5,610 @@ require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/database/setup.php';
 require_once __DIR__ . '/admin-auth.php';
 
-function e(?string $value): string
+function e($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+function money(float $amount): string
+{
+    return '$' . number_format($amount, 2);
+}
+
 function tableExists(PDO $pdo, string $table): bool
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool) $stmt->fetchColumn();
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute([':table' => $table]);
+        return (bool) $stmt->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function getColumns(PDO $pdo, string $table): array
 {
-    $columns = [];
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    if ($stmt) {
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
-            $columns[] = $column['name'];
+    static $cache = [];
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!tableExists($pdo, $table)) {
+        $cache[$table] = [];
+        return [];
+    }
+
+    try {
+        $safeTable = str_replace('"', '""', $table);
+        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
+        $columns = [];
+
+        if ($stmt) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
+                if (isset($column['name'])) {
+                    $columns[] = (string) $column['name'];
+                }
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $columns;
+    } catch (Throwable $e) {
+        $cache[$table] = [];
+        return [];
+    }
+}
+
+function firstExistingColumn(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
         }
     }
-    return $columns;
+
+    return null;
 }
 
-function hasColumn(array $columns, string $column): bool
+function quotedIdentifier(string $value): string
 {
-    return in_array($column, $columns, true);
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
-if (!tableExists($pdo, 'bookings')) {
-    die('Bookings table not found.');
+function fetchAllRows(PDO $pdo, string $table, array $columns): array
+{
+    if (empty($columns)) {
+        return [];
+    }
+
+    $select = implode(', ', array_map(static fn ($column) => quotedIdentifier((string) $column), $columns));
+    $safeTable = quotedIdentifier($table);
+
+    try {
+        $stmt = $pdo->query("SELECT {$select} FROM {$safeTable}");
+        return $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+    } catch (Throwable $e) {
+        return [];
+    }
 }
 
-$bookingColumns = getColumns($pdo, 'bookings');
+function rowValue(array $row, array $candidates, $default = null)
+{
+    foreach ($candidates as $candidate) {
+        if ($candidate === null || $candidate === '') {
+            continue;
+        }
 
-if (!hasColumn($bookingColumns, 'price')) {
-    die('Bookings table is missing price column.');
+        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
+            return $row[$candidate];
+        }
+    }
+
+    return $default;
 }
 
-$statusColumn = hasColumn($bookingColumns, 'status');
-$serviceTypeColumn = hasColumn($bookingColumns, 'service_type');
-$serviceDateColumn = hasColumn($bookingColumns, 'service_date');
+function normalizeSlug(string $value): string
+{
+    $value = trim(strtolower($value));
+    $value = str_replace(['_', '-'], ' ', $value);
+    $value = preg_replace('/\s+/', ' ', $value) ?? $value;
+    return trim($value);
+}
+
+function titleize(string $value, string $fallback = 'Unknown'): string
+{
+    $value = normalizeSlug($value);
+
+    if ($value === '') {
+        return $fallback;
+    }
+
+    return ucwords($value);
+}
+
+function serviceLabel(string $value, string $fallback = 'Service'): string
+{
+    $normalized = normalizeSlug($value);
+
+    return match ($normalized) {
+        'walk', 'walks' => 'Walk',
+        'drop in', 'dropin' => 'Drop-In',
+        'daycare', 'day care' => 'Daycare',
+        'boarding', 'board' => 'Boarding',
+        'sitting', 'pet sitting', 'in home sitting' => 'Pet Sitting',
+        default => $normalized !== '' ? ucwords($normalized) : $fallback,
+    };
+}
+
+function normalizePaymentStatus(?string $paymentStatus, ?string $legacyStatus = null): string
+{
+    $paymentStatus = normalizeSlug((string) $paymentStatus);
+    $legacyStatus = normalizeSlug((string) $legacyStatus);
+
+    if ($paymentStatus !== '') {
+        return match ($paymentStatus) {
+            'pending payment', 'awaiting payment' => 'pending',
+            default => $paymentStatus,
+        };
+    }
+
+    return match ($legacyStatus) {
+        'paid' => 'paid',
+        'pending payment', 'awaiting payment' => 'pending',
+        default => 'unpaid',
+    };
+}
+
+function paymentStatusLabel(string $value): string
+{
+    $value = normalizePaymentStatus($value);
+
+    return match ($value) {
+        'paid' => 'Paid',
+        'pending' => 'Pending',
+        'unpaid' => 'Unpaid',
+        'failed' => 'Failed',
+        'refunded' => 'Refunded',
+        'partial' => 'Partial',
+        default => titleize($value, 'Unpaid'),
+    };
+}
+
+function paymentStatusClass(string $value): string
+{
+    $normalized = normalizePaymentStatus($value);
+
+    return match ($normalized) {
+        'paid' => 'paid',
+        'pending' => 'pending',
+        'unpaid' => 'unpaid',
+        'failed' => 'failed',
+        'refunded' => 'refunded',
+        'partial' => 'partial',
+        default => 'default',
+    };
+}
+
+function isPaidStatus(string $value): bool
+{
+    return normalizePaymentStatus($value) === 'paid';
+}
+
+function isCancelledStatus(?string $status): bool
+{
+    $status = normalizeSlug((string) $status);
+    return in_array($status, ['cancelled', 'canceled'], true);
+}
+
+function amountFromRow(array $row): float
+{
+    $value = rowValue($row, [
+        'price',
+        'total_price',
+        'amount_due',
+        'amount',
+        'monthly_total',
+        'total',
+        'quoted_total',
+        'grand_total',
+        'estimated_price',
+    ], 0);
+
+    return is_numeric($value) ? round((float) $value, 2) : 0.0;
+}
+
+function normalizeDateBucket(?string $value): string
+{
+    $value = trim((string) $value);
+
+    if ($value === '') {
+        return '';
+    }
+
+    if (preg_match('/^\d{4}-\d{2}-\d{2}/', $value, $matches)) {
+        return $matches[0];
+    }
+
+    $timestamp = strtotime($value);
+    return $timestamp ? date('Y-m-d', $timestamp) : '';
+}
+
+function displayDate(?string $value): string
+{
+    $value = trim((string) $value);
+
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return $value;
+    }
+
+    return date('M j, Y', $timestamp);
+}
+
+function displayDateTime(?string $value): string
+{
+    $value = trim((string) $value);
+
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return $value;
+    }
+
+    return date('M j, Y g:i A', $timestamp);
+}
+
+function addBucket(array &$buckets, string $key, string $label, float $amount, int $count = 1): void
+{
+    if (!isset($buckets[$key])) {
+        $buckets[$key] = [
+            'label' => $label,
+            'amount' => 0.0,
+            'count' => 0,
+        ];
+    }
+
+    $buckets[$key]['amount'] += $amount;
+    $buckets[$key]['count'] += $count;
+}
+
+function sortedBuckets(array $buckets): array
+{
+    uasort($buckets, static function (array $a, array $b): int {
+        if ((float) $a['amount'] === (float) $b['amount']) {
+            return (int) $b['count'] <=> (int) $a['count'];
+        }
+
+        return ((float) $b['amount'] <=> (float) $a['amount']);
+    });
+
+    return array_values($buckets);
+}
 
 $summary = [
-    'gross_revenue' => 0.0,
-    'completed_revenue' => 0.0,
-    'pending_revenue' => 0.0,
-    'confirmed_revenue' => 0.0,
-    'cancelled_revenue' => 0.0,
-    'booking_count' => 0,
-    'completed_count' => 0,
+    'tracked_value' => 0.0,
+    'collected_value' => 0.0,
+    'outstanding_value' => 0.0,
+    'cancelled_value' => 0.0,
+    'member_booking_value' => 0.0,
+    'non_member_value' => 0.0,
+    'custom_plan_value' => 0.0,
+    'record_count' => 0,
+    'paid_count' => 0,
 ];
 
-$summarySql = "
-    SELECT
-        COUNT(*) AS booking_count,
-        COALESCE(SUM(price), 0) AS gross_revenue," .
-        ($statusColumn ? "
-        COALESCE(SUM(CASE WHEN status = 'completed' THEN price ELSE 0 END), 0) AS completed_revenue,
-        COALESCE(SUM(CASE WHEN status = 'pending' THEN price ELSE 0 END), 0) AS pending_revenue,
-        COALESCE(SUM(CASE WHEN status = 'confirmed' THEN price ELSE 0 END), 0) AS confirmed_revenue,
-        COALESCE(SUM(CASE WHEN status = 'cancelled' THEN price ELSE 0 END), 0) AS cancelled_revenue,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count
-        " : "
-        0 AS completed_revenue,
-        0 AS pending_revenue,
-        0 AS confirmed_revenue,
-        0 AS cancelled_revenue,
-        0 AS completed_count
-        ") . "
-    FROM bookings
-";
-
-$summaryStmt = $pdo->query($summarySql);
-if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
-    $summary['gross_revenue'] = (float) ($summaryRow['gross_revenue'] ?? 0);
-    $summary['completed_revenue'] = (float) ($summaryRow['completed_revenue'] ?? 0);
-    $summary['pending_revenue'] = (float) ($summaryRow['pending_revenue'] ?? 0);
-    $summary['confirmed_revenue'] = (float) ($summaryRow['confirmed_revenue'] ?? 0);
-    $summary['cancelled_revenue'] = (float) ($summaryRow['cancelled_revenue'] ?? 0);
-    $summary['booking_count'] = (int) ($summaryRow['booking_count'] ?? 0);
-    $summary['completed_count'] = (int) ($summaryRow['completed_count'] ?? 0);
-}
-
+$sourceBreakdown = [];
 $serviceBreakdown = [];
-if ($serviceTypeColumn) {
-    $serviceStmt = $pdo->query("
-        SELECT
-            service_type,
-            COUNT(*) AS booking_count,
-            COALESCE(SUM(price), 0) AS total_revenue
-        FROM bookings
-        GROUP BY service_type
-        ORDER BY total_revenue DESC, booking_count DESC
-    ");
-    $serviceBreakdown = $serviceStmt ? $serviceStmt->fetchAll(PDO::FETCH_ASSOC) : [];
-}
-
-$statusBreakdown = [];
-if ($statusColumn) {
-    $statusStmt = $pdo->query("
-        SELECT
-            status,
-            COUNT(*) AS booking_count,
-            COALESCE(SUM(price), 0) AS total_revenue
-        FROM bookings
-        GROUP BY status
-        ORDER BY total_revenue DESC, booking_count DESC
-    ");
-    $statusBreakdown = $statusStmt ? $statusStmt->fetchAll(PDO::FETCH_ASSOC) : [];
-}
-
-$dailyBreakdown = [];
-if ($serviceDateColumn) {
-    $dailyStmt = $pdo->query("
-        SELECT
-            service_date,
-            COUNT(*) AS booking_count,
-            COALESCE(SUM(price), 0) AS total_revenue
-        FROM bookings
-        GROUP BY service_date
-        ORDER BY service_date DESC
-        LIMIT 20
-    ");
-    $dailyBreakdown = $dailyStmt ? $dailyStmt->fetchAll(PDO::FETCH_ASSOC) : [];
-}
-
+$paymentBreakdown = [];
+$dailyCollections = [];
 $recentRevenueRows = [];
-$recentSelect = ['id', 'price'];
 
-if ($serviceTypeColumn) {
-    $recentSelect[] = 'service_type';
-}
-if ($serviceDateColumn) {
-    $recentSelect[] = 'service_date';
-}
-if ($statusColumn) {
-    $recentSelect[] = 'status';
-}
-if (hasColumn($bookingColumns, 'walker_name')) {
-    $recentSelect[] = 'walker_name';
+/*
+|--------------------------------------------------------------------------
+| Member Bookings / Walks
+|--------------------------------------------------------------------------
+*/
+$memberBookingTable = null;
+foreach (['bookings', 'walks'] as $candidateTable) {
+    if (tableExists($pdo, $candidateTable)) {
+        $memberBookingTable = $candidateTable;
+        break;
+    }
 }
 
-$recentStmt = $pdo->query("
-    SELECT " . implode(', ', $recentSelect) . "
-    FROM bookings
-    ORDER BY " . ($serviceDateColumn ? 'service_date DESC, ' : '') . "id DESC
-    LIMIT 15
-");
-$recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+if ($memberBookingTable !== null) {
+    $columns = getColumns($pdo, $memberBookingTable);
+
+    $idColumn = firstExistingColumn($columns, ['id', 'booking_id', 'walk_id']);
+    $amountColumn = firstExistingColumn($columns, ['price', 'total_price', 'amount_due', 'amount']);
+    $serviceColumn = firstExistingColumn($columns, ['service_type', 'type', 'booking_type', 'category', 'service']);
+    $dateColumn = firstExistingColumn($columns, ['service_date', 'booking_date', 'walk_date', 'date', 'scheduled_date', 'start_date']);
+    $statusColumn = firstExistingColumn($columns, ['status']);
+    $paymentStatusColumn = firstExistingColumn($columns, ['payment_status', 'payment_state']);
+    $paymentMethodColumn = firstExistingColumn($columns, ['payment_method']);
+    $paymentPaidAtColumn = firstExistingColumn($columns, ['payment_paid_at']);
+    $walkerColumn = firstExistingColumn($columns, ['walker_name']);
+
+    if ($amountColumn !== null) {
+        $selectColumns = array_values(array_filter([
+            $idColumn,
+            $amountColumn,
+            $serviceColumn,
+            $dateColumn,
+            $statusColumn,
+            $paymentStatusColumn,
+            $paymentMethodColumn,
+            $paymentPaidAtColumn,
+            $walkerColumn,
+        ]));
+
+        $rows = fetchAllRows($pdo, $memberBookingTable, $selectColumns);
+
+        foreach ($rows as $row) {
+            $amount = amountFromRow($row);
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $summary['tracked_value'] += $amount;
+            $summary['member_booking_value'] += $amount;
+            $summary['record_count']++;
+
+            $workflowStatus = (string) rowValue($row, [$statusColumn], '');
+            $paymentStatus = normalizePaymentStatus(
+                (string) rowValue($row, [$paymentStatusColumn], ''),
+                $workflowStatus
+            );
+
+            if (isPaidStatus($paymentStatus)) {
+                $summary['collected_value'] += $amount;
+                $summary['paid_count']++;
+            } elseif (isCancelledStatus($workflowStatus)) {
+                $summary['cancelled_value'] += $amount;
+            } else {
+                $summary['outstanding_value'] += $amount;
+            }
+
+            addBucket($sourceBreakdown, 'member_bookings', 'Member Bookings', $amount);
+            addBucket(
+                $serviceBreakdown,
+                'member:' . strtolower((string) rowValue($row, [$serviceColumn], 'service')),
+                serviceLabel((string) rowValue($row, [$serviceColumn], 'Service')),
+                $amount
+            );
+            addBucket($paymentBreakdown, $paymentStatus, paymentStatusLabel($paymentStatus), $amount);
+
+            $collectionDate = normalizeDateBucket((string) rowValue($row, [$paymentPaidAtColumn], ''));
+            if ($collectionDate !== '' && isPaidStatus($paymentStatus)) {
+                addBucket($dailyCollections, $collectionDate, $collectionDate, $amount);
+            }
+
+            $recentRevenueRows[] = [
+                'source' => 'Member Booking',
+                'id' => (string) rowValue($row, [$idColumn], ''),
+                'label' => serviceLabel((string) rowValue($row, [$serviceColumn], 'Service')),
+                'date' => (string) rowValue($row, [$dateColumn], ''),
+                'workflow_status' => $workflowStatus,
+                'payment_status' => paymentStatusLabel($paymentStatus),
+                'payment_status_key' => $paymentStatus,
+                'payment_method' => titleize((string) rowValue($row, [$paymentMethodColumn], ''), '—'),
+                'extra' => (string) rowValue($row, [$walkerColumn], ''),
+                'amount' => $amount,
+                'sort_date' => (string) rowValue($row, [$paymentPaidAtColumn], (string) rowValue($row, [$dateColumn], '')),
+            ];
+        }
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| Non-Member Bookings
+|--------------------------------------------------------------------------
+*/
+$nonMemberTable = null;
+foreach (['non_member_bookings', 'public_booking_requests'] as $candidateTable) {
+    if (tableExists($pdo, $candidateTable)) {
+        $nonMemberTable = $candidateTable;
+        break;
+    }
+}
+
+if ($nonMemberTable !== null) {
+    $columns = getColumns($pdo, $nonMemberTable);
+
+    $idColumn = firstExistingColumn($columns, ['id', 'request_id']);
+    $amountColumn = firstExistingColumn($columns, ['price', 'total_price', 'amount_due', 'amount', 'quoted_total', 'grand_total', 'estimated_price']);
+    $serviceColumn = firstExistingColumn($columns, ['service_type', 'type', 'booking_type', 'category', 'service']);
+    $dateColumn = firstExistingColumn($columns, ['service_date', 'booking_date', 'walk_date', 'date', 'scheduled_date', 'start_date', 'date_start']);
+    $statusColumn = firstExistingColumn($columns, ['status']);
+    $paymentStatusColumn = firstExistingColumn($columns, ['payment_status']);
+    $paymentMethodColumn = firstExistingColumn($columns, ['payment_method']);
+    $paymentPaidAtColumn = firstExistingColumn($columns, ['payment_paid_at']);
+    $nameColumn = firstExistingColumn($columns, ['full_name', 'client_name', 'owner_name']);
+
+    if ($amountColumn !== null) {
+        $selectColumns = array_values(array_filter([
+            $idColumn,
+            $amountColumn,
+            $serviceColumn,
+            $dateColumn,
+            $statusColumn,
+            $paymentStatusColumn,
+            $paymentMethodColumn,
+            $paymentPaidAtColumn,
+            $nameColumn,
+        ]));
+
+        $rows = fetchAllRows($pdo, $nonMemberTable, $selectColumns);
+
+        foreach ($rows as $row) {
+            $amount = amountFromRow($row);
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $summary['tracked_value'] += $amount;
+            $summary['non_member_value'] += $amount;
+            $summary['record_count']++;
+
+            $workflowStatus = (string) rowValue($row, [$statusColumn], '');
+            $paymentStatus = normalizePaymentStatus(
+                (string) rowValue($row, [$paymentStatusColumn], ''),
+                $workflowStatus
+            );
+
+            if (isPaidStatus($paymentStatus)) {
+                $summary['collected_value'] += $amount;
+                $summary['paid_count']++;
+            } elseif (isCancelledStatus($workflowStatus)) {
+                $summary['cancelled_value'] += $amount;
+            } else {
+                $summary['outstanding_value'] += $amount;
+            }
+
+            addBucket($sourceBreakdown, 'non_member', 'Non-Member Bookings', $amount);
+            addBucket(
+                $serviceBreakdown,
+                'nonmember:' . strtolower((string) rowValue($row, [$serviceColumn], 'service')),
+                serviceLabel((string) rowValue($row, [$serviceColumn], 'Service')),
+                $amount
+            );
+            addBucket($paymentBreakdown, $paymentStatus, paymentStatusLabel($paymentStatus), $amount);
+
+            $collectionDate = normalizeDateBucket((string) rowValue($row, [$paymentPaidAtColumn], ''));
+            if ($collectionDate !== '' && isPaidStatus($paymentStatus)) {
+                addBucket($dailyCollections, $collectionDate, $collectionDate, $amount);
+            }
+
+            $recentRevenueRows[] = [
+                'source' => 'Non-Member Booking',
+                'id' => (string) rowValue($row, [$idColumn], ''),
+                'label' => serviceLabel((string) rowValue($row, [$serviceColumn], 'Service')),
+                'date' => (string) rowValue($row, [$dateColumn], ''),
+                'workflow_status' => $workflowStatus,
+                'payment_status' => paymentStatusLabel($paymentStatus),
+                'payment_status_key' => $paymentStatus,
+                'payment_method' => titleize((string) rowValue($row, [$paymentMethodColumn], ''), '—'),
+                'extra' => (string) rowValue($row, [$nameColumn], ''),
+                'amount' => $amount,
+                'sort_date' => (string) rowValue($row, [$paymentPaidAtColumn], (string) rowValue($row, [$dateColumn], '')),
+            ];
+        }
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| Custom Plans
+|--------------------------------------------------------------------------
+*/
+if (tableExists($pdo, 'custom_plans')) {
+    $columns = getColumns($pdo, 'custom_plans');
+
+    $idColumn = firstExistingColumn($columns, ['id']);
+    $amountColumn = firstExistingColumn($columns, ['monthly_total', 'price', 'amount', 'total']);
+    $nameColumn = firstExistingColumn($columns, ['plan_name', 'name']);
+    $statusColumn = firstExistingColumn($columns, ['status']);
+    $paymentStatusColumn = firstExistingColumn($columns, ['payment_status']);
+    $paymentMethodColumn = firstExistingColumn($columns, ['payment_method']);
+    $paymentPaidAtColumn = firstExistingColumn($columns, ['payment_paid_at']);
+    $updatedAtColumn = firstExistingColumn($columns, ['updated_at', 'created_at']);
+
+    if ($amountColumn !== null) {
+        $selectColumns = array_values(array_filter([
+            $idColumn,
+            $amountColumn,
+            $nameColumn,
+            $statusColumn,
+            $paymentStatusColumn,
+            $paymentMethodColumn,
+            $paymentPaidAtColumn,
+            $updatedAtColumn,
+        ]));
+
+        $rows = fetchAllRows($pdo, 'custom_plans', $selectColumns);
+
+        foreach ($rows as $row) {
+            $amount = amountFromRow($row);
+            if ($amount <= 0) {
+                continue;
+            }
+
+            $summary['tracked_value'] += $amount;
+            $summary['custom_plan_value'] += $amount;
+            $summary['record_count']++;
+
+            $workflowStatus = (string) rowValue($row, [$statusColumn], '');
+            $paymentStatus = normalizePaymentStatus(
+                (string) rowValue($row, [$paymentStatusColumn], ''),
+                $workflowStatus
+            );
+
+            if (isPaidStatus($paymentStatus)) {
+                $summary['collected_value'] += $amount;
+                $summary['paid_count']++;
+            } else {
+                $summary['outstanding_value'] += $amount;
+            }
+
+            $planLabel = trim((string) rowValue($row, [$nameColumn], 'Custom Plan'));
+            if ($planLabel === '') {
+                $planLabel = 'Custom Plan';
+            }
+
+            addBucket($sourceBreakdown, 'custom_plans', 'Custom Plans', $amount);
+            addBucket($serviceBreakdown, 'plan:' . strtolower($planLabel), $planLabel, $amount);
+            addBucket($paymentBreakdown, $paymentStatus, paymentStatusLabel($paymentStatus), $amount);
+
+            $collectionDate = normalizeDateBucket((string) rowValue($row, [$paymentPaidAtColumn], ''));
+            if ($collectionDate !== '' && isPaidStatus($paymentStatus)) {
+                addBucket($dailyCollections, $collectionDate, $collectionDate, $amount);
+            }
+
+            $recentRevenueRows[] = [
+                'source' => 'Custom Plan',
+                'id' => (string) rowValue($row, [$idColumn], ''),
+                'label' => $planLabel,
+                'date' => (string) rowValue($row, [$updatedAtColumn], ''),
+                'workflow_status' => $workflowStatus,
+                'payment_status' => paymentStatusLabel($paymentStatus),
+                'payment_status_key' => $paymentStatus,
+                'payment_method' => titleize((string) rowValue($row, [$paymentMethodColumn], ''), '—'),
+                'extra' => '',
+                'amount' => $amount,
+                'sort_date' => (string) rowValue($row, [$paymentPaidAtColumn], (string) rowValue($row, [$updatedAtColumn], '')),
+            ];
+        }
+    }
+}
+
+$sourceBreakdownRows = sortedBuckets($sourceBreakdown);
+$serviceBreakdownRows = sortedBuckets($serviceBreakdown);
+$paymentBreakdownRows = sortedBuckets($paymentBreakdown);
+
+krsort($dailyCollections);
+$dailyCollectionRows = array_slice(array_values($dailyCollections), 0, 20);
+
+usort($recentRevenueRows, static function (array $a, array $b): int {
+    $timeA = strtotime((string) ($a['sort_date'] ?? '')) ?: 0;
+    $timeB = strtotime((string) ($b['sort_date'] ?? '')) ?: 0;
+
+    if ($timeA === $timeB) {
+        return strcmp((string) ($b['id'] ?? ''), (string) ($a['id'] ?? ''));
+    }
+
+    return $timeB <=> $timeA;
+});
+
+$recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -222,7 +676,7 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
       margin-top: 12px;
       color: var(--muted);
       font-size: 15px;
-      max-width: 760px;
+      max-width: 860px;
       line-height: 1.6;
     }
 
@@ -254,7 +708,7 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
     .summary-grid {
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(8, minmax(0, 1fr));
       gap: 16px;
       margin-bottom: 24px;
     }
@@ -277,9 +731,10 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
     }
 
     .card-value {
-      font-size: 34px;
+      font-size: 30px;
       font-weight: 800;
       letter-spacing: -0.03em;
+      line-height: 1.05;
     }
 
     .card-note {
@@ -373,7 +828,7 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 980px;
+      min-width: 1150px;
     }
 
     thead th {
@@ -404,13 +859,6 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
       color: var(--text);
     }
 
-    .secondary-text {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.5;
-    }
-
     .status-pill {
       display: inline-flex;
       align-items: center;
@@ -422,6 +870,33 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
       text-transform: capitalize;
       background: rgba(255,255,255,0.06);
       color: var(--text);
+    }
+
+    .status-pill.paid {
+      background: rgba(94,211,154,0.16);
+      color: #9bf0c4;
+    }
+
+    .status-pill.pending {
+      background: rgba(212,175,55,0.14);
+      color: #f3d57a;
+    }
+
+    .status-pill.unpaid,
+    .status-pill.default {
+      background: rgba(255,255,255,0.08);
+      color: #f7f4ee;
+    }
+
+    .status-pill.failed,
+    .status-pill.refunded {
+      background: rgba(255,152,152,0.14);
+      color: #ffb2b2;
+    }
+
+    .status-pill.partial {
+      background: rgba(102,179,255,0.14);
+      color: #9acbff;
     }
 
     .empty-state {
@@ -437,11 +912,13 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
       margin-bottom: 10px;
     }
 
-    @media (max-width: 1200px) {
+    @media (max-width: 1400px) {
       .summary-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
       }
+    }
 
+    @media (max-width: 1200px) {
       .layout {
         grid-template-columns: 1fr;
       }
@@ -469,7 +946,7 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
         <div class="eyebrow">Doggie Dorian’s Admin</div>
         <h1>Revenue Dashboard</h1>
         <div class="subtext">
-          Track booked revenue, completed revenue, service mix, and daily production using the same coordinated bookings data powering the rest of the admin system.
+          View tracked value, collected payments, unpaid balances, and revenue mix across member bookings, non-member bookings, and custom plans without mixing payment data into operational booking workflow.
         </div>
       </div>
 
@@ -481,97 +958,109 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
     <div class="summary-grid">
       <div class="card">
-        <div class="card-label">Gross Revenue</div>
-        <div class="card-value">$<?php echo number_format($summary['gross_revenue'], 2); ?></div>
-        <div class="card-note">All bookings combined</div>
+        <div class="card-label">Tracked Value</div>
+        <div class="card-value"><?= money($summary['tracked_value']) ?></div>
+        <div class="card-note">All tracked booking and plan amounts</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Completed Revenue</div>
-        <div class="card-value">$<?php echo number_format($summary['completed_revenue'], 2); ?></div>
-        <div class="card-note">Revenue from completed services only</div>
+        <div class="card-label">Collected Revenue</div>
+        <div class="card-value"><?= money($summary['collected_value']) ?></div>
+        <div class="card-note">Rows marked paid through payment status</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Pending Revenue</div>
-        <div class="card-value">$<?php echo number_format($summary['pending_revenue'], 2); ?></div>
-        <div class="card-note">Still awaiting fulfillment</div>
+        <div class="card-label">Outstanding Value</div>
+        <div class="card-value"><?= money($summary['outstanding_value']) ?></div>
+        <div class="card-note">Tracked value not yet marked paid</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Confirmed Revenue</div>
-        <div class="card-value">$<?php echo number_format($summary['confirmed_revenue'], 2); ?></div>
-        <div class="card-note">Upcoming scheduled revenue</div>
+        <div class="card-label">Cancelled Value</div>
+        <div class="card-value"><?= money($summary['cancelled_value']) ?></div>
+        <div class="card-note">Operationally cancelled rows not counted as collected</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Cancelled Revenue</div>
-        <div class="card-value">$<?php echo number_format($summary['cancelled_revenue'], 2); ?></div>
-        <div class="card-note">Value tied to cancelled bookings</div>
+        <div class="card-label">Member Bookings</div>
+        <div class="card-value"><?= money($summary['member_booking_value']) ?></div>
+        <div class="card-note">Tracked member booking value</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Completed Jobs</div>
-        <div class="card-value"><?php echo $summary['completed_count']; ?></div>
-        <div class="card-note"><?php echo $summary['booking_count']; ?> total bookings in system</div>
+        <div class="card-label">Non-Member</div>
+        <div class="card-value"><?= money($summary['non_member_value']) ?></div>
+        <div class="card-note">Tracked public booking value</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Custom Plans</div>
+        <div class="card-value"><?= money($summary['custom_plan_value']) ?></div>
+        <div class="card-note">Tracked custom plan value</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Paid Records</div>
+        <div class="card-value"><?= (int) $summary['paid_count'] ?></div>
+        <div class="card-note"><?= (int) $summary['record_count'] ?> tracked rows total</div>
       </div>
     </div>
 
     <div class="layout">
       <div class="panel">
         <div class="panel-inner">
-          <h2 class="panel-title">Revenue by Service</h2>
+          <h2 class="panel-title">Revenue by Source</h2>
           <div class="panel-subtitle">
-            See which service types are producing the most revenue and booking volume.
+            Compare how much tracked value is coming from member bookings, non-member bookings, and custom plans.
           </div>
 
-          <?php if (!$serviceBreakdown): ?>
+          <?php if (!$sourceBreakdownRows): ?>
+            <div class="empty-state">
+              <strong>No revenue tracked yet</strong>
+              No source totals are available right now.
+            </div>
+          <?php else: ?>
+            <div class="list">
+              <?php foreach ($sourceBreakdownRows as $row): ?>
+                <div class="list-row">
+                  <div class="list-left">
+                    <strong><?= e((string) $row['label']) ?></strong>
+                    <span><?= (int) $row['count'] ?> rows</span>
+                  </div>
+                  <div class="list-right">
+                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <span>Tracked value</span>
+                  </div>
+                </div>
+              <?php endforeach; ?>
+            </div>
+          <?php endif; ?>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-inner">
+          <h2 class="panel-title">Revenue by Service / Plan</h2>
+          <div class="panel-subtitle">
+            See which services and plan types are producing the most tracked value.
+          </div>
+
+          <?php if (!$serviceBreakdownRows): ?>
             <div class="empty-state">
               <strong>No service revenue yet</strong>
-              No service breakdown is available right now.
+              No service or plan breakdown is available right now.
             </div>
           <?php else: ?>
             <div class="list">
-              <?php foreach ($serviceBreakdown as $row): ?>
+              <?php foreach ($serviceBreakdownRows as $row): ?>
                 <div class="list-row">
                   <div class="list-left">
-                    <strong><?php echo e(ucfirst((string) ($row['service_type'] ?? 'Service'))); ?></strong>
-                    <span><?php echo (int) ($row['booking_count'] ?? 0); ?> bookings</span>
+                    <strong><?= e((string) $row['label']) ?></strong>
+                    <span><?= (int) $row['count'] ?> rows</span>
                   </div>
                   <div class="list-right">
-                    <strong>$<?php echo number_format((float) ($row['total_revenue'] ?? 0), 2); ?></strong>
-                    <span>Total revenue</span>
-                  </div>
-                </div>
-              <?php endforeach; ?>
-            </div>
-          <?php endif; ?>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-inner">
-          <h2 class="panel-title">Revenue by Status</h2>
-          <div class="panel-subtitle">
-            Understand how much revenue sits in each booking stage.
-          </div>
-
-          <?php if (!$statusBreakdown): ?>
-            <div class="empty-state">
-              <strong>No status revenue yet</strong>
-              No status breakdown is available right now.
-            </div>
-          <?php else: ?>
-            <div class="list">
-              <?php foreach ($statusBreakdown as $row): ?>
-                <div class="list-row">
-                  <div class="list-left">
-                    <strong><?php echo e(ucfirst((string) ($row['status'] ?? 'Status'))); ?></strong>
-                    <span><?php echo (int) ($row['booking_count'] ?? 0); ?> bookings</span>
-                  </div>
-                  <div class="list-right">
-                    <strong>$<?php echo number_format((float) ($row['total_revenue'] ?? 0), 2); ?></strong>
-                    <span>Total revenue</span>
+                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <span>Tracked value</span>
                   </div>
                 </div>
               <?php endforeach; ?>
@@ -584,27 +1073,27 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
     <div class="layout">
       <div class="panel">
         <div class="panel-inner">
-          <h2 class="panel-title">Daily Revenue Snapshot</h2>
+          <h2 class="panel-title">Payment Breakdown</h2>
           <div class="panel-subtitle">
-            Recent revenue grouped by service date.
+            Revenue grouped by payment status instead of booking workflow status.
           </div>
 
-          <?php if (!$dailyBreakdown): ?>
+          <?php if (!$paymentBreakdownRows): ?>
             <div class="empty-state">
-              <strong>No daily revenue yet</strong>
-              No dated booking revenue is available right now.
+              <strong>No payment data yet</strong>
+              No payment breakdown is available right now.
             </div>
           <?php else: ?>
             <div class="list">
-              <?php foreach ($dailyBreakdown as $row): ?>
+              <?php foreach ($paymentBreakdownRows as $row): ?>
                 <div class="list-row">
                   <div class="list-left">
-                    <strong><?php echo e($row['service_date'] ?? 'No date'); ?></strong>
-                    <span><?php echo (int) ($row['booking_count'] ?? 0); ?> bookings</span>
+                    <strong><?= e((string) $row['label']) ?></strong>
+                    <span><?= (int) $row['count'] ?> rows</span>
                   </div>
                   <div class="list-right">
-                    <strong>$<?php echo number_format((float) ($row['total_revenue'] ?? 0), 2); ?></strong>
-                    <span>Revenue</span>
+                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <span>Tracked value</span>
                   </div>
                 </div>
               <?php endforeach; ?>
@@ -615,40 +1104,32 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
 
       <div class="panel">
         <div class="panel-inner">
-          <h2 class="panel-title">Revenue Notes</h2>
+          <h2 class="panel-title">Daily Collections</h2>
           <div class="panel-subtitle">
-            Use this page to judge business performance from several angles.
+            Paid revenue grouped by payment date where available.
           </div>
 
-          <div class="list">
-            <div class="list-row">
-              <div class="list-left">
-                <strong>Gross vs Completed</strong>
-                <span>Gross revenue shows booked value. Completed revenue shows what has actually been fulfilled.</span>
-              </div>
+          <?php if (!$dailyCollectionRows): ?>
+            <div class="empty-state">
+              <strong>No collected revenue yet</strong>
+              No paid rows with collection dates are available right now.
             </div>
-
-            <div class="list-row">
-              <div class="list-left">
-                <strong>Pending and Confirmed</strong>
-                <span>These amounts represent future pipeline and help you see what is likely to convert into fulfilled revenue.</span>
-              </div>
+          <?php else: ?>
+            <div class="list">
+              <?php foreach ($dailyCollectionRows as $row): ?>
+                <div class="list-row">
+                  <div class="list-left">
+                    <strong><?= e(displayDate((string) $row['label'])) ?></strong>
+                    <span><?= (int) $row['count'] ?> paid rows</span>
+                  </div>
+                  <div class="list-right">
+                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <span>Collected</span>
+                  </div>
+                </div>
+              <?php endforeach; ?>
             </div>
-
-            <div class="list-row">
-              <div class="list-left">
-                <strong>Cancelled Revenue</strong>
-                <span>This can help you spot lost value and identify where operational or client retention issues may exist.</span>
-              </div>
-            </div>
-
-            <div class="list-row">
-              <div class="list-left">
-                <strong>Next Upgrade</strong>
-                <span>After this, the strongest next page is admin-walks.php so operations and live service flow match the revenue side.</span>
-              </div>
-            </div>
-          </div>
+          <?php endif; ?>
         </div>
       </div>
     </div>
@@ -657,60 +1138,61 @@ $recentRevenueRows = $recentStmt ? $recentStmt->fetchAll(PDO::FETCH_ASSOC) : [];
       <div class="panel-inner">
         <h2 class="panel-title">Recent Revenue Rows</h2>
         <div class="panel-subtitle">
-          Recent bookings with price and status for quick spot-checking.
+          Recent tracked rows across member bookings, non-member bookings, and custom plans for quick spot-checking.
         </div>
 
         <?php if (!$recentRevenueRows): ?>
           <div class="empty-state">
             <strong>No revenue rows yet</strong>
-            No bookings are available right now.
+            No tracked rows are available right now.
           </div>
         <?php else: ?>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
+                  <th>Source</th>
                   <th>ID</th>
-                  <?php if ($serviceTypeColumn): ?><th>Service</th><?php endif; ?>
-                  <?php if ($serviceDateColumn): ?><th>Date</th><?php endif; ?>
-                  <?php if ($statusColumn): ?><th>Status</th><?php endif; ?>
-                  <?php if (hasColumn($bookingColumns, 'walker_name')): ?><th>Walker</th><?php endif; ?>
-                  <th>Price</th>
+                  <th>Item</th>
+                  <th>Date</th>
+                  <th>Workflow Status</th>
+                  <th>Payment Status</th>
+                  <th>Payment Method</th>
+                  <th>Notes</th>
+                  <th>Amount</th>
                 </tr>
               </thead>
               <tbody>
                 <?php foreach ($recentRevenueRows as $row): ?>
                   <tr>
                     <td>
-                      <div class="primary-text">#<?php echo (int) ($row['id'] ?? 0); ?></div>
+                      <div class="primary-text"><?= e((string) $row['source']) ?></div>
                     </td>
-
-                    <?php if ($serviceTypeColumn): ?>
-                      <td>
-                        <div class="primary-text"><?php echo e(ucfirst((string) ($row['service_type'] ?? 'Service'))); ?></div>
-                      </td>
-                    <?php endif; ?>
-
-                    <?php if ($serviceDateColumn): ?>
-                      <td>
-                        <div class="primary-text"><?php echo e($row['service_date'] ?? 'No date'); ?></div>
-                      </td>
-                    <?php endif; ?>
-
-                    <?php if ($statusColumn): ?>
-                      <td>
-                        <span class="status-pill"><?php echo e((string) ($row['status'] ?? '')); ?></span>
-                      </td>
-                    <?php endif; ?>
-
-                    <?php if (hasColumn($bookingColumns, 'walker_name')): ?>
-                      <td>
-                        <div class="primary-text"><?php echo e($row['walker_name'] ?? 'Not assigned'); ?></div>
-                      </td>
-                    <?php endif; ?>
-
                     <td>
-                      <div class="primary-text">$<?php echo number_format((float) ($row['price'] ?? 0), 2); ?></div>
+                      <div class="primary-text">#<?= e((string) $row['id']) ?></div>
+                    </td>
+                    <td>
+                      <div class="primary-text"><?= e((string) $row['label']) ?></div>
+                    </td>
+                    <td>
+                      <div class="primary-text"><?= e(displayDateTime((string) $row['date'])) ?></div>
+                    </td>
+                    <td>
+                      <span class="status-pill"><?= e(titleize((string) $row['workflow_status'], '—')) ?></span>
+                    </td>
+                    <td>
+                      <span class="status-pill <?= e(paymentStatusClass((string) $row['payment_status_key'])) ?>">
+                        <?= e((string) $row['payment_status']) ?>
+                      </span>
+                    </td>
+                    <td>
+                      <div class="primary-text"><?= e((string) $row['payment_method']) ?></div>
+                    </td>
+                    <td>
+                      <div class="primary-text"><?= e(trim((string) $row['extra']) !== '' ? (string) $row['extra'] : '—') ?></div>
+                    </td>
+                    <td>
+                      <div class="primary-text"><?= money((float) $row['amount']) ?></div>
                     </td>
                   </tr>
                 <?php endforeach; ?>

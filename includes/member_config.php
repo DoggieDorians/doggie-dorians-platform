@@ -142,23 +142,6 @@ ensureColumn($pdo, 'walk_sessions', 'current_lng', "REAL");
 ensureColumn($pdo, 'walk_sessions', 'route_points', "TEXT");
 ensureColumn($pdo, 'walk_sessions', 'last_gps_at', "TEXT");
 
-$walkerCountStmt = $pdo->query("SELECT COUNT(*) AS total FROM walkers");
-$walkerCount = (int) $walkerCountStmt->fetch(PDO::FETCH_ASSOC)['total'];
-
-if ($walkerCount === 0) {
-    $seed = $pdo->prepare("
-        INSERT INTO walkers (full_name, email, phone, password_hash, is_active)
-        VALUES (:full_name, :email, :phone, :password_hash, 1)
-    ");
-
-    $seed->execute([
-        ':full_name' => 'John Walker',
-        ':email' => 'walker@doggiedorians.com',
-        ':phone' => '(631) 555-8181',
-        ':password_hash' => password_hash('walker123', PASSWORD_DEFAULT),
-    ]);
-}
-
 function e(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');

@@ -666,12 +666,10 @@ function mark_non_member_pending(PDO $pdo, int $requestId): void
         [
             'table' => 'non_member_bookings',
             'id_candidates' => ['id'],
-            'status_candidates' => ['status', 'payment_status'],
         ],
         [
             'table' => 'public_booking_requests',
             'id_candidates' => ['id', 'request_id'],
-            'status_candidates' => ['status', 'payment_status'],
         ],
     ];
 
@@ -685,23 +683,30 @@ function mark_non_member_pending(PDO $pdo, int $requestId): void
             }
 
             $idColumn = first_existing_column($columns, $config['id_candidates']);
-            $statusColumn = first_existing_column($columns, $config['status_candidates']);
+            $paymentStatusColumn = first_existing_column($columns, ['payment_status']);
+            $updatedAtColumn = first_existing_column($columns, ['updated_at']);
 
-            if ($idColumn === null || $statusColumn === null) {
+            if ($idColumn === null || $paymentStatusColumn === null) {
                 continue;
             }
 
-            $pendingValue = $statusColumn === 'payment_status' ? 'pending' : 'Pending Payment';
+            $setParts = ["{$paymentStatusColumn} = :payment_status"];
+            $params = [
+                ':payment_status' => 'pending',
+                ':id' => $requestId,
+            ];
+
+            if ($updatedAtColumn !== null) {
+                $setParts[] = "{$updatedAtColumn} = :updated_at";
+                $params[':updated_at'] = date('Y-m-d H:i:s');
+            }
 
             $stmt = $pdo->prepare("
                 UPDATE {$table}
-                SET {$statusColumn} = :pending_value
+                SET " . implode(', ', $setParts) . "
                 WHERE {$idColumn} = :id
             ");
-            $stmt->execute([
-                ':pending_value' => $pendingValue,
-                ':id' => $requestId,
-            ]);
+            $stmt->execute($params);
 
             if ($stmt->rowCount() > 0) {
                 return;

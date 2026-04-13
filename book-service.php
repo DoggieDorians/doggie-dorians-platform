@@ -1,9 +1,6 @@
 <?php
 declare(strict_types=1);
 
-ini_set('display_errors', '1');
-ini_set('display_startup_errors', '1');
-error_reporting(E_ALL);
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/includes/member_config.php';
@@ -1285,9 +1282,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirectTo('my-bookings.php');
             }
         } catch (Throwable $e) {
-            $error = $e->getMessage();
+            $error = 'Something went wrong while submitting your booking. Please try again.';
         } catch (Exception $e) {
-            $error = $e->getMessage();
+            $error = 'Something went wrong while submitting your booking. Please try again.';
         }
     }
 }
