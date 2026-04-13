@@ -10,6 +10,7 @@ require_once __DIR__ . '/db.php';
  *
  * Full replacement
  * Upgraded schema-tolerant member dashboard
+ * with visible payment status support
  */
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -198,6 +199,45 @@ function normalizeStatus($status)
     return $status !== '' ? $status : 'pending';
 }
 
+function normalizePaymentStatus($status, $price = null)
+{
+    $status = strtolower(trim((string) $status));
+
+    if ($status === 'paid' || $status === 'succeeded' || $status === 'success' || $status === 'completed') {
+        return 'paid';
+    }
+
+    if (
+        $status === 'pending'
+        || $status === 'processing'
+        || $status === 'requires_action'
+        || $status === 'requires_payment_method'
+        || $status === 'awaiting_payment'
+    ) {
+        return 'pending';
+    }
+
+    if (
+        $status === 'not_required'
+        || $status === 'included'
+        || $status === 'covered'
+        || $status === 'n/a'
+        || $status === 'none'
+    ) {
+        return 'not_required';
+    }
+
+    if ($status === 'unpaid' || $status === 'failed' || $status === 'declined' || $status === 'cancelled' || $status === 'canceled') {
+        return 'unpaid';
+    }
+
+    if (is_numeric($price) && (float) $price <= 0) {
+        return 'not_required';
+    }
+
+    return 'unpaid';
+}
+
 function normalizeServiceType($type)
 {
     $type = strtolower(trim((string) $type));
@@ -274,6 +314,50 @@ function formatMoney($value)
         return '$' . number_format((float) $value, 2);
     }
     return '$' . (string) $value;
+}
+
+function formatServiceLabel($serviceType)
+{
+    $serviceType = (string) $serviceType;
+
+    if ($serviceType === 'drop-in') {
+        return 'Drop-In';
+    }
+    if ($serviceType === 'service_credit') {
+        return 'Service Credit';
+    }
+
+    return ucwords(str_replace(array('_', '-'), ' ', $serviceType));
+}
+
+function paymentBadgeClass($status)
+{
+    if ($status === 'paid') {
+        return 'badge-paid';
+    }
+    if ($status === 'pending') {
+        return 'badge-pay-pending';
+    }
+    if ($status === 'not_required') {
+        return 'badge-pay-none';
+    }
+
+    return 'badge-unpaid';
+}
+
+function paymentBadgeLabel($status)
+{
+    if ($status === 'paid') {
+        return 'Paid';
+    }
+    if ($status === 'pending') {
+        return 'Pending Payment';
+    }
+    if ($status === 'not_required') {
+        return 'No Payment Required';
+    }
+
+    return 'Unpaid';
 }
 
 function bookingBaseTable(PDO $pdo)
@@ -482,6 +566,9 @@ function fetchMemberBookings(PDO $pdo, $userId)
             $petName = loadPetNameById($pdo, $petId);
         }
 
+        $price = valueFromRow($row, array('price', 'total_price', 'amount'), '');
+        $paymentRaw = valueFromRow($row, array('payment_status', 'payment_state'), '');
+
         $normalized[] = array(
             'id' => $id,
             'user_id' => $userId,
@@ -489,10 +576,11 @@ function fetchMemberBookings(PDO $pdo, $userId)
             'worker_name' => $workerId > 0 ? loadWorkerName($pdo, $workerId) : '',
             'service_type' => normalizeServiceType((string) valueFromRow($row, array('service_type', 'type', 'booking_type', 'category'), 'service')),
             'status' => normalizeStatus((string) valueFromRow($row, array('status', 'booking_status', 'service_status', 'walk_status'), 'pending')),
+            'payment_status' => normalizePaymentStatus($paymentRaw, $price),
             'service_date' => (string) valueFromRow($row, array('service_date', 'booking_date', 'walk_date', 'date', 'start_date', 'scheduled_date'), ''),
             'service_time' => (string) valueFromRow($row, array('service_time', 'booking_time', 'walk_time', 'time', 'start_time', 'scheduled_time'), ''),
             'duration' => (string) valueFromRow($row, array('duration_minutes', 'duration', 'minutes'), ''),
-            'price' => valueFromRow($row, array('price', 'total_price', 'amount'), ''),
+            'price' => $price,
             'notes' => (string) valueFromRow($row, array('notes', 'special_instructions', 'instructions', 'care_notes'), ''),
             'pet_name' => $petName,
         );
@@ -844,6 +932,13 @@ $statusCounts = array(
     'released' => 0,
 );
 
+$paymentCounts = array(
+    'paid' => 0,
+    'pending' => 0,
+    'unpaid' => 0,
+    'not_required' => 0,
+);
+
 $serviceCounts = array(
     'walk' => 0,
     'boarding' => 0,
@@ -860,6 +955,10 @@ $recentCompleted = array();
 foreach ($bookings as $booking) {
     if (isset($statusCounts[$booking['status']])) {
         $statusCounts[$booking['status']]++;
+    }
+
+    if (isset($paymentCounts[$booking['payment_status']])) {
+        $paymentCounts[$booking['payment_status']]++;
     }
 
     if (isset($serviceCounts[$booking['service_type']])) {
@@ -1079,6 +1178,19 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             gap: 12px;
         }
 
+        .status-section-separator {
+            margin-top: 18px;
+            padding-top: 18px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .status-subtitle {
+            font-size: .9rem;
+            font-weight: 900;
+            margin-bottom: 12px;
+            color: rgba(244,241,234,0.86);
+        }
+
         .stat-box {
             padding: 14px;
             border-radius: 16px;
@@ -1127,6 +1239,13 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             font-weight: 900;
         }
 
+        .row-badges {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
         .row-meta {
             color: rgba(244,241,234,0.68);
             font-size: .92rem;
@@ -1165,6 +1284,30 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
         .badge-complete { background: rgba(125,206,141,0.18); color: #d7f1dd; }
         .badge-cancelled { background: rgba(214,123,123,0.18); color: #ffd5d5; }
         .badge-released { background: rgba(172,145,255,0.18); color: #e1d6ff; }
+
+        .badge-paid {
+            background: rgba(125,206,141,0.18);
+            color: #d7f1dd;
+            border: 1px solid rgba(125,206,141,0.22);
+        }
+
+        .badge-unpaid {
+            background: rgba(214,123,123,0.18);
+            color: #ffd5d5;
+            border: 1px solid rgba(214,123,123,0.22);
+        }
+
+        .badge-pay-pending {
+            background: rgba(215,183,120,0.18);
+            color: #f3dfb1;
+            border: 1px solid rgba(215,183,120,0.22);
+        }
+
+        .badge-pay-none {
+            background: rgba(125,150,255,0.14);
+            color: #d5deff;
+            border: 1px solid rgba(125,150,255,0.18);
+        }
 
         .empty {
             padding: 16px;
@@ -1308,6 +1451,9 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
 
                 <div class="chips">
                     <div class="chip">Renewals: <?php echo (int) $membershipSummary['renewal_count']; ?></div>
+                    <div class="chip">Paid: <?php echo (int) $paymentCounts['paid']; ?></div>
+                    <div class="chip">Pending Payment: <?php echo (int) $paymentCounts['pending']; ?></div>
+                    <div class="chip">Unpaid: <?php echo (int) $paymentCounts['unpaid']; ?></div>
                     <div class="chip">Walks: <?php echo (int) $serviceCounts['walk']; ?></div>
                     <div class="chip">Boarding: <?php echo (int) $serviceCounts['boarding']; ?></div>
                     <div class="chip">Daycare: <?php echo (int) $serviceCounts['daycare']; ?></div>
@@ -1416,6 +1562,28 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                         <div class="stat-value"><?php echo (int) $statusCounts['released']; ?></div>
                     </div>
                 </div>
+
+                <div class="status-section-separator">
+                    <div class="status-subtitle">Payment Snapshot</div>
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <div class="stat-name">Paid</div>
+                            <div class="stat-value"><?php echo (int) $paymentCounts['paid']; ?></div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-name">Pending Payment</div>
+                            <div class="stat-value"><?php echo (int) $paymentCounts['pending']; ?></div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-name">Unpaid</div>
+                            <div class="stat-value"><?php echo (int) $paymentCounts['unpaid']; ?></div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-name">No Payment Required</div>
+                            <div class="stat-value"><?php echo (int) $paymentCounts['not_required']; ?></div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="card">
@@ -1431,13 +1599,19 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                                     <div class="row-title">
                                         #<?php echo (int) $row['id']; ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Walk'); ?>
                                     </div>
-                                    <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
-                                        <?php echo h(ucwords(str_replace('_', ' ', $row['status']))); ?>
-                                    </span>
+                                    <div class="row-badges">
+                                        <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
+                                            <?php echo h(ucwords(str_replace('_', ' ', $row['status']))); ?>
+                                        </span>
+                                        <span class="badge <?php echo h(paymentBadgeClass($row['payment_status'])); ?>">
+                                            <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
+                                        </span>
+                                    </div>
                                 </div>
                                 <div class="row-meta">
                                     <?php echo h(formatDateDisplay($row['service_date'])); ?> at <?php echo h(formatTimeDisplay($row['service_time'])); ?> ·
-                                    Walker: <?php echo h($row['worker_name'] !== '' ? $row['worker_name'] : 'Awaiting assignment'); ?>
+                                    Walker: <?php echo h($row['worker_name'] !== '' ? $row['worker_name'] : 'Awaiting assignment'); ?> ·
+                                    Payment: <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
                                 </div>
                                 <div class="row-links">
                                     <a class="mini-link" href="client-map.php?booking_id=<?php echo (int) $row['id']; ?>">Track Walk</a>
@@ -1461,16 +1635,22 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                             <div class="row">
                                 <div class="row-top">
                                     <div class="row-title">
-                                        #<?php echo (int) $row['id']; ?> · <?php echo h(ucfirst($row['service_type'])); ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Pet not listed'); ?>
+                                        #<?php echo (int) $row['id']; ?> · <?php echo h(formatServiceLabel($row['service_type'])); ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Pet not listed'); ?>
                                     </div>
-                                    <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
-                                        <?php echo h(ucwords(str_replace('_', ' ', $row['status']))); ?>
-                                    </span>
+                                    <div class="row-badges">
+                                        <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
+                                            <?php echo h(ucwords(str_replace('_', ' ', $row['status']))); ?>
+                                        </span>
+                                        <span class="badge <?php echo h(paymentBadgeClass($row['payment_status'])); ?>">
+                                            <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
+                                        </span>
+                                    </div>
                                 </div>
                                 <div class="row-meta">
                                     <?php echo h(formatDateDisplay($row['service_date'])); ?> at <?php echo h(formatTimeDisplay($row['service_time'])); ?> ·
                                     Walker: <?php echo h($row['worker_name'] !== '' ? $row['worker_name'] : 'Awaiting assignment'); ?> ·
-                                    Price: <?php echo h(formatMoney($row['price'])); ?>
+                                    Price: <?php echo h(formatMoney($row['price'])); ?> ·
+                                    Payment: <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
                                 </div>
                                 <div class="row-links">
                                     <a class="mini-link" href="booking-details.php?id=<?php echo (int) $row['id']; ?>">Details</a>
@@ -1495,13 +1675,19 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                             <div class="row">
                                 <div class="row-top">
                                     <div class="row-title">
-                                        #<?php echo (int) $row['id']; ?> · <?php echo h(ucfirst($row['service_type'])); ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Pet not listed'); ?>
+                                        #<?php echo (int) $row['id']; ?> · <?php echo h(formatServiceLabel($row['service_type'])); ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Pet not listed'); ?>
                                     </div>
-                                    <span class="badge badge-complete">Completed</span>
+                                    <div class="row-badges">
+                                        <span class="badge badge-complete">Completed</span>
+                                        <span class="badge <?php echo h(paymentBadgeClass($row['payment_status'])); ?>">
+                                            <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
+                                        </span>
+                                    </div>
                                 </div>
                                 <div class="row-meta">
                                     <?php echo h(formatDateDisplay($row['service_date'])); ?> at <?php echo h(formatTimeDisplay($row['service_time'])); ?> ·
-                                    Walker: <?php echo h($row['worker_name'] !== '' ? $row['worker_name'] : 'Not listed'); ?>
+                                    Walker: <?php echo h($row['worker_name'] !== '' ? $row['worker_name'] : 'Not listed'); ?> ·
+                                    Payment: <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
                                 </div>
                                 <div class="row-links">
                                     <a class="mini-link" href="booking-details.php?id=<?php echo (int) $row['id']; ?>">Details</a>

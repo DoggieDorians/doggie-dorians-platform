@@ -198,6 +198,45 @@ function normalizeStatus($status)
     return $status !== '' ? $status : 'pending';
 }
 
+function normalizePaymentStatus($status, $price = null)
+{
+    $status = strtolower(trim((string) $status));
+
+    if ($status === 'paid' || $status === 'succeeded' || $status === 'success' || $status === 'completed') {
+        return 'paid';
+    }
+
+    if (
+        $status === 'pending'
+        || $status === 'processing'
+        || $status === 'requires_action'
+        || $status === 'requires_payment_method'
+        || $status === 'awaiting_payment'
+    ) {
+        return 'pending';
+    }
+
+    if (
+        $status === 'not_required'
+        || $status === 'included'
+        || $status === 'covered'
+        || $status === 'n/a'
+        || $status === 'none'
+    ) {
+        return 'not_required';
+    }
+
+    if ($status === 'unpaid' || $status === 'failed' || $status === 'declined' || $status === 'cancelled' || $status === 'canceled') {
+        return 'unpaid';
+    }
+
+    if (is_numeric($price) && (float) $price <= 0) {
+        return 'not_required';
+    }
+
+    return 'unpaid';
+}
+
 function normalizeServiceType($type)
 {
     $type = strtolower(trim((string) $type));
@@ -465,6 +504,36 @@ function statusBadgeClass($status)
     return 'badge-pending';
 }
 
+function paymentBadgeClass($status)
+{
+    if ($status === 'paid') {
+        return 'badge-paid';
+    }
+    if ($status === 'pending') {
+        return 'badge-pay-pending';
+    }
+    if ($status === 'not_required') {
+        return 'badge-pay-none';
+    }
+
+    return 'badge-unpaid';
+}
+
+function paymentBadgeLabel($status)
+{
+    if ($status === 'paid') {
+        return 'Paid';
+    }
+    if ($status === 'pending') {
+        return 'Pending Payment';
+    }
+    if ($status === 'not_required') {
+        return 'No Payment Required';
+    }
+
+    return 'Unpaid';
+}
+
 function fetchMemberBookings(PDO $pdo, $userId)
 {
     $userId = (int) $userId;
@@ -501,16 +570,20 @@ function fetchMemberBookings(PDO $pdo, $userId)
             $petName = loadPetNameById($pdo, $petId);
         }
 
+        $price = valueFromRow($row, array('price', 'total_price', 'amount'), '');
+        $paymentRaw = valueFromRow($row, array('payment_status', 'payment_state'), '');
+
         $normalized[] = array(
             'id' => $id,
             'worker_id' => $workerId,
             'worker_name' => $workerId > 0 ? loadWorkerName($pdo, $workerId) : '',
             'service_type' => normalizeServiceType((string) valueFromRow($row, array('service_type', 'type', 'booking_type', 'category'), 'service')),
             'status' => normalizeStatus((string) valueFromRow($row, array('status', 'booking_status', 'service_status', 'walk_status'), 'pending')),
+            'payment_status' => normalizePaymentStatus($paymentRaw, $price),
             'service_date' => (string) valueFromRow($row, array('service_date', 'booking_date', 'walk_date', 'date', 'start_date', 'scheduled_date'), ''),
             'service_time' => (string) valueFromRow($row, array('service_time', 'booking_time', 'walk_time', 'time', 'start_time', 'scheduled_time'), ''),
             'duration' => (string) valueFromRow($row, array('duration_minutes', 'duration', 'minutes'), ''),
-            'price' => valueFromRow($row, array('price', 'total_price', 'amount'), ''),
+            'price' => $price,
             'notes' => (string) valueFromRow($row, array('notes', 'special_instructions', 'instructions', 'care_notes'), ''),
             'pet_name' => $petName,
         );
@@ -736,6 +809,10 @@ $allCount = count($bookings);
 $walkCount = 0;
 $activeCount = 0;
 $completedCount = 0;
+$paidCount = 0;
+$pendingPaymentCount = 0;
+$unpaidCount = 0;
+$noPaymentRequiredCount = 0;
 
 foreach ($bookings as $booking) {
     if ($booking['service_type'] === 'walk') {
@@ -746,6 +823,16 @@ foreach ($bookings as $booking) {
     }
     if ($booking['status'] === 'completed') {
         $completedCount++;
+    }
+
+    if ($booking['payment_status'] === 'paid') {
+        $paidCount++;
+    } elseif ($booking['payment_status'] === 'pending') {
+        $pendingPaymentCount++;
+    } elseif ($booking['payment_status'] === 'not_required') {
+        $noPaymentRequiredCount++;
+    } else {
+        $unpaidCount++;
     }
 }
 ?>
@@ -885,6 +972,19 @@ foreach ($bookings as $booking) {
             font-weight: 900;
         }
 
+        .section-break {
+            margin-top: 18px;
+            padding-top: 18px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .section-title-small {
+            color: rgba(244,241,234,0.86);
+            font-size: .92rem;
+            font-weight: 900;
+            margin-bottom: 12px;
+        }
+
         .credit-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -972,6 +1072,13 @@ foreach ($bookings as $booking) {
             font-weight: 900;
         }
 
+        .row-badges {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
         .meta-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -1039,6 +1146,30 @@ foreach ($bookings as $booking) {
         .badge-complete { background: rgba(125,206,141,0.18); color: #d7f1dd; }
         .badge-cancelled { background: rgba(214,123,123,0.18); color: #ffd5d5; }
         .badge-released { background: rgba(172,145,255,0.18); color: #e1d6ff; }
+
+        .badge-paid {
+            background: rgba(125,206,141,0.18);
+            color: #d7f1dd;
+            border: 1px solid rgba(125,206,141,0.22);
+        }
+
+        .badge-unpaid {
+            background: rgba(214,123,123,0.18);
+            color: #ffd5d5;
+            border: 1px solid rgba(214,123,123,0.22);
+        }
+
+        .badge-pay-pending {
+            background: rgba(215,183,120,0.18);
+            color: #f3dfb1;
+            border: 1px solid rgba(215,183,120,0.22);
+        }
+
+        .badge-pay-none {
+            background: rgba(125,150,255,0.14);
+            color: #d5deff;
+            border: 1px solid rgba(125,150,255,0.18);
+        }
 
         .empty {
             padding: 20px;
@@ -1134,6 +1265,28 @@ foreach ($bookings as $booking) {
                     </div>
                 </div>
 
+                <div class="section-break">
+                    <div class="section-title-small">Payment Snapshot</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">Paid</div>
+                            <div class="stat-value"><?php echo (int) $paidCount; ?></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Pending Payment</div>
+                            <div class="stat-value"><?php echo (int) $pendingPaymentCount; ?></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Unpaid</div>
+                            <div class="stat-value"><?php echo (int) $unpaidCount; ?></div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">No Payment Required</div>
+                            <div class="stat-value"><?php echo (int) $noPaymentRequiredCount; ?></div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="credit-grid">
                     <div class="credit-box">
                         <div class="credit-label">Membership</div>
@@ -1195,9 +1348,15 @@ foreach ($bookings as $booking) {
                                 #<?php echo (int) $row['id']; ?> · <?php echo h(serviceDisplayName($row['service_type'])); ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Pet not listed'); ?>
                             </div>
 
-                            <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
-                                <?php echo h(ucwords(str_replace('_', ' ', $row['status']))); ?>
-                            </span>
+                            <div class="row-badges">
+                                <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
+                                    <?php echo h(ucwords(str_replace('_', ' ', $row['status']))); ?>
+                                </span>
+
+                                <span class="badge <?php echo h(paymentBadgeClass($row['payment_status'])); ?>">
+                                    <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
+                                </span>
+                            </div>
                         </div>
 
                         <div class="meta-grid">
@@ -1220,6 +1379,11 @@ foreach ($bookings as $booking) {
                                 <div class="meta-label">Price</div>
                                 <div class="meta-value"><?php echo h(formatMoney($row['price'])); ?></div>
                             </div>
+                        </div>
+
+                        <div class="detail-copy">
+                            <strong style="color:#f3e5c7;">Payment:</strong>
+                            <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
                         </div>
 
                         <?php if ((string) $row['notes'] !== ''): ?>
