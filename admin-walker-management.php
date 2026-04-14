@@ -3,63 +3,26 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
-
-/**
- * Doggie Dorian's
- * admin-walker-management.php
- *
- * Stable admin-only worker management page.
- */
+require_once __DIR__ . '/admin-auth.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     exit('Database connection not available.');
 }
 
-function h(mixed $value): string
+function ddAdminWalkerMgmtH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirect_to(string $url): never
+function ddAdminWalkerMgmtQuoteIdentifier(string $value): string
 {
-    header('Location: ' . $url);
-    exit;
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
-function is_admin_session(): bool
+function ddAdminWalkerMgmtTableExists(PDO $pdo, string $table): bool
 {
-    $roleCandidates = [
-        $_SESSION['role'] ?? null,
-        $_SESSION['user_role'] ?? null,
-        $_SESSION['account_role'] ?? null,
-        $_SESSION['account_type'] ?? null,
-    ];
-
-    foreach ($roleCandidates as $role) {
-        if (is_string($role) && strtolower(trim($role)) === 'admin') {
-            return true;
-        }
-    }
-
-    if (!empty($_SESSION['is_admin']) || !empty($_SESSION['admin_logged_in'])) {
-        return true;
-    }
-
-    return false;
-}
-
-if (!isset($_SESSION['user_id']) && empty($_SESSION['admin_logged_in'])) {
-    redirect_to('admin-login.php');
-}
-
-if (!is_admin_session()) {
-    redirect_to('login.php');
-}
-
-function table_exists(PDO $pdo, string $table): bool
-{
-    static $cache = [];
+    static $cache = array();
 
     if (array_key_exists($table, $cache)) {
         return $cache[$table];
@@ -67,29 +30,37 @@ function table_exists(PDO $pdo, string $table): bool
 
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-        $stmt->execute([':table' => $table]);
-        return $cache[$table] = (bool) $stmt->fetchColumn();
-    } catch (Throwable) {
-        return $cache[$table] = false;
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
     }
 }
 
-function get_columns(PDO $pdo, string $table): array
+function ddAdminWalkerMgmtGetColumns(PDO $pdo, string $table): array
 {
-    static $cache = [];
+    static $cache = array();
 
     if (array_key_exists($table, $cache)) {
         return $cache[$table];
     }
 
-    if (!table_exists($pdo, $table)) {
-        return $cache[$table] = [];
+    if (!ddAdminWalkerMgmtTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 
     try {
-        $stmt = $pdo->query("PRAGMA table_info($table)");
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        $columns = [];
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminWalkerMgmtQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $columns = array();
 
         foreach ($rows as $row) {
             if (!empty($row['name'])) {
@@ -97,13 +68,15 @@ function get_columns(PDO $pdo, string $table): array
             }
         }
 
-        return $cache[$table] = $columns;
-    } catch (Throwable) {
-        return $cache[$table] = [];
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 }
 
-function first_existing_column(array $columns, array $candidates): ?string
+function ddAdminWalkerMgmtFirstExistingColumn(array $columns, array $candidates): ?string
 {
     foreach ($candidates as $candidate) {
         if (in_array($candidate, $columns, true)) {
@@ -114,7 +87,7 @@ function first_existing_column(array $columns, array $candidates): ?string
     return null;
 }
 
-function value_from_row(array $row, array $candidates, mixed $default = null): mixed
+function ddAdminWalkerMgmtValueFromRow(array $row, array $candidates, $default = null)
 {
     foreach ($candidates as $candidate) {
         if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
@@ -125,37 +98,54 @@ function value_from_row(array $row, array $candidates, mixed $default = null): m
     return $default;
 }
 
-function build_name(array $row): string
+function ddAdminWalkerMgmtSafeFetchAll(PDO $pdo, string $sql, array $params = array()): array
 {
-    $full = trim((string) value_from_row($row, [
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return array();
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : array();
+    } catch (Throwable $e) {
+        return array();
+    }
+}
+
+function ddAdminWalkerMgmtBuildName(array $row): string
+{
+    $full = trim((string) ddAdminWalkerMgmtValueFromRow($row, array(
         'full_name',
         'name',
         'display_name',
+        'worker_name',
+        'walker_name',
         'username',
-    ], ''));
+    ), ''));
 
     if ($full !== '') {
         return $full;
     }
 
     $first = trim((string) ($row['first_name'] ?? ''));
-    $last  = trim((string) ($row['last_name'] ?? ''));
-
+    $last = trim((string) ($row['last_name'] ?? ''));
     $combined = trim($first . ' ' . $last);
+
     return $combined !== '' ? $combined : 'Unknown';
 }
 
-function human_status(array $row): string
+function ddAdminWalkerMgmtHumanStatus(array $row): string
 {
-    foreach (['status', 'account_status', 'worker_status'] as $col) {
-        if (isset($row[$col]) && trim((string) $row[$col]) !== '') {
-            return ucwords(str_replace(['_', '-'], ' ', strtolower((string) $row[$col])));
+    foreach (array('status', 'account_status', 'worker_status') as $column) {
+        if (isset($row[$column]) && trim((string) $row[$column]) !== '') {
+            return ucwords(str_replace(array('_', '-'), ' ', strtolower((string) $row[$column])));
         }
     }
 
-    foreach (['is_active', 'active', 'enabled'] as $col) {
-        if (array_key_exists($col, $row)) {
-            return ((int) $row[$col] === 1) ? 'Active' : 'Disabled';
+    foreach (array('is_active', 'active', 'enabled') as $column) {
+        if (array_key_exists($column, $row)) {
+            return ((int) $row[$column] === 1) ? 'Active' : 'Disabled';
         }
     }
 
@@ -166,11 +156,11 @@ function human_status(array $row): string
     return 'Unknown';
 }
 
-function worker_is_active(array $row): bool
+function ddAdminWalkerMgmtWorkerIsActive(array $row): bool
 {
-    foreach (['is_active', 'active', 'enabled'] as $col) {
-        if (array_key_exists($col, $row)) {
-            return (int) $row[$col] === 1;
+    foreach (array('is_active', 'active', 'enabled') as $column) {
+        if (array_key_exists($column, $row)) {
+            return (int) $row[$column] === 1;
         }
     }
 
@@ -178,21 +168,21 @@ function worker_is_active(array $row): bool
         return (int) $row['disabled'] !== 1;
     }
 
-    foreach (['status', 'account_status', 'worker_status'] as $col) {
-        if (!isset($row[$col])) {
+    foreach (array('status', 'account_status', 'worker_status') as $column) {
+        if (!isset($row[$column])) {
             continue;
         }
 
-        $value = strtolower(trim((string) $row[$col]));
+        $value = strtolower(trim((string) $row[$column]));
         if ($value === '') {
             continue;
         }
 
-        if (in_array($value, ['disabled', 'inactive', 'blocked', 'suspended'], true)) {
+        if (in_array($value, array('disabled', 'inactive', 'blocked', 'suspended'), true)) {
             return false;
         }
 
-        if (in_array($value, ['active', 'enabled', 'approved'], true)) {
+        if (in_array($value, array('active', 'enabled', 'approved'), true)) {
             return true;
         }
     }
@@ -200,7 +190,7 @@ function worker_is_active(array $row): bool
     return true;
 }
 
-function format_datetime_value(mixed $value): string
+function ddAdminWalkerMgmtFormatDateTime($value): string
 {
     $raw = trim((string) $value);
     if ($raw === '') {
@@ -209,47 +199,165 @@ function format_datetime_value(mixed $value): string
 
     $timestamp = strtotime($raw);
     if ($timestamp === false) {
-        return h($raw);
+        return $raw;
     }
 
     return date('M j, Y g:i A', $timestamp);
 }
 
-$workers = [];
+function ddAdminWalkerMgmtNormalizeWorkerRecord(array $row, string $sourceTable): array
+{
+    $workerId = (int) ddAdminWalkerMgmtValueFromRow($row, array('id', 'user_id', 'worker_id', 'walker_id'), 0);
+    $email = trim((string) ddAdminWalkerMgmtValueFromRow($row, array('email'), ''));
+    $phone = trim((string) ddAdminWalkerMgmtValueFromRow($row, array('phone', 'phone_number', 'mobile'), ''));
+    $created = trim((string) ddAdminWalkerMgmtValueFromRow($row, array('created_at', 'joined_at', 'date_created'), ''));
+    $role = trim((string) ddAdminWalkerMgmtValueFromRow($row, array('role', 'user_role', 'account_role', 'account_type'), 'Worker'));
+
+    return array(
+        'source_table' => $sourceTable,
+        'source_id' => $workerId,
+        'name' => ddAdminWalkerMgmtBuildName($row),
+        'role' => $role !== '' ? $role : 'Worker',
+        'email' => $email !== '' ? $email : '—',
+        'phone' => $phone !== '' ? $phone : '—',
+        'status_label' => ddAdminWalkerMgmtHumanStatus($row),
+        'is_active' => ddAdminWalkerMgmtWorkerIsActive($row),
+        'created_at' => $created,
+    );
+}
+
+function ddAdminWalkerMgmtFetchWorkersFromTable(PDO $pdo, string $table): array
+{
+    if (!ddAdminWalkerMgmtTableExists($pdo, $table)) {
+        return array();
+    }
+
+    $columns = ddAdminWalkerMgmtGetColumns($pdo, $table);
+    if ($columns === array()) {
+        return array();
+    }
+
+    $idColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('id', 'user_id', 'worker_id', 'walker_id'));
+    if ($idColumn === null) {
+        return array();
+    }
+
+    $nameColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('full_name', 'name', 'display_name', 'worker_name', 'walker_name', 'username'));
+    $firstNameColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('first_name'));
+    $lastNameColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('last_name'));
+    $emailColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('email'));
+    $phoneColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('phone', 'phone_number', 'mobile'));
+    $roleColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('role', 'user_role', 'account_role', 'account_type'));
+    $statusColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('status', 'account_status', 'worker_status'));
+    $isActiveColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('is_active', 'active', 'enabled'));
+    $disabledColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('disabled'));
+    $createdColumn = ddAdminWalkerMgmtFirstExistingColumn($columns, array('created_at', 'joined_at', 'date_created', $idColumn)) ?? $idColumn;
+
+    $selectParts = array(
+        ddAdminWalkerMgmtQuoteIdentifier($idColumn) . ' AS id',
+        $nameColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($nameColumn) . ' AS name' : "'' AS name",
+        $firstNameColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($firstNameColumn) . ' AS first_name' : "'' AS first_name",
+        $lastNameColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($lastNameColumn) . ' AS last_name' : "'' AS last_name",
+        $emailColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($emailColumn) . ' AS email' : "'' AS email",
+        $phoneColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($phoneColumn) . ' AS phone' : "'' AS phone",
+        $roleColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($roleColumn) . ' AS role' : "'Worker' AS role",
+        $statusColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($statusColumn) . ' AS status' : "'' AS status",
+        $isActiveColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($isActiveColumn) . ' AS is_active' : "NULL AS is_active",
+        $disabledColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($disabledColumn) . ' AS disabled' : "NULL AS disabled",
+        $createdColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($createdColumn) . ' AS created_at' : "'' AS created_at",
+    );
+
+    $sql = '
+        SELECT
+            ' . implode(",\n            ", $selectParts) . '
+        FROM ' . ddAdminWalkerMgmtQuoteIdentifier($table);
+
+    if ($table === 'users' && $roleColumn !== null) {
+        $sql .= '
+        WHERE LOWER(TRIM(COALESCE(' . ddAdminWalkerMgmtQuoteIdentifier($roleColumn) . ", ''))) IN ('walker', 'worker', 'staff', 'employee')";
+    }
+
+    $sql .= '
+        ORDER BY ' . ($createdColumn !== null ? ddAdminWalkerMgmtQuoteIdentifier($createdColumn) : ddAdminWalkerMgmtQuoteIdentifier($idColumn)) . ' DESC';
+
+    $rows = ddAdminWalkerMgmtSafeFetchAll($pdo, $sql);
+    $normalized = array();
+
+    foreach ($rows as $row) {
+        $normalized[] = ddAdminWalkerMgmtNormalizeWorkerRecord($row, $table);
+    }
+
+    return $normalized;
+}
+
+$workers = array();
 $totalWorkers = 0;
 $activeWorkers = 0;
 $disabledWorkers = 0;
+$sourceTablesUsed = array();
 
-if (table_exists($pdo, 'users')) {
-    $columns = get_columns($pdo, 'users');
-    $idCol = first_existing_column($columns, ['id', 'user_id']);
-    $roleCol = first_existing_column($columns, ['role', 'user_role', 'account_role', 'account_type']);
-    $orderCol = first_existing_column($columns, ['created_at', 'joined_at', 'date_created', 'id']) ?? 'id';
+$allWorkers = array_merge(
+    ddAdminWalkerMgmtFetchWorkersFromTable($pdo, 'workers'),
+    ddAdminWalkerMgmtFetchWorkersFromTable($pdo, 'walkers'),
+    ddAdminWalkerMgmtFetchWorkersFromTable($pdo, 'users')
+);
 
-    if ($idCol !== null && $roleCol !== null) {
-        try {
-            $stmt = $pdo->query("
-                SELECT *
-                FROM users
-                WHERE LOWER(TRIM(COALESCE({$roleCol}, ''))) IN ('walker', 'worker', 'staff', 'employee')
-                ORDER BY {$orderCol} DESC
-            ");
-            $workers = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        } catch (Throwable) {
-            $workers = [];
-        }
+$seen = array();
+$sourcePriority = array(
+    'workers' => 1,
+    'walkers' => 2,
+    'users' => 3,
+);
+
+foreach ($allWorkers as $worker) {
+    $emailKey = strtolower(trim((string) $worker['email']));
+    $nameKey = strtolower(trim((string) $worker['name']));
+    $compoundKey = $emailKey !== '' && $emailKey !== '—'
+        ? 'email:' . $emailKey
+        : 'name:' . $nameKey . '|source:' . (string) $worker['source_table'] . '|id:' . (string) $worker['source_id'];
+
+    if (!isset($seen[$compoundKey])) {
+        $seen[$compoundKey] = $worker;
+        continue;
+    }
+
+    $existing = $seen[$compoundKey];
+    $existingPriority = $sourcePriority[$existing['source_table']] ?? 99;
+    $newPriority = $sourcePriority[$worker['source_table']] ?? 99;
+
+    if ($newPriority < $existingPriority) {
+        $seen[$compoundKey] = $worker;
     }
 }
 
-$totalWorkers = count($workers);
+$workers = array_values($seen);
+
+usort($workers, static function (array $a, array $b): int {
+    $aTime = strtotime((string) $a['created_at']);
+    $bTime = strtotime((string) $b['created_at']);
+
+    if ($aTime !== false && $bTime !== false && $aTime !== $bTime) {
+        return $bTime <=> $aTime;
+    }
+
+    return strcasecmp((string) $a['name'], (string) $b['name']);
+});
 
 foreach ($workers as $worker) {
-    if (worker_is_active($worker)) {
+    $totalWorkers++;
+
+    if (!empty($worker['is_active'])) {
         $activeWorkers++;
     } else {
         $disabledWorkers++;
     }
+
+    $sourceTablesUsed[(string) $worker['source_table']] = true;
 }
+
+$sourceTableList = !empty($sourceTablesUsed)
+    ? implode(', ', array_keys($sourceTablesUsed))
+    : 'none';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -361,7 +469,7 @@ foreach ($workers as $worker) {
 
         .stats {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 12px;
             margin-top: 18px;
         }
@@ -387,6 +495,13 @@ foreach ($workers as $worker) {
             font-weight: 900;
         }
 
+        .stat-note {
+            margin-top: 6px;
+            color: rgba(244,241,234,0.68);
+            font-size: 0.85rem;
+            line-height: 1.45;
+        }
+
         .panel {
             background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.82));
             border: 1px solid rgba(255,255,255,0.07);
@@ -398,6 +513,13 @@ foreach ($workers as $worker) {
         .panel-title {
             font-size: 1.08rem;
             font-weight: 900;
+            margin-bottom: 8px;
+        }
+
+        .panel-copy {
+            color: rgba(244,241,234,0.66);
+            font-size: 0.92rem;
+            line-height: 1.55;
             margin-bottom: 14px;
         }
 
@@ -411,7 +533,7 @@ foreach ($workers as $worker) {
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 900px;
+            min-width: 1120px;
             background: rgba(255,255,255,0.02);
         }
 
@@ -482,9 +604,9 @@ foreach ($workers as $worker) {
             color: rgba(244,241,234,0.68);
         }
 
-        @media (max-width: 980px) {
+        @media (max-width: 1100px) {
             .stats {
-                grid-template-columns: 1fr;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
 
@@ -496,6 +618,10 @@ foreach ($workers as $worker) {
             .page {
                 padding: 20px 12px 60px;
             }
+
+            .stats {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -505,8 +631,11 @@ foreach ($workers as $worker) {
             <div class="brand">Doggie Dorian’s</div>
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
+                <a class="top-link" href="admin-revenue.php">Revenue</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
                 <a class="top-link" href="admin-walker-management.php">Workers</a>
+                <a class="top-link" href="admin-create-worker.php">Create Worker</a>
             </div>
         </div>
 
@@ -514,33 +643,44 @@ foreach ($workers as $worker) {
             <div class="eyebrow">Admin Worker Control</div>
             <h1>Worker Management</h1>
             <div class="sub">
-                Stable admin-side view for walker, worker, staff, and employee accounts. This page is built to load safely even if some worker fields or records are missing.
+                Stable admin-side view for walker, worker, staff, and employee accounts. This page reads from dedicated worker tables first, then worker-role user accounts, and now carries each worker’s source table through the action links so the correct record opens.
             </div>
 
             <div class="stats">
                 <div class="stat">
                     <div class="stat-label">Total Workers</div>
-                    <div class="stat-value"><?= (int) $totalWorkers ?></div>
+                    <div class="stat-value"><?php echo (int) $totalWorkers; ?></div>
+                    <div class="stat-note">Combined unique records shown in this directory.</div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Active</div>
-                    <div class="stat-value"><?= (int) $activeWorkers ?></div>
+                    <div class="stat-value"><?php echo (int) $activeWorkers; ?></div>
+                    <div class="stat-note">Workers currently marked available or enabled.</div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Disabled</div>
-                    <div class="stat-value"><?= (int) $disabledWorkers ?></div>
+                    <div class="stat-value"><?php echo (int) $disabledWorkers; ?></div>
+                    <div class="stat-note">Workers currently marked inactive or disabled.</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Sources Used</div>
+                    <div class="stat-value"><?php echo ddAdminWalkerMgmtH((string) count($sourceTablesUsed)); ?></div>
+                    <div class="stat-note"><?php echo ddAdminWalkerMgmtH($sourceTableList); ?></div>
                 </div>
             </div>
         </section>
 
         <section class="panel">
             <div class="panel-title">All Worker Accounts</div>
+            <div class="panel-copy">
+                This directory prefers dedicated worker tables first, then worker-role accounts from the users table, so it stays compatible with your current schema and routes into the correct worker source.
+            </div>
 
-            <?php if ($workers === []): ?>
+            <?php if ($workers === array()): ?>
                 <div class="empty">
                     No worker accounts were found yet.
                     <br><br>
-                    Once walker / worker / staff / employee users are in the `users` table, they will appear here automatically.
+                    Once walker / worker / staff / employee records exist in <code>workers</code>, <code>walkers</code>, or the <code>users</code> table, they will appear here automatically.
                 </div>
             <?php else: ?>
                 <div class="table-wrap">
@@ -552,48 +692,52 @@ foreach ($workers as $worker) {
                                 <th>Status</th>
                                 <th>Contact</th>
                                 <th>Joined</th>
+                                <th>Source</th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php foreach ($workers as $worker): ?>
                                 <?php
-                                $workerId = (int) value_from_row($worker, ['id', 'user_id'], 0);
-                                $workerName = build_name($worker);
-                                $workerRole = (string) value_from_row($worker, ['role', 'user_role', 'account_role', 'account_type'], 'Worker');
-                                $workerEmail = (string) value_from_row($worker, ['email'], '—');
-                                $workerPhone = (string) value_from_row($worker, ['phone', 'phone_number', 'mobile'], '—');
-                                $workerStatus = human_status($worker);
-                                $workerCreated = (string) value_from_row($worker, ['created_at', 'joined_at', 'date_created'], '');
-                                $workerIsActive = worker_is_active($worker);
+                                $workerId = (int) ($worker['source_id'] ?? 0);
+                                $workerName = (string) ($worker['name'] ?? 'Unknown');
+                                $workerRole = (string) ($worker['role'] ?? 'Worker');
+                                $workerEmail = (string) ($worker['email'] ?? '—');
+                                $workerPhone = (string) ($worker['phone'] ?? '—');
+                                $workerStatus = (string) ($worker['status_label'] ?? 'Unknown');
+                                $workerCreated = (string) ($worker['created_at'] ?? '');
+                                $workerIsActive = !empty($worker['is_active']);
+                                $sourceTable = (string) ($worker['source_table'] ?? 'unknown');
+                                $sourceParam = urlencode($sourceTable);
                                 ?>
                                 <tr>
                                     <td>
-                                        <div class="name"><?= h($workerName) ?></div>
-                                        <div class="subtext">ID: <?= $workerId > 0 ? $workerId : '—' ?></div>
+                                        <div class="name"><?php echo ddAdminWalkerMgmtH($workerName); ?></div>
+                                        <div class="subtext">ID: <?php echo $workerId > 0 ? $workerId : '—'; ?></div>
                                     </td>
-                                    <td><?= h(ucwords(str_replace('_', ' ', strtolower($workerRole)))) ?></td>
+                                    <td><?php echo ddAdminWalkerMgmtH(ucwords(str_replace('_', ' ', strtolower($workerRole)))); ?></td>
                                     <td>
-                                        <span class="badge <?= $workerIsActive ? 'badge-active' : 'badge-disabled' ?>">
-                                            <?= h($workerStatus) ?>
+                                        <span class="badge <?php echo $workerIsActive ? 'badge-active' : 'badge-disabled'; ?>">
+                                            <?php echo ddAdminWalkerMgmtH($workerStatus); ?>
                                         </span>
                                     </td>
                                     <td>
                                         <div class="subtext">
-                                            Email: <?= h($workerEmail) ?><br>
-                                            Phone: <?= h($workerPhone) ?>
+                                            Email: <?php echo ddAdminWalkerMgmtH($workerEmail); ?><br>
+                                            Phone: <?php echo ddAdminWalkerMgmtH($workerPhone); ?>
                                         </div>
                                     </td>
-                                    <td><?= h($workerCreated !== '' ? format_datetime_value($workerCreated) : '—') ?></td>
+                                    <td><?php echo ddAdminWalkerMgmtH($workerCreated !== '' ? ddAdminWalkerMgmtFormatDateTime($workerCreated) : '—'); ?></td>
+                                    <td><?php echo ddAdminWalkerMgmtH($sourceTable); ?></td>
                                     <td>
                                         <div class="actions">
                                             <?php if ($workerId > 0): ?>
-                                                <a class="action" href="admin-worker-view.php?id=<?= $workerId ?>">View</a>
-                                                <a class="action" href="admin-edit-worker.php?id=<?= $workerId ?>">Edit</a>
+                                                <a class="action" href="admin-worker-view.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">View</a>
+                                                <a class="action" href="admin-edit-worker.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Edit</a>
                                                 <?php if ($workerIsActive): ?>
-                                                    <a class="action" href="admin-disable-worker.php?id=<?= $workerId ?>">Disable</a>
+                                                    <a class="action" href="admin-disable-worker.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Disable</a>
                                                 <?php else: ?>
-                                                    <a class="action" href="admin-enable-worker.php?id=<?= $workerId ?>">Enable</a>
+                                                    <a class="action" href="admin-enable-worker.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Enable</a>
                                                 <?php endif; ?>
                                             <?php else: ?>
                                                 <span class="subtext">No actions available</span>

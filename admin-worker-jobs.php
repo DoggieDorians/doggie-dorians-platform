@@ -16,10 +16,9 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit('Database connection not available.');
 }
 
-function h(mixed $value): string
-{
-    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
-}
+/* ==========================================================================
+   ACCESS CONTROL
+   ========================================================================== */
 
 function redirect_to(string $url): never
 {
@@ -29,6 +28,18 @@ function redirect_to(string $url): never
 
 function is_admin_session(): bool
 {
+    if (!empty($_SESSION['is_admin'])) {
+        return true;
+    }
+
+    if (!empty($_SESSION['admin_id'])) {
+        return true;
+    }
+
+    if (!empty($_SESSION['admin_logged_in'])) {
+        return true;
+    }
+
     $roleCandidates = [
         $_SESSION['role'] ?? null,
         $_SESSION['user_role'] ?? null,
@@ -37,24 +48,44 @@ function is_admin_session(): bool
     ];
 
     foreach ($roleCandidates as $role) {
-        if (is_string($role) && strtolower(trim($role)) === 'admin') {
+        if (!is_string($role)) {
+            continue;
+        }
+
+        $normalized = strtolower(trim($role));
+        if (in_array($normalized, ['admin', 'superadmin', 'owner'], true)) {
             return true;
         }
-    }
-
-    if (!empty($_SESSION['is_admin']) || !empty($_SESSION['admin_logged_in'])) {
-        return true;
     }
 
     return false;
 }
 
-if (!isset($_SESSION['user_id']) && empty($_SESSION['admin_logged_in'])) {
+if (
+    empty($_SESSION['user_id']) &&
+    empty($_SESSION['admin_id']) &&
+    empty($_SESSION['is_admin']) &&
+    empty($_SESSION['admin_logged_in'])
+) {
     redirect_to('admin-login.php');
 }
 
 if (!is_admin_session()) {
-    redirect_to('login.php');
+    redirect_to('admin-dashboard.php');
+}
+
+/* ==========================================================================
+   HELPERS
+   ========================================================================== */
+
+function h(mixed $value): string
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function qi(string $value): string
+{
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
 function table_exists(PDO $pdo, string $table): bool
@@ -68,9 +99,11 @@ function table_exists(PDO $pdo, string $table): bool
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
         $stmt->execute([':table' => $table]);
-        return $cache[$table] = (bool) $stmt->fetchColumn();
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
     } catch (Throwable) {
-        return $cache[$table] = false;
+        $cache[$table] = false;
+        return false;
     }
 }
 
@@ -83,11 +116,12 @@ function get_columns(PDO $pdo, string $table): array
     }
 
     if (!table_exists($pdo, $table)) {
-        return $cache[$table] = [];
+        $cache[$table] = [];
+        return [];
     }
 
     try {
-        $stmt = $pdo->query("PRAGMA table_info($table)");
+        $stmt = $pdo->query('PRAGMA table_info(' . qi($table) . ')');
         $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
         $columns = [];
 
@@ -97,9 +131,11 @@ function get_columns(PDO $pdo, string $table): array
             }
         }
 
-        return $cache[$table] = $columns;
+        $cache[$table] = $columns;
+        return $columns;
     } catch (Throwable) {
-        return $cache[$table] = [];
+        $cache[$table] = [];
+        return [];
     }
 }
 
@@ -131,7 +167,10 @@ function build_name(array $row): string
         'full_name',
         'name',
         'display_name',
+        'worker_name',
+        'walker_name',
         'username',
+        'email',
     ], ''));
 
     if ($full !== '') {
@@ -139,7 +178,7 @@ function build_name(array $row): string
     }
 
     $first = trim((string) ($row['first_name'] ?? ''));
-    $last  = trim((string) ($row['last_name'] ?? ''));
+    $last = trim((string) ($row['last_name'] ?? ''));
 
     $combined = trim($first . ' ' . $last);
     return $combined !== '' ? $combined : 'Unknown';
@@ -185,6 +224,8 @@ function booking_title(array $row): string
         'type',
     ], 'Service'));
 
+    $service = $service !== '' ? ucwords(str_replace(['_', '-'], ' ', $service)) : 'Service';
+
     $pet = trim((string) value_from_row($row, [
         'pet_name',
         'dog_name',
@@ -202,6 +243,7 @@ function booking_customer(array $row): string
         'member_name',
         'owner_name',
         'user_name',
+        'full_name',
     ], ''));
 
     if ($name !== '') {
@@ -213,6 +255,7 @@ function booking_customer(array $row): string
         'client_email',
         'member_email',
         'owner_email',
+        'email',
     ], ''));
 
     return $email !== '' ? $email : '—';
@@ -247,17 +290,30 @@ function booking_when(array $row): string
     $ts = strtotime($date);
     $formatted = $ts !== false ? date('M j, Y', $ts) : $date;
 
-    return $time !== '' ? $formatted . ' • ' . h($time) : h($formatted);
+    return $time !== '' ? $formatted . ' • ' . $time : $formatted;
+}
+
+function normalize_job_status(string $status): string
+{
+    $normalized = strtolower(trim($status));
+    $normalized = str_replace([' ', '-'], '_', $normalized);
+
+    return match ($normalized) {
+        'done', 'finished', 'complete' => 'completed',
+        'inprogress', 'active', 'started', 'walking', 'live', 'en_route', 'underway' => 'in_progress',
+        '' => 'assigned',
+        default => $normalized,
+    };
 }
 
 function classify_job(array $job): string
 {
-    $status = strtolower(trim((string) value_from_row($job, [
+    $status = normalize_job_status((string) value_from_row($job, [
         'status',
         'booking_status',
         'walk_status',
         'job_status',
-    ], '')));
+    ], ''));
 
     $completedAt = trim((string) value_from_row($job, [
         'completed_at',
@@ -275,44 +331,171 @@ function classify_job(array $job): string
         'tracking_status',
     ], '')));
 
-    if ($completedAt !== '' || in_array($status, ['completed', 'complete', 'finished', 'done', 'closed', 'checked_out'], true)) {
+    if ($completedAt !== '' || $status === 'completed') {
         return 'completed';
     }
 
-    if (
-        $startedAt !== '' ||
-        $trackingStatus === 'live' ||
-        in_array($status, ['in_progress', 'in-progress', 'active', 'started', 'walking', 'live', 'en_route', 'en-route', 'underway'], true)
-    ) {
+    if ($startedAt !== '' || $trackingStatus === 'live' || $status === 'in_progress') {
         return 'live';
     }
 
     return 'assigned';
 }
 
-if (!table_exists($pdo, 'users')) {
-    exit('Users table not found.');
+function safe_fetch_all(PDO $pdo, string $sql, array $params = []): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : [];
+    } catch (Throwable) {
+        return [];
+    }
 }
 
-$userColumns = get_columns($pdo, 'users');
-$userIdCol = first_existing_column($userColumns, ['id', 'user_id']);
-
-if ($userIdCol === null) {
-    exit('Users table is missing a usable ID column.');
+function safe_fetch_one(PDO $pdo, string $sql, array $params = []): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable) {
+        return null;
+    }
 }
+
+function load_worker_from_table(PDO $pdo, string $table, int $workerId): ?array
+{
+    if (!table_exists($pdo, $table)) {
+        return null;
+    }
+
+    $columns = get_columns($pdo, $table);
+    if ($columns === []) {
+        return null;
+    }
+
+    $idCol = first_existing_column($columns, ['id', 'user_id', 'worker_id', 'walker_id']);
+    if ($idCol === null) {
+        return null;
+    }
+
+    if ($table === 'users') {
+        $roleCol = first_existing_column($columns, ['role', 'user_role', 'account_role', 'account_type']);
+        $sql = 'SELECT * FROM ' . qi($table) . ' WHERE ' . qi($idCol) . ' = :id LIMIT 1';
+        $row = safe_fetch_one($pdo, $sql, [':id' => $workerId]);
+
+        if (!$row) {
+            return null;
+        }
+
+        if ($roleCol !== null) {
+            $role = strtolower(trim((string) ($row[$roleCol] ?? '')));
+            if (!in_array($role, ['walker', 'worker', 'staff', 'employee'], true)) {
+                return null;
+            }
+        }
+
+        return $row;
+    }
+
+    $sql = 'SELECT * FROM ' . qi($table) . ' WHERE ' . qi($idCol) . ' = :id LIMIT 1';
+    return safe_fetch_one($pdo, $sql, [':id' => $workerId]);
+}
+
+function load_worker(PDO $pdo, int $workerId): ?array
+{
+    foreach (['workers', 'walkers', 'users'] as $table) {
+        $row = load_worker_from_table($pdo, $table, $workerId);
+        if ($row) {
+            $row['_source_table'] = $table;
+            return $row;
+        }
+    }
+
+    return null;
+}
+
+function build_lookup(PDO $pdo, array $sourceTables, array $idCandidates, array $nameCandidates, array $extraMap = []): array
+{
+    $lookup = [];
+
+    foreach ($sourceTables as $table) {
+        if (!table_exists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = get_columns($pdo, $table);
+        if ($columns === []) {
+            continue;
+        }
+
+        $idCol = first_existing_column($columns, $idCandidates);
+        if ($idCol === null) {
+            continue;
+        }
+
+        $orderCol = first_existing_column($columns, ['created_at', 'joined_at', 'date_created', $idCol]) ?? $idCol;
+        $rows = safe_fetch_all(
+            $pdo,
+            'SELECT * FROM ' . qi($table) . ' ORDER BY ' . qi($orderCol) . ' DESC'
+        );
+
+        foreach ($rows as $row) {
+            $id = (int) ($row[$idCol] ?? 0);
+            if ($id <= 0 || isset($lookup[$id])) {
+                continue;
+            }
+
+            $label = '';
+            foreach ($nameCandidates as $candidate) {
+                if (isset($row[$candidate]) && trim((string) $row[$candidate]) !== '') {
+                    $label = trim((string) $row[$candidate]);
+                    break;
+                }
+            }
+
+            if ($label === '') {
+                $label = build_name($row);
+            }
+
+            $extra = [];
+            foreach ($extraMap as $key => $candidateList) {
+                $extra[$key] = value_from_row($row, $candidateList, '');
+            }
+
+            $lookup[$id] = [
+                'label' => $label !== '' ? $label : 'Unknown',
+                'extra' => $extra,
+            ];
+        }
+    }
+
+    return $lookup;
+}
+
+/* ==========================================================================
+   INPUT
+   ========================================================================== */
 
 $workerId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 if ($workerId <= 0) {
     exit('Invalid worker ID.');
 }
 
-try {
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE {$userIdCol} = :id LIMIT 1");
-    $stmt->execute([':id' => $workerId]);
-    $worker = $stmt->fetch(PDO::FETCH_ASSOC);
-} catch (Throwable $e) {
-    exit('Could not load worker: ' . h($e->getMessage()));
+$filter = strtolower(trim((string) ($_GET['filter'] ?? 'all')));
+$allowedFilters = ['all', 'assigned', 'live', 'completed'];
+if (!in_array($filter, $allowedFilters, true)) {
+    $filter = 'all';
 }
+
+/* ==========================================================================
+   WORKER LOAD
+   ========================================================================== */
+
+$worker = load_worker($pdo, $workerId);
 
 if (!$worker) {
     exit('Worker not found.');
@@ -321,12 +504,34 @@ if (!$worker) {
 $workerName = build_name($worker);
 $workerRole = (string) value_from_row($worker, ['role', 'user_role', 'account_role', 'account_type'], 'Worker');
 $workerEmail = (string) value_from_row($worker, ['email'], '—');
+$workerSource = (string) ($worker['_source_table'] ?? 'unknown');
 
-$filter = strtolower(trim((string) ($_GET['filter'] ?? 'all')));
-$allowedFilters = ['all', 'assigned', 'live', 'completed'];
-if (!in_array($filter, $allowedFilters, true)) {
-    $filter = 'all';
-}
+/* ==========================================================================
+   LOOKUPS
+   ========================================================================== */
+
+$clientLookup = build_lookup(
+    $pdo,
+    ['users', 'members', 'client_profiles'],
+    ['id', 'user_id', 'member_id', 'client_id'],
+    ['full_name', 'name', 'client_name', 'member_name', 'username', 'email'],
+    ['email' => ['email']]
+);
+
+$petLookup = build_lookup(
+    $pdo,
+    ['dogs', 'pets'],
+    ['id', 'dog_id', 'pet_id'],
+    ['dog_name', 'pet_name', 'name'],
+    [
+        'breed' => ['breed'],
+        'size' => ['size', 'dog_size', 'pet_size'],
+    ]
+);
+
+/* ==========================================================================
+   JOB LOAD
+   ========================================================================== */
 
 $allJobs = [];
 $filteredJobs = [];
@@ -336,6 +541,7 @@ $completedCount = 0;
 
 if (table_exists($pdo, 'bookings')) {
     $bookingColumns = get_columns($pdo, 'bookings');
+
     $bookingIdCol = first_existing_column($bookingColumns, ['id', 'booking_id']);
     $bookingWorkerCol = first_existing_column($bookingColumns, [
         'walker_id',
@@ -346,6 +552,7 @@ if (table_exists($pdo, 'bookings')) {
         'assigned_worker_id',
         'assigned_user_id',
         'assigned_to_user_id',
+        'assigned_to',
     ]);
     $bookingOrderCol = first_existing_column($bookingColumns, [
         'service_date',
@@ -360,17 +567,48 @@ if (table_exists($pdo, 'bookings')) {
     ]) ?? 'id';
 
     if ($bookingIdCol !== null && $bookingWorkerCol !== null) {
-        try {
-            $stmt = $pdo->prepare("
-                SELECT *
-                FROM bookings
-                WHERE {$bookingWorkerCol} = :worker_id
-                ORDER BY {$bookingOrderCol} DESC
-            ");
-            $stmt->execute([':worker_id' => $workerId]);
-            $allJobs = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
-        } catch (Throwable) {
-            $allJobs = [];
+        $rows = safe_fetch_all(
+            $pdo,
+            'SELECT * FROM ' . qi('bookings') . '
+             WHERE ' . qi($bookingWorkerCol) . ' = :worker_id
+             ORDER BY ' . qi($bookingOrderCol) . ' DESC, ' . qi($bookingIdCol) . ' DESC',
+            [':worker_id' => $workerId]
+        );
+
+        foreach ($rows as $row) {
+            $clientName = trim((string) value_from_row($row, [
+                'customer_name',
+                'client_name',
+                'member_name',
+                'owner_name',
+                'user_name',
+                'full_name',
+            ], ''));
+
+            $clientId = (int) value_from_row($row, ['user_id', 'member_id', 'client_id', 'owner_id'], 0);
+            if ($clientName === '' && $clientId > 0 && isset($clientLookup[$clientId])) {
+                $clientName = (string) ($clientLookup[$clientId]['label'] ?? '');
+            }
+
+            $petName = trim((string) value_from_row($row, ['pet_name', 'dog_name', 'animal_name'], ''));
+            $petId = (int) value_from_row($row, ['pet_id', 'dog_id'], 0);
+            $petBreed = '';
+            $petSize = '';
+
+            if ($petName === '' && $petId > 0 && isset($petLookup[$petId])) {
+                $petName = (string) ($petLookup[$petId]['label'] ?? '');
+                $petBreed = (string) ($petLookup[$petId]['extra']['breed'] ?? '');
+                $petSize = (string) ($petLookup[$petId]['extra']['size'] ?? '');
+            }
+
+            $normalized = $row;
+            $normalized['_resolved_client_name'] = $clientName !== '' ? $clientName : '—';
+            $normalized['_resolved_pet_name'] = $petName !== '' ? $petName : '—';
+            $normalized['_resolved_pet_breed'] = $petBreed;
+            $normalized['_resolved_pet_size'] = $petSize;
+            $normalized['_resolved_booking_id'] = (int) ($row[$bookingIdCol] ?? 0);
+
+            $allJobs[] = $normalized;
         }
     }
 }
@@ -625,6 +863,22 @@ foreach ($allJobs as $job) {
             color: #fde68a;
         }
 
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        .action {
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.85rem;
+            font-weight: 800;
+        }
+
         .empty {
             padding: 18px;
             border-radius: 18px;
@@ -660,6 +914,7 @@ foreach ($allJobs as $job) {
             <div class="brand">Doggie Dorian’s</div>
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
                 <a class="top-link" href="admin-walker-management.php">Workers</a>
                 <a class="top-link" href="admin-worker-view.php?id=<?= $workerId ?>">Worker View</a>
@@ -678,6 +933,7 @@ foreach ($allJobs as $job) {
                 <div class="pill">Worker ID: <?= h((string) $workerId) ?></div>
                 <div class="pill">Role: <?= h($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—') ?></div>
                 <div class="pill">Email: <?= h($workerEmail) ?></div>
+                <div class="pill">Source: <?= h($workerSource) ?></div>
             </div>
 
             <div class="stats">
@@ -718,7 +974,15 @@ foreach ($allJobs as $job) {
                         <?php
                         $type = classify_job($job);
                         $badgeClass = $type === 'live' ? 'badge-live' : ($type === 'completed' ? 'badge-completed' : 'badge-assigned');
-                        $jobId = (int) value_from_row($job, ['id', 'booking_id'], 0);
+                        $jobId = (int) ($job['_resolved_booking_id'] ?? value_from_row($job, ['id', 'booking_id'], 0));
+                        $resolvedClient = (string) ($job['_resolved_client_name'] ?? booking_customer($job));
+                        $resolvedPet = (string) ($job['_resolved_pet_name'] ?? '');
+                        $resolvedBreed = (string) ($job['_resolved_pet_breed'] ?? '');
+                        $resolvedSize = (string) ($job['_resolved_pet_size'] ?? '');
+                        $serviceStatus = (string) value_from_row($job, ['status', 'booking_status', 'walk_status', 'job_status'], ucfirst($type));
+                        $startedAt = (string) value_from_row($job, ['started_at', 'actual_start_time', 'start_time'], '');
+                        $completedAt = (string) value_from_row($job, ['completed_at', 'ended_at', 'finished_at', 'actual_end_time'], '');
+                        $createdAt = (string) value_from_row($job, ['created_at'], '');
                         ?>
                         <div class="item">
                             <div class="item-top">
@@ -727,17 +991,26 @@ foreach ($allJobs as $job) {
                                 </div>
                                 <span class="badge <?= $badgeClass ?>"><?= h(ucfirst($type)) ?></span>
                             </div>
+
                             <div class="item-text">
-                                Customer: <?= h(booking_customer($job)) ?><br>
-                                When: <?= booking_when($job) ?><br>
-                                Start: <?= h((string) value_from_row($job, ['started_at', 'actual_start_time', 'start_time'], '—')) ?><br>
-                                End: <?= h((string) value_from_row($job, ['completed_at', 'ended_at', 'finished_at', 'actual_end_time'], '—')) ?><br>
-                                Status: <?= h((string) value_from_row($job, ['status', 'booking_status', 'walk_status', 'job_status'], ucfirst($type))) ?><br>
-                                Created: <?= h((string) (
-                                    (($created = value_from_row($job, ['created_at'], '')) !== '')
-                                        ? format_datetime_value($created)
-                                        : '—'
-                                )) ?>
+                                Customer: <?= h($resolvedClient) ?><br>
+                                Pet: <?= h($resolvedPet !== '' ? $resolvedPet : '—') ?>
+                                <?php if ($resolvedBreed !== '' || $resolvedSize !== ''): ?>
+                                    (<?= h(trim($resolvedBreed . ($resolvedBreed !== '' && $resolvedSize !== '' ? ' • ' : '') . $resolvedSize)) ?>)
+                                <?php endif; ?>
+                                <br>
+                                When: <?= h(booking_when($job)) ?><br>
+                                Start: <?= h($startedAt !== '' ? format_datetime_value($startedAt) : '—') ?><br>
+                                End: <?= h($completedAt !== '' ? format_datetime_value($completedAt) : '—') ?><br>
+                                Status: <?= h($serviceStatus) ?><br>
+                                Created: <?= h($createdAt !== '' ? format_datetime_value($createdAt) : '—') ?>
+                            </div>
+
+                            <div class="actions">
+                                <?php if ($jobId > 0): ?>
+                                    <a class="action" href="admin-edit-booking.php?id=<?= $jobId ?>">Open Booking</a>
+                                    <a class="action" href="admin-bookings.php">Bookings</a>
+                                <?php endif; ?>
                             </div>
                         </div>
                     <?php endforeach; ?>

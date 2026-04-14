@@ -3,64 +3,32 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
-
-/**
- * Doggie Dorian's
- * admin-worker-view.php
- *
- * Stable admin-only worker detail page.
- * This version is more forgiving about role labels.
- */
+require_once __DIR__ . '/admin-auth.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     exit('Database connection not available.');
 }
 
-function h(mixed $value): string
+function ddAdminWorkerViewH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirect_to(string $url): never
+function ddAdminWorkerViewRedirect(string $url): void
 {
     header('Location: ' . $url);
     exit;
 }
 
-function is_admin_session(): bool
+function ddAdminWorkerViewQuoteIdentifier(string $value): string
 {
-    $roleCandidates = [
-        $_SESSION['role'] ?? null,
-        $_SESSION['user_role'] ?? null,
-        $_SESSION['account_role'] ?? null,
-        $_SESSION['account_type'] ?? null,
-    ];
-
-    foreach ($roleCandidates as $role) {
-        if (is_string($role) && strtolower(trim($role)) === 'admin') {
-            return true;
-        }
-    }
-
-    if (!empty($_SESSION['is_admin']) || !empty($_SESSION['admin_logged_in'])) {
-        return true;
-    }
-
-    return false;
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
-if (!isset($_SESSION['user_id']) && empty($_SESSION['admin_logged_in'])) {
-    redirect_to('admin-login.php');
-}
-
-if (!is_admin_session()) {
-    redirect_to('login.php');
-}
-
-function table_exists(PDO $pdo, string $table): bool
+function ddAdminWorkerViewTableExists(PDO $pdo, string $table): bool
 {
-    static $cache = [];
+    static $cache = array();
 
     if (array_key_exists($table, $cache)) {
         return $cache[$table];
@@ -68,29 +36,37 @@ function table_exists(PDO $pdo, string $table): bool
 
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-        $stmt->execute([':table' => $table]);
-        return $cache[$table] = (bool) $stmt->fetchColumn();
-    } catch (Throwable) {
-        return $cache[$table] = false;
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
     }
 }
 
-function get_columns(PDO $pdo, string $table): array
+function ddAdminWorkerViewGetColumns(PDO $pdo, string $table): array
 {
-    static $cache = [];
+    static $cache = array();
 
     if (array_key_exists($table, $cache)) {
         return $cache[$table];
     }
 
-    if (!table_exists($pdo, $table)) {
-        return $cache[$table] = [];
+    if (!ddAdminWorkerViewTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 
     try {
-        $stmt = $pdo->query("PRAGMA table_info($table)");
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        $columns = [];
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminWorkerViewQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $columns = array();
 
         foreach ($rows as $row) {
             if (!empty($row['name'])) {
@@ -98,13 +74,15 @@ function get_columns(PDO $pdo, string $table): array
             }
         }
 
-        return $cache[$table] = $columns;
-    } catch (Throwable) {
-        return $cache[$table] = [];
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 }
 
-function first_existing_column(array $columns, array $candidates): ?string
+function ddAdminWorkerViewFirstExistingColumn(array $columns, array $candidates): ?string
 {
     foreach ($candidates as $candidate) {
         if (in_array($candidate, $columns, true)) {
@@ -115,7 +93,7 @@ function first_existing_column(array $columns, array $candidates): ?string
     return null;
 }
 
-function value_from_row(array $row, array $candidates, mixed $default = null): mixed
+function ddAdminWorkerViewValueFromRow(array $row, array $candidates, $default = null)
 {
     foreach ($candidates as $candidate) {
         if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
@@ -126,37 +104,40 @@ function value_from_row(array $row, array $candidates, mixed $default = null): m
     return $default;
 }
 
-function build_name(array $row): string
+function ddAdminWorkerViewBuildName(array $row): string
 {
-    $full = trim((string) value_from_row($row, [
+    $full = trim((string) ddAdminWorkerViewValueFromRow($row, array(
         'full_name',
         'name',
         'display_name',
+        'worker_name',
+        'walker_name',
         'username',
-    ], ''));
+        'email',
+    ), ''));
 
     if ($full !== '') {
         return $full;
     }
 
     $first = trim((string) ($row['first_name'] ?? ''));
-    $last  = trim((string) ($row['last_name'] ?? ''));
-
+    $last = trim((string) ($row['last_name'] ?? ''));
     $combined = trim($first . ' ' . $last);
+
     return $combined !== '' ? $combined : 'Unknown';
 }
 
-function human_status(array $row): string
+function ddAdminWorkerViewHumanStatus(array $row): string
 {
-    foreach (['status', 'account_status', 'worker_status'] as $col) {
-        if (isset($row[$col]) && trim((string) $row[$col]) !== '') {
-            return ucwords(str_replace(['_', '-'], ' ', strtolower((string) $row[$col])));
+    foreach (array('status', 'account_status', 'worker_status') as $column) {
+        if (isset($row[$column]) && trim((string) $row[$column]) !== '') {
+            return ucwords(str_replace(array('_', '-'), ' ', strtolower((string) $row[$column])));
         }
     }
 
-    foreach (['is_active', 'active', 'enabled'] as $col) {
-        if (array_key_exists($col, $row)) {
-            return ((int) $row[$col] === 1) ? 'Active' : 'Disabled';
+    foreach (array('is_active', 'active', 'enabled') as $column) {
+        if (array_key_exists($column, $row)) {
+            return ((int) $row[$column] === 1) ? 'Active' : 'Disabled';
         }
     }
 
@@ -167,11 +148,11 @@ function human_status(array $row): string
     return 'Unknown';
 }
 
-function worker_is_active(array $row): bool
+function ddAdminWorkerViewWorkerIsActive(array $row): bool
 {
-    foreach (['is_active', 'active', 'enabled'] as $col) {
-        if (array_key_exists($col, $row)) {
-            return (int) $row[$col] === 1;
+    foreach (array('is_active', 'active', 'enabled') as $column) {
+        if (array_key_exists($column, $row)) {
+            return (int) $row[$column] === 1;
         }
     }
 
@@ -179,21 +160,21 @@ function worker_is_active(array $row): bool
         return (int) $row['disabled'] !== 1;
     }
 
-    foreach (['status', 'account_status', 'worker_status'] as $col) {
-        if (!isset($row[$col])) {
+    foreach (array('status', 'account_status', 'worker_status') as $column) {
+        if (!isset($row[$column])) {
             continue;
         }
 
-        $value = strtolower(trim((string) $row[$col]));
+        $value = strtolower(trim((string) $row[$column]));
         if ($value === '') {
             continue;
         }
 
-        if (in_array($value, ['disabled', 'inactive', 'blocked', 'suspended'], true)) {
+        if (in_array($value, array('disabled', 'inactive', 'blocked', 'suspended'), true)) {
             return false;
         }
 
-        if (in_array($value, ['active', 'enabled', 'approved'], true)) {
+        if (in_array($value, array('active', 'enabled', 'approved'), true)) {
             return true;
         }
     }
@@ -201,67 +182,45 @@ function worker_is_active(array $row): bool
     return true;
 }
 
-function format_datetime_value(mixed $value): string
+function ddAdminWorkerViewFormatDateTime($value): string
 {
     $raw = trim((string) $value);
     if ($raw === '') {
         return '—';
     }
 
-    $ts = strtotime($raw);
-    if ($ts === false) {
-        return h($raw);
+    $timestamp = strtotime($raw);
+    if ($timestamp === false) {
+        return $raw;
     }
 
-    return date('M j, Y g:i A', $ts);
+    return date('M j, Y g:i A', $timestamp);
 }
 
-function booking_title(array $row): string
+function ddAdminWorkerViewBookingTitle(array $row): string
 {
-    $service = trim((string) value_from_row($row, [
+    $service = trim((string) ddAdminWorkerViewValueFromRow($row, array(
         'service_name',
         'service_type',
         'service',
         'booking_type',
         'type',
-    ], 'Service'));
+    ), 'Service'));
 
-    $pet = trim((string) value_from_row($row, [
+    $service = $service !== '' ? ucwords(str_replace(array('_', '-'), ' ', $service)) : 'Service';
+
+    $pet = trim((string) ddAdminWorkerViewValueFromRow($row, array(
         'pet_name',
         'dog_name',
         'animal_name',
-    ], ''));
+    ), ''));
 
     return $pet !== '' ? $service . ' • ' . $pet : $service;
 }
 
-function booking_customer(array $row): string
+function ddAdminWorkerViewBookingWhen(array $row): string
 {
-    $name = trim((string) value_from_row($row, [
-        'customer_name',
-        'client_name',
-        'member_name',
-        'owner_name',
-        'user_name',
-    ], ''));
-
-    if ($name !== '') {
-        return $name;
-    }
-
-    $email = trim((string) value_from_row($row, [
-        'customer_email',
-        'client_email',
-        'member_email',
-        'owner_email',
-    ], ''));
-
-    return $email !== '' ? $email : '—';
-}
-
-function booking_when(array $row): string
-{
-    $date = trim((string) value_from_row($row, [
+    $date = trim((string) ddAdminWorkerViewValueFromRow($row, array(
         'service_date',
         'booking_date',
         'scheduled_date',
@@ -271,116 +230,282 @@ function booking_when(array $row): string
         'start_date',
         'scheduled_for',
         'created_at',
-    ], ''));
+    ), ''));
 
-    $time = trim((string) value_from_row($row, [
+    $time = trim((string) ddAdminWorkerViewValueFromRow($row, array(
         'service_time',
         'booking_time',
         'start_time',
         'scheduled_time',
         'time',
-    ], ''));
+    ), ''));
 
     if ($date === '') {
         return '—';
     }
 
-    $ts = strtotime($date);
-    $formatted = $ts !== false ? date('M j, Y', $ts) : $date;
+    $timestamp = strtotime($date);
+    $formatted = $timestamp !== false ? date('M j, Y', $timestamp) : $date;
 
-    return $time !== '' ? $formatted . ' • ' . h($time) : h($formatted);
+    return $time !== '' ? $formatted . ' • ' . $time : $formatted;
 }
 
-function classify_job(array $job): string
+function ddAdminWorkerViewNormalizeJobStatus(string $status): string
 {
-    $status = strtolower(trim((string) value_from_row($job, [
+    $normalized = strtolower(trim($status));
+    $normalized = str_replace(array(' ', '-'), '_', $normalized);
+
+    return match ($normalized) {
+        'done', 'finished', 'complete' => 'completed',
+        'inprogress', 'active', 'started', 'walking', 'live', 'en_route', 'underway' => 'in_progress',
+        '' => 'assigned',
+        default => $normalized,
+    };
+}
+
+function ddAdminWorkerViewClassifyJob(array $job): string
+{
+    $status = ddAdminWorkerViewNormalizeJobStatus((string) ddAdminWorkerViewValueFromRow($job, array(
         'status',
         'booking_status',
         'walk_status',
         'job_status',
-    ], '')));
+    ), ''));
 
-    $completedAt = trim((string) value_from_row($job, [
+    $completedAt = trim((string) ddAdminWorkerViewValueFromRow($job, array(
         'completed_at',
         'ended_at',
         'finished_at',
         'actual_end_time',
-    ], ''));
+    ), ''));
 
-    $startedAt = trim((string) value_from_row($job, [
+    $startedAt = trim((string) ddAdminWorkerViewValueFromRow($job, array(
         'started_at',
         'actual_start_time',
-    ], ''));
+    ), ''));
 
-    $trackingStatus = strtolower(trim((string) value_from_row($job, [
+    $trackingStatus = strtolower(trim((string) ddAdminWorkerViewValueFromRow($job, array(
         'tracking_status',
-    ], '')));
+    ), '')));
 
-    if ($completedAt !== '' || in_array($status, ['completed', 'complete', 'finished', 'done', 'closed', 'checked_out'], true)) {
+    if ($completedAt !== '' || $status === 'completed') {
         return 'completed';
     }
 
-    if (
-        $startedAt !== '' ||
-        $trackingStatus === 'live' ||
-        in_array($status, ['in_progress', 'in-progress', 'active', 'started', 'walking', 'live', 'en_route', 'en-route', 'underway'], true)
-    ) {
+    if ($startedAt !== '' || $trackingStatus === 'live' || $status === 'in_progress') {
         return 'live';
     }
 
     return 'assigned';
 }
 
-if (!table_exists($pdo, 'users')) {
-    exit('Users table not found.');
+function ddAdminWorkerViewSafeFetchAll(PDO $pdo, string $sql, array $params = array()): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return array();
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : array();
+    } catch (Throwable $e) {
+        return array();
+    }
 }
 
-$userColumns = get_columns($pdo, 'users');
-$userIdCol = first_existing_column($userColumns, ['id', 'user_id']);
-$userRoleCol = first_existing_column($userColumns, ['role', 'user_role', 'account_role', 'account_type']);
+function ddAdminWorkerViewSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
 
-if ($userIdCol === null) {
-    exit('Users table is missing a usable ID column.');
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function ddAdminWorkerViewLoadWorkerFromTable(PDO $pdo, string $table, int $workerId): ?array
+{
+    if (!ddAdminWorkerViewTableExists($pdo, $table)) {
+        return null;
+    }
+
+    $columns = ddAdminWorkerViewGetColumns($pdo, $table);
+    if ($columns === array()) {
+        return null;
+    }
+
+    $idColumn = ddAdminWorkerViewFirstExistingColumn($columns, array('id', 'user_id', 'worker_id', 'walker_id'));
+    if ($idColumn === null) {
+        return null;
+    }
+
+    $sql = 'SELECT * FROM ' . ddAdminWorkerViewQuoteIdentifier($table)
+        . ' WHERE ' . ddAdminWorkerViewQuoteIdentifier($idColumn) . ' = :id LIMIT 1';
+
+    $row = ddAdminWorkerViewSafeFetchOne($pdo, $sql, array(':id' => $workerId));
+
+    if (!$row) {
+        return null;
+    }
+
+    if ($table === 'users') {
+        $roleColumn = ddAdminWorkerViewFirstExistingColumn($columns, array('role', 'user_role', 'account_role', 'account_type'));
+        if ($roleColumn !== null) {
+            $role = strtolower(trim((string) ($row[$roleColumn] ?? '')));
+            if (!in_array($role, array('walker', 'worker', 'staff', 'employee'), true)) {
+                return null;
+            }
+        }
+    }
+
+    $row['_source_table'] = $table;
+    return $row;
+}
+
+function ddAdminWorkerViewLoadWorker(PDO $pdo, int $workerId, string $preferredSource = ''): ?array
+{
+    $validSources = array('workers', 'walkers', 'users');
+
+    if ($preferredSource !== '' && in_array($preferredSource, $validSources, true)) {
+        $worker = ddAdminWorkerViewLoadWorkerFromTable($pdo, $preferredSource, $workerId);
+        if ($worker) {
+            return $worker;
+        }
+    }
+
+    foreach ($validSources as $table) {
+        if ($table === $preferredSource) {
+            continue;
+        }
+
+        $worker = ddAdminWorkerViewLoadWorkerFromTable($pdo, $table, $workerId);
+        if ($worker) {
+            return $worker;
+        }
+    }
+
+    return null;
+}
+
+function ddAdminWorkerViewBuildLookup(PDO $pdo, array $sourceTables, array $idCandidates, array $nameCandidates, array $extraMap = array()): array
+{
+    $lookup = array();
+
+    foreach ($sourceTables as $table) {
+        if (!ddAdminWorkerViewTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminWorkerViewGetColumns($pdo, $table);
+        if ($columns === array()) {
+            continue;
+        }
+
+        $idColumn = ddAdminWorkerViewFirstExistingColumn($columns, $idCandidates);
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $orderColumn = ddAdminWorkerViewFirstExistingColumn($columns, array('created_at', 'joined_at', 'date_created', $idColumn)) ?? $idColumn;
+        $rows = ddAdminWorkerViewSafeFetchAll(
+            $pdo,
+            'SELECT * FROM ' . ddAdminWorkerViewQuoteIdentifier($table) . ' ORDER BY ' . ddAdminWorkerViewQuoteIdentifier($orderColumn) . ' DESC'
+        );
+
+        foreach ($rows as $row) {
+            $id = (int) ($row[$idColumn] ?? 0);
+            if ($id <= 0 || isset($lookup[$id])) {
+                continue;
+            }
+
+            $label = '';
+            foreach ($nameCandidates as $candidate) {
+                if (isset($row[$candidate]) && trim((string) $row[$candidate]) !== '') {
+                    $label = trim((string) $row[$candidate]);
+                    break;
+                }
+            }
+
+            if ($label === '') {
+                $label = ddAdminWorkerViewBuildName($row);
+            }
+
+            $extra = array();
+            foreach ($extraMap as $key => $candidateList) {
+                $extra[$key] = ddAdminWorkerViewValueFromRow($row, $candidateList, '');
+            }
+
+            $lookup[$id] = array(
+                'label' => $label !== '' ? $label : 'Unknown',
+                'extra' => $extra,
+            );
+        }
+    }
+
+    return $lookup;
 }
 
 $workerId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
+$workerSource = isset($_GET['source']) ? strtolower(trim((string) $_GET['source'])) : '';
+
 if ($workerId <= 0) {
-    exit('Invalid worker ID.');
+    ddAdminWorkerViewRedirect('admin-walker-management.php');
 }
 
-try {
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE {$userIdCol} = :id LIMIT 1");
-    $stmt->execute([':id' => $workerId]);
-    $worker = $stmt->fetch(PDO::FETCH_ASSOC);
-} catch (Throwable $e) {
-    exit('Could not load worker: ' . h($e->getMessage()));
-}
+$worker = ddAdminWorkerViewLoadWorker($pdo, $workerId, $workerSource);
 
 if (!$worker) {
-    exit('Worker not found.');
+    ddAdminWorkerViewRedirect('admin-walker-management.php');
 }
 
-$workerName = build_name($worker);
-$workerEmail = (string) value_from_row($worker, ['email'], '—');
-$workerPhone = (string) value_from_row($worker, ['phone', 'phone_number', 'mobile'], '—');
-$workerRole = (string) value_from_row($worker, ['role', 'user_role', 'account_role', 'account_type'], 'Worker');
-$workerStatus = human_status($worker);
-$workerAvailability = (string) value_from_row($worker, ['availability', 'worker_availability', 'schedule'], '');
-$workerBio = (string) value_from_row($worker, ['bio', 'about', 'about_me', 'notes', 'worker_bio'], '');
-$workerCreated = (string) value_from_row($worker, ['created_at', 'joined_at', 'date_created'], '');
-$workerIsActive = worker_is_active($worker);
+$resolvedWorkerSource = (string) ($worker['_source_table'] ?? $workerSource ?: 'unknown');
+$sourceParam = urlencode($resolvedWorkerSource);
 
-$allJobs = [];
-$assignedJobs = [];
-$liveJobs = [];
-$completedJobs = [];
-$bookingWorkerCol = null;
-$bookingIdCol = null;
+$workerName = ddAdminWorkerViewBuildName($worker);
+$workerEmail = (string) ddAdminWorkerViewValueFromRow($worker, array('email'), '—');
+$workerPhone = (string) ddAdminWorkerViewValueFromRow($worker, array('phone', 'phone_number', 'mobile'), '—');
+$workerRole = (string) ddAdminWorkerViewValueFromRow($worker, array('role', 'user_role', 'account_role', 'account_type'), 'Worker');
+$workerStatus = ddAdminWorkerViewHumanStatus($worker);
+$workerAvailability = (string) ddAdminWorkerViewValueFromRow($worker, array('availability', 'worker_availability', 'schedule'), '');
+$workerBio = (string) ddAdminWorkerViewValueFromRow($worker, array('bio', 'about', 'about_me', 'notes', 'worker_bio'), '');
+$workerCreated = (string) ddAdminWorkerViewValueFromRow($worker, array('created_at', 'joined_at', 'date_created'), '');
+$workerIsActive = ddAdminWorkerViewWorkerIsActive($worker);
 
-if (table_exists($pdo, 'bookings')) {
-    $bookingColumns = get_columns($pdo, 'bookings');
-    $bookingIdCol = first_existing_column($bookingColumns, ['id', 'booking_id']);
-    $bookingWorkerCol = first_existing_column($bookingColumns, [
+$clientLookup = ddAdminWorkerViewBuildLookup(
+    $pdo,
+    array('users', 'members', 'client_profiles'),
+    array('id', 'user_id', 'member_id', 'client_id'),
+    array('full_name', 'name', 'client_name', 'member_name', 'username', 'email'),
+    array('email' => array('email'))
+);
+
+$petLookup = ddAdminWorkerViewBuildLookup(
+    $pdo,
+    array('dogs', 'pets'),
+    array('id', 'dog_id', 'pet_id'),
+    array('dog_name', 'pet_name', 'name'),
+    array(
+        'breed' => array('breed'),
+        'size' => array('size', 'dog_size', 'pet_size'),
+    )
+);
+
+$allJobs = array();
+$assignedJobs = array();
+$liveJobs = array();
+$completedJobs = array();
+
+if (ddAdminWorkerViewTableExists($pdo, 'bookings')) {
+    $bookingColumns = ddAdminWorkerViewGetColumns($pdo, 'bookings');
+
+    $bookingIdColumn = ddAdminWorkerViewFirstExistingColumn($bookingColumns, array('id', 'booking_id'));
+    $bookingWorkerColumn = ddAdminWorkerViewFirstExistingColumn($bookingColumns, array(
         'walker_id',
         'worker_id',
         'staff_id',
@@ -389,8 +514,9 @@ if (table_exists($pdo, 'bookings')) {
         'assigned_worker_id',
         'assigned_user_id',
         'assigned_to_user_id',
-    ]);
-    $bookingOrderCol = first_existing_column($bookingColumns, [
+        'assigned_to',
+    ));
+    $bookingOrderColumn = ddAdminWorkerViewFirstExistingColumn($bookingColumns, array(
         'service_date',
         'booking_date',
         'scheduled_date',
@@ -400,26 +526,58 @@ if (table_exists($pdo, 'bookings')) {
         'date',
         'created_at',
         'id',
-    ]) ?? 'id';
+    )) ?? 'id';
 
-    if ($bookingIdCol !== null && $bookingWorkerCol !== null) {
-        try {
-            $stmt = $pdo->prepare("
-                SELECT *
-                FROM bookings
-                WHERE {$bookingWorkerCol} = :worker_id
-                ORDER BY {$bookingOrderCol} DESC
-            ");
-            $stmt->execute([':worker_id' => $workerId]);
-            $allJobs = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
-        } catch (Throwable) {
-            $allJobs = [];
+    if ($bookingIdColumn !== null && $bookingWorkerColumn !== null) {
+        $rows = ddAdminWorkerViewSafeFetchAll(
+            $pdo,
+            'SELECT * FROM ' . ddAdminWorkerViewQuoteIdentifier('bookings') . '
+             WHERE ' . ddAdminWorkerViewQuoteIdentifier($bookingWorkerColumn) . ' = :worker_id
+             ORDER BY ' . ddAdminWorkerViewQuoteIdentifier($bookingOrderColumn) . ' DESC, ' . ddAdminWorkerViewQuoteIdentifier($bookingIdColumn) . ' DESC',
+            array(':worker_id' => $workerId)
+        );
+
+        foreach ($rows as $row) {
+            $clientName = trim((string) ddAdminWorkerViewValueFromRow($row, array(
+                'customer_name',
+                'client_name',
+                'member_name',
+                'owner_name',
+                'user_name',
+                'full_name',
+            ), ''));
+
+            $clientId = (int) ddAdminWorkerViewValueFromRow($row, array('user_id', 'member_id', 'client_id', 'owner_id'), 0);
+            if ($clientName === '' && $clientId > 0 && isset($clientLookup[$clientId])) {
+                $clientName = (string) ($clientLookup[$clientId]['label'] ?? '');
+            }
+
+            $petName = trim((string) ddAdminWorkerViewValueFromRow($row, array('pet_name', 'dog_name', 'animal_name'), ''));
+            $petId = (int) ddAdminWorkerViewValueFromRow($row, array('pet_id', 'dog_id'), 0);
+            $petBreed = '';
+            $petSize = '';
+
+            if ($petName === '' && $petId > 0 && isset($petLookup[$petId])) {
+                $petName = (string) ($petLookup[$petId]['label'] ?? '');
+                $petBreed = (string) ($petLookup[$petId]['extra']['breed'] ?? '');
+                $petSize = (string) ($petLookup[$petId]['extra']['size'] ?? '');
+            }
+
+            $normalized = $row;
+            $normalized['_resolved_client_name'] = $clientName !== '' ? $clientName : '—';
+            $normalized['_resolved_pet_name'] = $petName !== '' ? $petName : '—';
+            $normalized['_resolved_pet_breed'] = $petBreed;
+            $normalized['_resolved_pet_size'] = $petSize;
+            $normalized['_resolved_booking_id'] = (int) ($row[$bookingIdColumn] ?? 0);
+
+            $allJobs[] = $normalized;
         }
     }
 }
 
 foreach ($allJobs as $job) {
-    $type = classify_job($job);
+    $type = ddAdminWorkerViewClassifyJob($job);
+
     if ($type === 'live') {
         $liveJobs[] = $job;
     } elseif ($type === 'completed') {
@@ -569,7 +727,7 @@ foreach ($allJobs as $job) {
 
         .stats {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 12px;
             margin-top: 18px;
         }
@@ -670,6 +828,22 @@ foreach ($allJobs as $job) {
             font-size: 0.92rem;
         }
 
+        .item-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .item-action {
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.85rem;
+            font-weight: 800;
+        }
+
         .badge {
             display: inline-flex;
             align-items: center;
@@ -736,47 +910,53 @@ foreach ($allJobs as $job) {
             <div class="brand">Doggie Dorian’s</div>
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
                 <a class="top-link" href="admin-walker-management.php">Workers</a>
-                <a class="top-link" href="admin-worker-view.php?id=<?= $workerId ?>">Worker View</a>
+                <a class="top-link" href="admin-worker-view.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Worker View</a>
+                <a class="top-link" href="admin-worker-jobs.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Worker Jobs</a>
             </div>
         </div>
 
         <section class="hero">
             <div class="eyebrow">Admin Worker Detail</div>
-            <h1><?= h($workerName) ?></h1>
+            <h1><?php echo ddAdminWorkerViewH($workerName); ?></h1>
             <div class="sub">
                 Full admin-side view of this account, including profile info, status, workload, and related bookings.
             </div>
 
             <div class="hero-actions">
-                <a class="btn btn-gold" href="admin-edit-worker.php?id=<?= $workerId ?>">Edit Worker</a>
+                <a class="btn btn-gold" href="admin-edit-worker.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Edit Worker</a>
                 <a class="btn" href="admin-walker-management.php">Back to Workers</a>
-                <a class="btn" href="admin-worker-jobs.php?id=<?= $workerId ?>">View All Jobs</a>
-                <a class="btn" href="admin-assign-walker.php?worker_id=<?= $workerId ?>">Assign Booking</a>
+                <a class="btn" href="admin-worker-jobs.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">View All Jobs</a>
+                <a class="btn" href="admin-assign-walker.php?worker_id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Assign Booking</a>
                 <?php if ($workerIsActive): ?>
-                    <a class="btn" href="admin-disable-worker.php?id=<?= $workerId ?>">Disable</a>
+                    <a class="btn" href="admin-disable-worker.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Disable</a>
                 <?php else: ?>
-                    <a class="btn" href="admin-enable-worker.php?id=<?= $workerId ?>">Enable</a>
+                    <a class="btn" href="admin-enable-worker.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">Enable</a>
                 <?php endif; ?>
             </div>
 
             <div class="stats">
                 <div class="stat">
                     <div class="stat-label">Assigned Jobs</div>
-                    <div class="stat-value"><?= count($assignedJobs) ?></div>
+                    <div class="stat-value"><?php echo count($assignedJobs); ?></div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Live Jobs</div>
-                    <div class="stat-value"><?= count($liveJobs) ?></div>
+                    <div class="stat-value"><?php echo count($liveJobs); ?></div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Completed Jobs</div>
-                    <div class="stat-value"><?= count($completedJobs) ?></div>
+                    <div class="stat-value"><?php echo count($completedJobs); ?></div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Total Jobs</div>
-                    <div class="stat-value"><?= count($allJobs) ?></div>
+                    <div class="stat-value"><?php echo count($allJobs); ?></div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Source</div>
+                    <div class="stat-value"><?php echo ddAdminWorkerViewH($resolvedWorkerSource); ?></div>
                 </div>
             </div>
         </section>
@@ -788,18 +968,18 @@ foreach ($allJobs as $job) {
                 <div class="info-grid">
                     <div class="info-box">
                         <div class="info-label">Worker ID</div>
-                        <div class="info-value"><?= h((string) $workerId) ?></div>
+                        <div class="info-value"><?php echo ddAdminWorkerViewH((string) $workerId); ?></div>
                     </div>
 
                     <div class="info-box">
                         <div class="info-label">Role</div>
-                        <div class="info-value"><?= h($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—') ?></div>
+                        <div class="info-value"><?php echo ddAdminWorkerViewH($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—'); ?></div>
                     </div>
 
                     <div class="info-box">
                         <div class="info-label">Status</div>
                         <div class="info-value">
-                            <?= h($workerStatus) ?>
+                            <?php echo ddAdminWorkerViewH($workerStatus); ?>
                             <?php if (!$workerIsActive): ?>
                                 <span class="badge badge-disabled">Disabled</span>
                             <?php endif; ?>
@@ -808,33 +988,33 @@ foreach ($allJobs as $job) {
 
                     <div class="info-box">
                         <div class="info-label">Joined</div>
-                        <div class="info-value"><?= h($workerCreated !== '' ? format_datetime_value($workerCreated) : '—') ?></div>
+                        <div class="info-value"><?php echo ddAdminWorkerViewH($workerCreated !== '' ? ddAdminWorkerViewFormatDateTime($workerCreated) : '—'); ?></div>
                     </div>
 
                     <div class="info-box">
                         <div class="info-label">Email</div>
-                        <div class="info-value"><?= h($workerEmail) ?></div>
+                        <div class="info-value"><?php echo ddAdminWorkerViewH($workerEmail); ?></div>
                     </div>
 
                     <div class="info-box">
                         <div class="info-label">Phone</div>
-                        <div class="info-value"><?= h($workerPhone) ?></div>
+                        <div class="info-value"><?php echo ddAdminWorkerViewH($workerPhone); ?></div>
                     </div>
 
                     <div class="info-box" style="grid-column: 1 / -1;">
                         <div class="info-label">Availability</div>
-                        <div class="info-value"><?= h($workerAvailability !== '' ? $workerAvailability : '—') ?></div>
+                        <div class="info-value"><?php echo ddAdminWorkerViewH($workerAvailability !== '' ? $workerAvailability : '—'); ?></div>
                     </div>
                 </div>
 
                 <div class="panel-title" style="margin-top:18px;">Bio / Notes</div>
-                <div class="bio-box"><?= h($workerBio !== '' ? $workerBio : 'No bio or notes available.') ?></div>
+                <div class="bio-box"><?php echo ddAdminWorkerViewH($workerBio !== '' ? $workerBio : 'No bio or notes available.'); ?></div>
             </div>
 
             <div class="panel">
                 <div class="panel-title">Recent Jobs</div>
 
-                <?php if ($allJobs === []): ?>
+                <?php if ($allJobs === array()): ?>
                     <div class="empty">
                         No jobs found for this account yet.
                     </div>
@@ -842,20 +1022,36 @@ foreach ($allJobs as $job) {
                     <div class="list">
                         <?php foreach (array_slice($allJobs, 0, 8) as $job): ?>
                             <?php
-                            $jobId = $bookingIdCol !== null ? (int) ($job[$bookingIdCol] ?? 0) : 0;
-                            $type = classify_job($job);
+                            $jobId = (int) ($job['_resolved_booking_id'] ?? ddAdminWorkerViewValueFromRow($job, array('id', 'booking_id'), 0));
+                            $type = ddAdminWorkerViewClassifyJob($job);
                             $badgeClass = $type === 'live' ? 'badge-live' : ($type === 'completed' ? 'badge-completed' : 'badge-assigned');
                             $badgeText = ucfirst($type);
+                            $resolvedClient = (string) ($job['_resolved_client_name'] ?? '—');
+                            $resolvedPet = (string) ($job['_resolved_pet_name'] ?? '—');
+                            $resolvedBreed = (string) ($job['_resolved_pet_breed'] ?? '');
+                            $resolvedSize = (string) ($job['_resolved_pet_size'] ?? '');
                             ?>
                             <div class="item">
                                 <div class="item-title">
-                                    #<?= h($jobId > 0 ? (string) $jobId : '—') ?> · <?= h(booking_title($job)) ?>
+                                    #<?php echo ddAdminWorkerViewH($jobId > 0 ? (string) $jobId : '—'); ?> · <?php echo ddAdminWorkerViewH(ddAdminWorkerViewBookingTitle($job)); ?>
                                 </div>
                                 <div class="item-text">
-                                    Customer: <?= h(booking_customer($job)) ?><br>
-                                    When: <?= booking_when($job) ?>
+                                    Customer: <?php echo ddAdminWorkerViewH($resolvedClient); ?><br>
+                                    Pet: <?php echo ddAdminWorkerViewH($resolvedPet); ?>
+                                    <?php if ($resolvedBreed !== '' || $resolvedSize !== ''): ?>
+                                        (<?php echo ddAdminWorkerViewH(trim($resolvedBreed . ($resolvedBreed !== '' && $resolvedSize !== '' ? ' • ' : '') . $resolvedSize)); ?>)
+                                    <?php endif; ?>
+                                    <br>
+                                    When: <?php echo ddAdminWorkerViewH(ddAdminWorkerViewBookingWhen($job)); ?>
                                 </div>
-                                <span class="badge <?= $badgeClass ?>"><?= h($badgeText) ?></span>
+                                <span class="badge <?php echo $badgeClass; ?>"><?php echo ddAdminWorkerViewH($badgeText); ?></span>
+
+                                <div class="item-actions">
+                                    <?php if ($jobId > 0): ?>
+                                        <a class="item-action" href="admin-edit-booking.php?id=<?php echo $jobId; ?>">Open Booking</a>
+                                    <?php endif; ?>
+                                    <a class="item-action" href="admin-worker-jobs.php?id=<?php echo $workerId; ?>&source=<?php echo $sourceParam; ?>">View All Jobs</a>
+                                </div>
                             </div>
                         <?php endforeach; ?>
                     </div>

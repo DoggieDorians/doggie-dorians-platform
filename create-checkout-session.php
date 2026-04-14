@@ -278,6 +278,13 @@ function service_label_from_type(string $serviceType): string
     };
 }
 
+function checkoutReturnUrlForMode(string $mode): string
+{
+    return $mode === 'non_member'
+        ? 'non-member-payment-portal.php'
+        : 'payment-portal.php';
+}
+
 function hasTable(PDO $pdo, string $table): bool
 {
     static $cache = [];
@@ -1172,7 +1179,7 @@ try {
         failPage(
             'Duplicate checkout attempt detected. Please wait a moment and try again.',
             429,
-            $mode === 'non_member' ? 'non-member-payment-portal.php' : 'payment-portal.php'
+            checkoutReturnUrlForMode($mode)
         );
     }
     $_SESSION['last_checkout_time'] = time();
@@ -1239,8 +1246,16 @@ try {
     redirectTo((string) $session->url);
 } catch (\Stripe\Exception\ApiErrorException $e) {
     error_log('Stripe API error: ' . $e->getMessage());
-    failPage('Stripe error: ' . $e->getMessage(), 500, $mode === 'non_member' ? 'non-member-payment-portal.php' : 'payment-portal.php');
+    failPage(
+        'Checkout is temporarily unavailable. Please try again in a few minutes.',
+        500,
+        checkoutReturnUrlForMode($mode)
+    );
 } catch (Throwable $e) {
-    error_log('Stripe error: ' . $e->getMessage());
-    failPage('Checkout failed: ' . $e->getMessage(), 500, $mode === 'non_member' ? 'non-member-payment-portal.php' : 'payment-portal.php');
+    error_log('Stripe checkout error: ' . $e->getMessage());
+    failPage(
+        'Checkout could not be started right now. Please try again in a few minutes.',
+        500,
+        checkoutReturnUrlForMode($mode)
+    );
 }

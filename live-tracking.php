@@ -4,14 +4,6 @@ declare(strict_types=1);
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
 
-/**
- * Doggie Dorian's
- * live-tracking.php
- *
- * Full replacement
- * Premium schema-tolerant live walk tracking + timer page
- */
-
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     echo 'Database connection is not available.';
@@ -33,15 +25,16 @@ function jsonResponse(array $data, int $status = 200): never
 {
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     echo json_encode($data, JSON_UNESCAPED_SLASHES);
     exit;
 }
 
 function currentUserRole(): string
 {
-    $role = (string) ($_SESSION['role'] ?? '');
+    $role = strtolower(trim((string) ($_SESSION['role'] ?? '')));
     if ($role !== '') {
-        return strtolower($role);
+        return $role;
     }
 
     if (!empty($_SESSION['is_admin'])) {
@@ -60,6 +53,10 @@ function currentUserRole(): string
         return 'employee';
     }
 
+    if (!empty($_SESSION['worker_id'])) {
+        return 'worker';
+    }
+
     return 'member';
 }
 
@@ -68,35 +65,51 @@ function isAdmin(): bool
     return currentUserRole() === 'admin';
 }
 
-function isWorker(): bool
-{
-    $role = currentUserRole();
-    return in_array($role, ['walker', 'staff', 'employee'], true) || currentWorkerId() > 0;
-}
-
 function currentWorkerId(): int
 {
-    foreach (['walker_id', 'staff_id', 'employee_id', 'worker_id', 'user_id'] as $key) {
+    foreach (['walker_id', 'staff_id', 'employee_id', 'worker_id'] as $key) {
         if (isset($_SESSION[$key]) && is_numeric($_SESSION[$key])) {
             return (int) $_SESSION[$key];
         }
     }
+
     return 0;
+}
+
+function isWorker(): bool
+{
+    $role = currentUserRole();
+
+    if (in_array($role, ['walker', 'staff', 'employee', 'worker'], true)) {
+        return true;
+    }
+
+    return currentWorkerId() > 0;
 }
 
 if (!isWorker() && !isAdmin()) {
     redirectTo('login.php');
 }
 
+function trackingCsrfToken(): string
+{
+    if (empty($_SESSION['tracking_csrf']) || !is_string($_SESSION['tracking_csrf'])) {
+        $_SESSION['tracking_csrf'] = bin2hex(random_bytes(32));
+    }
+
+    return (string) $_SESSION['tracking_csrf'];
+}
+
 function hasTable(PDO $pdo, string $table): bool
 {
     static $cache = [];
+
     if (array_key_exists($table, $cache)) {
         return $cache[$table];
     }
 
     try {
-        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :name LIMIT 1");
         $stmt->execute([':name' => $table]);
         $cache[$table] = (bool) $stmt->fetchColumn();
         return $cache[$table];
@@ -109,6 +122,7 @@ function hasTable(PDO $pdo, string $table): bool
 function getTableColumns(PDO $pdo, string $table): array
 {
     static $cache = [];
+
     if (array_key_exists($table, $cache)) {
         return $cache[$table];
     }
@@ -151,6 +165,7 @@ function firstExistingColumn(PDO $pdo, string $table, array $candidates): ?strin
             return $candidate;
         }
     }
+
     return null;
 }
 
@@ -161,6 +176,7 @@ function valueFromRow(array $row, array $candidates, mixed $default = null): mix
             return $row[$candidate];
         }
     }
+
     return $default;
 }
 
@@ -221,6 +237,7 @@ function bookingBaseTable(PDO $pdo): ?string
             return $candidate;
         }
     }
+
     return null;
 }
 
@@ -237,6 +254,7 @@ function updateRowColumns(PDO $pdo, string $table, string $idCol, int $id, array
         if (!hasColumn($pdo, $table, $column)) {
             continue;
         }
+
         $param = ':c_' . $column;
         $sets[] = "{$column} = {$param}";
         $params[$param] = $value;
@@ -248,6 +266,7 @@ function updateRowColumns(PDO $pdo, string $table, string $idCol, int $id, array
 
     $sql = "UPDATE {$table} SET " . implode(', ', $sets) . " WHERE {$idCol} = :id";
     $stmt = $pdo->prepare($sql);
+
     return safeExecute($stmt, $params);
 }
 
@@ -264,6 +283,7 @@ function loadPetNameById(PDO $pdo, int $petId): string
 
         $idCol = firstExistingColumn($pdo, $table, ['id', 'pet_id', 'dog_id']);
         $nameCol = firstExistingColumn($pdo, $table, ['name', 'pet_name', 'dog_name']);
+
         if ($idCol === null || $nameCol === null) {
             continue;
         }
@@ -295,6 +315,7 @@ function loadClientName(PDO $pdo, int $userId): string
 
         $idCol = firstExistingColumn($pdo, $table, ['id', 'user_id', 'member_id', 'client_id']);
         $nameCol = firstExistingColumn($pdo, $table, ['full_name', 'name', 'client_name', 'member_name']);
+
         if ($idCol === null || $nameCol === null) {
             continue;
         }
@@ -327,7 +348,9 @@ function writeNotification(PDO $pdo, array $booking, string $message, string $ta
     $data = [];
 
     if (in_array('user_id', $columns, true)) {
-        $data['user_id'] = $target === 'worker' ? (int) ($booking['worker_id'] ?? 0) : (int) ($booking['user_id'] ?? 0);
+        $data['user_id'] = $target === 'worker'
+            ? (int) ($booking['worker_id'] ?? 0)
+            : (int) ($booking['user_id'] ?? 0);
     }
 
     if (in_array('member_id', $columns, true) && $target !== 'worker') {
@@ -372,8 +395,8 @@ function writeNotification(PDO $pdo, array $booking, string $message, string $ta
 
     $fields = array_keys($data);
     $placeholders = array_map(static fn(string $key): string => ':' . $key, $fields);
-
     $params = [];
+
     foreach ($data as $key => $value) {
         $params[':' . $key] = $value;
     }
@@ -390,6 +413,7 @@ function getWalkSessionTable(PDO $pdo): ?string
             return $candidate;
         }
     }
+
     return null;
 }
 
@@ -400,6 +424,7 @@ function getTrackingPointTable(PDO $pdo): ?string
             return $candidate;
         }
     }
+
     return null;
 }
 
@@ -456,6 +481,7 @@ function findOrCreateTrackingSession(PDO $pdo, array $booking): ?array
 
     $sessionIdCol = firstExistingColumn($pdo, $sessionTable, ['id']);
     $bookingIdCol = firstExistingColumn($pdo, $sessionTable, ['booking_id', 'walk_id']);
+
     if ($sessionIdCol === null || $bookingIdCol === null) {
         return null;
     }
@@ -481,9 +507,6 @@ function findOrCreateTrackingSession(PDO $pdo, array $booking): ?array
     }
     if (in_array('status', $columns, true)) {
         $data['status'] = 'accepted';
-    }
-    if (in_array('started_at', $columns, true)) {
-        $data['started_at'] = null;
     }
     if (in_array('created_at', $columns, true)) {
         $data['created_at'] = date('Y-m-d H:i:s');
@@ -527,6 +550,7 @@ function loadTrackingSession(PDO $pdo, array $booking): ?array
 
     $sessionIdCol = firstExistingColumn($pdo, $sessionTable, ['id']);
     $bookingIdCol = firstExistingColumn($pdo, $sessionTable, ['booking_id', 'walk_id']);
+
     if ($sessionIdCol === null || $bookingIdCol === null) {
         return null;
     }
@@ -665,6 +689,15 @@ function completeTrackingSession(PDO $pdo, array $booking): array
     return ['ok' => true, 'message' => 'Walk completed successfully.'];
 }
 
+function validCoordinate(float $value, string $axis): bool
+{
+    if ($axis === 'lat') {
+        return $value >= -90 && $value <= 90;
+    }
+
+    return $value >= -180 && $value <= 180;
+}
+
 function writeTrackingPoint(PDO $pdo, array $booking, float $lat, float $lng, ?float $accuracy = null): void
 {
     $pointTable = getTrackingPointTable($pdo);
@@ -716,8 +749,8 @@ function writeTrackingPoint(PDO $pdo, array $booking, float $lat, float $lng, ?f
 
     $fields = array_keys($data);
     $placeholders = array_map(static fn(string $key): string => ':' . $key, $fields);
-
     $params = [];
+
     foreach ($data as $key => $value) {
         $params[':' . $key] = $value;
     }
@@ -847,6 +880,7 @@ if ($booking['service_type'] !== 'walk') {
 }
 
 $sessionWorkerId = currentWorkerId();
+
 if (!isAdmin() && (int) $booking['worker_id'] > 0 && (int) $booking['worker_id'] !== $sessionWorkerId) {
     http_response_code(403);
     echo 'You do not have permission to access this live tracking session.';
@@ -869,8 +903,17 @@ if ((int) $booking['worker_id'] <= 0 && $sessionWorkerId > 0) {
 
 $apiAction = strtolower(trim((string) ($_GET['api'] ?? $_POST['api'] ?? '')));
 if ($apiAction !== '') {
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST' && $apiAction !== 'status') {
-        jsonResponse(['ok' => false, 'message' => 'Invalid request method.'], 405);
+    if ($apiAction !== 'status') {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            jsonResponse(['ok' => false, 'message' => 'Invalid request method.'], 405);
+        }
+
+        $sessionToken = (string) ($_SESSION['tracking_csrf'] ?? '');
+        $postedToken = (string) ($_POST['csrf_token'] ?? '');
+
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            jsonResponse(['ok' => false, 'message' => 'Session expired. Refresh and try again.'], 403);
+        }
     }
 
     if ($apiAction === 'start') {
@@ -882,12 +925,21 @@ if ($apiAction !== '') {
     }
 
     if ($apiAction === 'ping') {
-        $lat = isset($_POST['latitude']) ? (float) $_POST['latitude'] : 0.0;
-        $lng = isset($_POST['longitude']) ? (float) $_POST['longitude'] : 0.0;
-        $accuracy = isset($_POST['accuracy']) && $_POST['accuracy'] !== '' ? (float) $_POST['accuracy'] : null;
+        $latRaw = $_POST['latitude'] ?? null;
+        $lngRaw = $_POST['longitude'] ?? null;
 
-        if ($lat === 0.0 && $lng === 0.0) {
+        if (!is_numeric($latRaw) || !is_numeric($lngRaw)) {
             jsonResponse(['ok' => false, 'message' => 'Latitude and longitude are required.'], 400);
+        }
+
+        $lat = (float) $latRaw;
+        $lng = (float) $lngRaw;
+        $accuracy = isset($_POST['accuracy']) && $_POST['accuracy'] !== '' && is_numeric($_POST['accuracy'])
+            ? (float) $_POST['accuracy']
+            : null;
+
+        if (!validCoordinate($lat, 'lat') || !validCoordinate($lng, 'lng')) {
+            jsonResponse(['ok' => false, 'message' => 'GPS coordinates are invalid.'], 400);
         }
 
         updateTrackingSessionLocation($pdo, $booking, $lat, $lng, $accuracy);
@@ -924,6 +976,7 @@ if ($apiAction !== '') {
 $flash = $_SESSION['live_tracking_flash'] ?? '';
 unset($_SESSION['live_tracking_flash']);
 
+$trackingCsrf = trackingCsrfToken();
 $snapshot = getLatestTrackingSnapshot($pdo, $booking);
 $bookingStatus = normalizeStatus((string) $booking['status']);
 $sessionStatus = normalizeStatus((string) ($snapshot['session_status'] ?? ''));
@@ -937,6 +990,8 @@ if (!empty($snapshot['started_at'])) {
         $startTimestamp = date('c', $ts);
     }
 }
+
+$dashboardLink = isAdmin() ? 'admin-dashboard.php' : 'walker-dashboard.php';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -953,10 +1008,8 @@ if (!empty($snapshot['started_at'])) {
             --panel: rgba(255,255,255,0.055);
             --panel-2: rgba(255,255,255,0.04);
             --line: rgba(255,255,255,0.08);
-            --line-soft: rgba(255,255,255,0.06);
             --text: #f4f1ea;
             --muted: rgba(244,241,234,0.72);
-            --muted-2: rgba(244,241,234,0.56);
             --gold-1: #e2c48d;
             --gold-2: #b9975b;
             --blue-1: #7fb5ff;
@@ -1240,17 +1293,6 @@ if (!empty($snapshot['started_at'])) {
             color: #09110a;
         }
 
-        .btn-danger {
-            background: linear-gradient(135deg, var(--red-1), var(--red-2));
-            color: #fff;
-        }
-
-        .btn-secondary {
-            background: rgba(255,255,255,0.08);
-            color: #fff;
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-
         .btn-tracking {
             background: linear-gradient(135deg, var(--blue-1), var(--blue-2));
             color: #08111f;
@@ -1258,8 +1300,6 @@ if (!empty($snapshot['started_at'])) {
 
         .btn-primary:hover,
         .btn-success:hover,
-        .btn-danger:hover,
-        .btn-secondary:hover,
         .btn-tracking:hover {
             transform: translateY(-1px);
         }
@@ -1293,14 +1333,6 @@ if (!empty($snapshot['started_at'])) {
             background: rgba(125,206,141,0.14);
             border: 1px solid rgba(125,206,141,0.3);
             color: #dff6e3;
-        }
-
-        .muted {
-            color: rgba(244,241,234,0.58);
-        }
-
-        .mono {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         }
 
         .hidden {
@@ -1338,11 +1370,13 @@ if (!empty($snapshot['started_at'])) {
         <div class="topbar">
             <div class="brand">Doggie Dorian’s</div>
             <div class="top-links">
-                <a class="top-link" href="walker-dashboard.php">Walker Dashboard</a>
+                <a class="top-link" href="<?= h($dashboardLink) ?>">Dashboard</a>
                 <?php if (isAdmin()): ?>
                     <a class="top-link" href="admin-bookings.php">Admin Bookings</a>
+                    <a class="top-link" href="admin-revenue.php">Revenue</a>
                 <?php endif; ?>
                 <a class="top-link" href="booking-details.php?id=<?= (int) $booking['id'] ?>">Booking Details</a>
+                <a class="top-link" href="client-map.php?booking_id=<?= (int) $booking['id'] ?>">Client Map</a>
             </div>
         </div>
 
@@ -1370,19 +1404,19 @@ if (!empty($snapshot['started_at'])) {
                 <div class="timer-grid">
                     <div class="timer-box">
                         <div class="timer-label">Elapsed Time</div>
-                        <div class="timer-value mono" id="elapsedTimer">00:00:00</div>
+                        <div class="timer-value" id="elapsedTimer">00:00:00</div>
                     </div>
 
                     <div class="timer-box">
                         <div class="timer-label">Last GPS Ping</div>
-                        <div class="timer-value smallish mono" id="lastPingLabel">
+                        <div class="timer-value smallish" id="lastPingLabel">
                             <?= h($snapshot['last_ping_at'] !== null && $snapshot['last_ping_at'] !== '' ? (string) $snapshot['last_ping_at'] : 'Waiting') ?>
                         </div>
                     </div>
 
                     <div class="timer-box">
                         <div class="timer-label">GPS Accuracy</div>
-                        <div class="timer-value smallish mono" id="accuracyLabel">
+                        <div class="timer-value smallish" id="accuracyLabel">
                             <?= h($snapshot['accuracy'] !== null && $snapshot['accuracy'] !== '' ? (string) $snapshot['accuracy'] . ' m' : '—') ?>
                         </div>
                     </div>
@@ -1405,22 +1439,22 @@ if (!empty($snapshot['started_at'])) {
 
                     <div class="detail">
                         <div class="detail-label">Started At</div>
-                        <div class="detail-value mono" id="startedAtLabel"><?= h($snapshot['started_at'] !== null && $snapshot['started_at'] !== '' ? (string) $snapshot['started_at'] : 'Not started') ?></div>
+                        <div class="detail-value" id="startedAtLabel"><?= h($snapshot['started_at'] !== null && $snapshot['started_at'] !== '' ? (string) $snapshot['started_at'] : 'Not started') ?></div>
                     </div>
 
                     <div class="detail">
                         <div class="detail-label">Ended At</div>
-                        <div class="detail-value mono" id="endedAtLabel"><?= h($snapshot['ended_at'] !== null && $snapshot['ended_at'] !== '' ? (string) $snapshot['ended_at'] : 'Not completed') ?></div>
+                        <div class="detail-value" id="endedAtLabel"><?= h($snapshot['ended_at'] !== null && $snapshot['ended_at'] !== '' ? (string) $snapshot['ended_at'] : 'Not completed') ?></div>
                     </div>
 
                     <div class="detail">
                         <div class="detail-label">Latitude</div>
-                        <div class="detail-value mono" id="latLabel"><?= h($snapshot['latitude'] !== null ? (string) $snapshot['latitude'] : '—') ?></div>
+                        <div class="detail-value" id="latLabel"><?= h($snapshot['latitude'] !== null ? (string) $snapshot['latitude'] : '—') ?></div>
                     </div>
 
                     <div class="detail">
                         <div class="detail-label">Longitude</div>
-                        <div class="detail-value mono" id="lngLabel"><?= h($snapshot['longitude'] !== null ? (string) $snapshot['longitude'] : '—') ?></div>
+                        <div class="detail-value" id="lngLabel"><?= h($snapshot['longitude'] !== null ? (string) $snapshot['longitude'] : '—') ?></div>
                     </div>
                 </div>
 
@@ -1429,7 +1463,7 @@ if (!empty($snapshot['started_at'])) {
                         <div>
                             <div class="map-title">Live route preview</div>
                             <div class="map-copy">
-                                This control page is keeping location, timing, and walk state synced. Use the client tracking page for the customer-facing map experience.
+                                This control page keeps location, timing, and walk state synced. Use the client tracking page for the customer-facing map experience.
                             </div>
                             <div class="map-coords" id="mapCoordsLabel">
                                 LAT: <?= h($snapshot['latitude'] !== null ? (string) $snapshot['latitude'] : '—') ?>
@@ -1445,6 +1479,7 @@ if (!empty($snapshot['started_at'])) {
         <section class="grid">
             <div class="card">
                 <div class="eyebrow">Walk Information</div>
+
                 <div class="detail-grid">
                     <div class="detail">
                         <div class="detail-label">Booking ID</div>
@@ -1469,7 +1504,7 @@ if (!empty($snapshot['started_at'])) {
 
                 <div class="detail" style="margin-top:14px;">
                     <div class="detail-label">Care Notes</div>
-                    <div class="detail-value" style="font-weight:600;"><?= h($booking['notes'] !== '' ? (string) $booking['notes'] : 'No care notes were provided for this walk.') ?></div>
+                    <div class="detail-value"><?= h($booking['notes'] !== '' ? (string) $booking['notes'] : 'No care notes were provided for this walk.') ?></div>
                 </div>
             </div>
 
@@ -1500,14 +1535,6 @@ if (!empty($snapshot['started_at'])) {
                         </div>
                         <button id="completeWalkBtn" class="btn-primary" <?= !$isStarted || $isCompleted ? 'disabled' : '' ?>>Complete Walk</button>
                     </div>
-
-                    <div class="action-box">
-                        <div class="action-title">Client Tracking View</div>
-                        <div class="action-text">
-                            Open the client-facing map page tied to this same booking.
-                        </div>
-                        <a class="top-link" href="client-map.php?booking_id=<?= (int) $booking['id'] ?>">Open Client Map</a>
-                    </div>
                 </div>
             </div>
         </section>
@@ -1515,13 +1542,14 @@ if (!empty($snapshot['started_at'])) {
 
     <script>
         const bookingId = <?= (int) $booking['id'] ?>;
+        const trackingCsrf = <?= json_encode($trackingCsrf) ?>;
+
         let walkStarted = <?= $isStarted ? 'true' : 'false' ?>;
         let walkCompleted = <?= $isCompleted ? 'true' : 'false' ?>;
         let startIso = <?= json_encode($startTimestamp) ?>;
         let gpsEnabled = false;
         let gpsWatchId = null;
         let pingIntervalId = null;
-        let statusIntervalId = null;
         let latestPosition = null;
 
         const noticeBox = document.getElementById('noticeBox');
@@ -1571,8 +1599,9 @@ if (!empty($snapshot['started_at'])) {
                 return;
             }
 
-            const endMs = walkCompleted && endedAtLabel.textContent && endedAtLabel.textContent !== 'Not completed'
-                ? new Date(endedAtLabel.textContent).getTime()
+            const endedText = endedAtLabel.textContent || '';
+            const endMs = walkCompleted && endedText !== 'Not completed'
+                ? new Date(endedText).getTime()
                 : Date.now();
 
             const baseMs = Number.isNaN(endMs) ? Date.now() : endMs;
@@ -1597,6 +1626,7 @@ if (!empty($snapshot['started_at'])) {
             const form = new FormData();
             form.append('api', api);
             form.append('booking_id', String(bookingId));
+            form.append('csrf_token', trackingCsrf);
 
             Object.entries(payload).forEach(([key, value]) => {
                 if (value !== null && value !== undefined) {
@@ -1607,7 +1637,8 @@ if (!empty($snapshot['started_at'])) {
             const response = await fetch(`live-tracking.php?booking_id=${bookingId}`, {
                 method: 'POST',
                 body: form,
-                credentials: 'same-origin'
+                credentials: 'same-origin',
+                cache: 'no-store'
             });
 
             return response.json();
@@ -1677,7 +1708,8 @@ if (!empty($snapshot['started_at'])) {
         async function refreshStatus() {
             try {
                 const response = await fetch(`live-tracking.php?booking_id=${bookingId}&api=status`, {
-                    credentials: 'same-origin'
+                    credentials: 'same-origin',
+                    cache: 'no-store'
                 });
                 const data = await response.json();
                 if (data.ok) {
@@ -1819,7 +1851,7 @@ if (!empty($snapshot['started_at'])) {
         updateTimer();
         setButtons();
 
-        statusIntervalId = setInterval(() => {
+        setInterval(() => {
             void refreshStatus();
         }, 10000);
 

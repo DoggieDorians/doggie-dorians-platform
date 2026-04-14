@@ -2,436 +2,617 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-/**
- * OPTIONAL:
- * If you already have a stronger admin session check in your project,
- * replace this block with your existing admin access logic.
- */
-$isAdmin =
-    isset($_SESSION['admin_id']) ||
-    (isset($_SESSION['is_admin']) && $_SESSION['is_admin']) ||
-    (isset($_SESSION['role']) && $_SESSION['role'] === 'admin');
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/admin-auth.php';
 
-if (!$isAdmin) {
-    http_response_code(403);
-    exit('Access denied.');
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    exit('Database connection not available.');
 }
 
-/**
- * CHANGE THESE:
- */
-$fromEmail = 'no-reply@dorianspetcare.com';
-$siteName = "Doggie Dorian's";
-$siteBaseUrl = 'https://dorianspetcare.com';
-
-$storageFile = __DIR__ . '/data/founder-applications.json';
-
-function dd_load_founder_applications_admin(string $file): array
+function ddAdminEnableWorkerH($value): string
 {
-    if (!is_file($file)) {
-        return [];
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function ddAdminEnableWorkerRedirect(string $url): void
+{
+    header('Location: ' . $url);
+    exit;
+}
+
+function ddAdminEnableWorkerQuoteIdentifier(string $identifier): string
+{
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
+function ddAdminEnableWorkerTableExists(PDO $pdo, string $table): bool
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
     }
 
-    $raw = file_get_contents($file);
-    if (!is_string($raw) || trim($raw) === '') {
-        return [];
-    }
-
-    $decoded = json_decode($raw, true);
-    return is_array($decoded) ? $decoded : [];
-}
-
-function dd_save_founder_applications_admin(string $file, array $applications): bool
-{
-    return file_put_contents(
-        $file,
-        json_encode($applications, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
-    ) !== false;
-}
-
-function dd_send_email_admin(string $to, string $subject, string $message, string $fromEmail): bool
-{
-    $headers = [];
-    $headers[] = 'MIME-Version: 1.0';
-    $headers[] = 'Content-type: text/plain; charset=UTF-8';
-    $headers[] = 'From: Doggie Dorian\'s <' . $fromEmail . '>';
-    $headers[] = 'Reply-To: ' . $fromEmail;
-    $headers[] = 'X-Mailer: PHP/' . phpversion();
-
-    return @mail($to, $subject, $message, implode("\r\n", $headers));
-}
-
-function dd_status_class(string $status): string
-{
-    switch ($status) {
-        case 'approved':
-            return 'approved';
-        case 'declined':
-            return 'declined';
-        default:
-            return 'pending';
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
     }
 }
 
-$applications = dd_load_founder_applications_admin($storageFile);
-$message = '';
+function ddAdminEnableWorkerGetColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminEnableWorkerTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminEnableWorkerQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $columns = array();
+
+        foreach ($rows as $row) {
+            if (!empty($row['name'])) {
+                $columns[] = (string) $row['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function ddAdminEnableWorkerFirstExistingColumn(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function ddAdminEnableWorkerValueFromRow(array $row, array $candidates, $default = null)
+{
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
+            return $row[$candidate];
+        }
+    }
+
+    return $default;
+}
+
+function ddAdminEnableWorkerBuildName(array $row): string
+{
+    $full = trim((string) ddAdminEnableWorkerValueFromRow($row, array(
+        'full_name',
+        'name',
+        'display_name',
+        'username',
+        'walker_name',
+        'worker_name',
+    ), ''));
+
+    if ($full !== '') {
+        return $full;
+    }
+
+    $first = trim((string) ($row['first_name'] ?? ''));
+    $last = trim((string) ($row['last_name'] ?? ''));
+    $combined = trim($first . ' ' . $last);
+
+    return $combined !== '' ? $combined : 'Unknown';
+}
+
+function ddAdminEnableWorkerIsActive(array $row): bool
+{
+    foreach (array('is_active', 'active', 'enabled') as $column) {
+        if (array_key_exists($column, $row)) {
+            return (int) $row[$column] === 1;
+        }
+    }
+
+    if (array_key_exists('disabled', $row)) {
+        return (int) $row['disabled'] !== 1;
+    }
+
+    foreach (array('status', 'account_status', 'worker_status') as $column) {
+        if (!isset($row[$column])) {
+            continue;
+        }
+
+        $value = strtolower(trim((string) $row[$column]));
+        if ($value === '') {
+            continue;
+        }
+
+        if (in_array($value, array('disabled', 'inactive', 'blocked', 'suspended'), true)) {
+            return false;
+        }
+
+        if (in_array($value, array('active', 'enabled', 'approved'), true)) {
+            return true;
+        }
+    }
+
+    return true;
+}
+
+function ddAdminEnableWorkerSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function ddAdminEnableWorkerCsrfToken(): string
+{
+    if (empty($_SESSION['admin_enable_worker_csrf']) || !is_string($_SESSION['admin_enable_worker_csrf'])) {
+        $_SESSION['admin_enable_worker_csrf'] = bin2hex(random_bytes(32));
+    }
+
+    return $_SESSION['admin_enable_worker_csrf'];
+}
+
+function ddAdminEnableWorkerValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_enable_worker_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
+function ddAdminEnableWorkerDetectSources(PDO $pdo): array
+{
+    $sources = array();
+
+    foreach (array('users', 'walkers', 'workers') as $table) {
+        if (!ddAdminEnableWorkerTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminEnableWorkerGetColumns($pdo, $table);
+        $idColumn = ddAdminEnableWorkerFirstExistingColumn($columns, array('id', 'user_id', 'walker_id', 'worker_id'));
+
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $sources[] = array(
+            'table' => $table,
+            'columns' => $columns,
+            'id_column' => $idColumn,
+            'role_column' => ddAdminEnableWorkerFirstExistingColumn($columns, array('role', 'user_role', 'account_role', 'account_type')),
+            'email_column' => ddAdminEnableWorkerFirstExistingColumn($columns, array('email')),
+        );
+    }
+
+    return $sources;
+}
+
+function ddAdminEnableWorkerLoadRecord(PDO $pdo, int $workerId, array $sources): ?array
+{
+    foreach ($sources as $source) {
+        $row = ddAdminEnableWorkerSafeFetchOne(
+            $pdo,
+            'SELECT * FROM ' . ddAdminEnableWorkerQuoteIdentifier((string) $source['table']) .
+            ' WHERE ' . ddAdminEnableWorkerQuoteIdentifier((string) $source['id_column']) . ' = :id LIMIT 1',
+            array(':id' => $workerId)
+        );
+
+        if (is_array($row) && !empty($row)) {
+            $source['row'] = $row;
+            return $source;
+        }
+    }
+
+    return null;
+}
+
+$sources = ddAdminEnableWorkerDetectSources($pdo);
+if (empty($sources)) {
+    exit('No supported worker tables were found.');
+}
+
+$workerId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
+if ($workerId <= 0) {
+    $workerId = isset($_GET['worker_id']) ? (int) $_GET['worker_id'] : 0;
+}
+if ($workerId <= 0) {
+    $workerId = isset($_POST['worker_id']) ? (int) $_POST['worker_id'] : 0;
+}
+
+if ($workerId <= 0) {
+    ddAdminEnableWorkerRedirect('admin-walker-management.php');
+}
+
+$loaded = ddAdminEnableWorkerLoadRecord($pdo, $workerId, $sources);
+if ($loaded === null) {
+    exit('Worker not found.');
+}
+
+$workerTable = (string) $loaded['table'];
+$userColumns = (array) $loaded['columns'];
+$userIdCol = (string) $loaded['id_column'];
+$worker = (array) $loaded['row'];
+
+$workerName = ddAdminEnableWorkerBuildName($worker);
+$workerRole = (string) ddAdminEnableWorkerValueFromRow($worker, array('role', 'user_role', 'account_role', 'account_type'), 'Worker');
+$workerEmail = (string) ddAdminEnableWorkerValueFromRow($worker, array('email'), '—');
+$alreadyActive = ddAdminEnableWorkerIsActive($worker);
+
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $applicationId = trim((string)($_POST['application_id'] ?? ''));
-    $newStatus = trim((string)($_POST['status'] ?? ''));
-
-    $allowedStatuses = ['pending', 'approved', 'declined'];
-
-    if ($applicationId === '' || !in_array($newStatus, $allowedStatuses, true)) {
-        $error = 'Invalid request.';
+    if (!ddAdminEnableWorkerValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+        $error = 'Security check failed. Please refresh the page and try again.';
     } else {
-        $updated = false;
+        try {
+            $updates = array();
+            $params = array(':id' => $workerId);
 
-        foreach ($applications as &$application) {
-            if (($application['id'] ?? '') === $applicationId) {
-                $oldStatus = (string)($application['status'] ?? 'pending');
-                $application['status'] = $newStatus;
-                $application['reviewed_at'] = date('Y-m-d H:i:s');
+            $statusColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('status', 'account_status', 'worker_status'));
+            $isActiveColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('is_active', 'active', 'enabled'));
+            $disabledColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('disabled'));
+            $updatedAtColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('updated_at', 'status_updated_at'));
+            $updatedByColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('updated_by', 'status_updated_by'));
 
-                if ($newStatus === 'approved') {
-                    if (empty($application['approval_token'])) {
-                        $application['approval_token'] = bin2hex(random_bytes(24));
-                    }
-
-                    $paymentUrl = $siteBaseUrl . '/founder-payment.php?token=' . urlencode($application['approval_token']);
-
-                    $clientSubject = 'Founder Membership Approved - ' . $siteName;
-                    $clientMessage =
-                        "Hi " . ($application['full_name'] ?? 'there') . ",\n\n" .
-                        "Your founder membership request for " . ($application['plan_name'] ?? 'your selected plan') . " has been approved.\n\n" .
-                        "Use your private payment link below to continue:\n" .
-                        $paymentUrl . "\n\n" .
-                        "Application ID: " . ($application['id'] ?? '') . "\n\n" .
-                        "This link is private and tied to your approval.\n\n" .
-                        "Thank you,\n" . $siteName;
-
-                    dd_send_email_admin((string)($application['email'] ?? ''), $clientSubject, $clientMessage, $fromEmail);
-
-                    $application['approval_sent_at'] = date('Y-m-d H:i:s');
-                }
-
-                if ($newStatus === 'declined' && $oldStatus !== 'declined') {
-                    $clientSubject = 'Founder Membership Update - ' . $siteName;
-                    $clientMessage =
-                        "Hi " . ($application['full_name'] ?? 'there') . ",\n\n" .
-                        "Thank you for your founder membership request for " . ($application['plan_name'] ?? 'your selected plan') . ".\n\n" .
-                        "At this time, we’re unable to move forward with the founder application.\n\n" .
-                        "You can still use our regular booking options, and you’re welcome to reach out if you have any questions.\n\n" .
-                        "Thank you,\n" . $siteName;
-
-                    dd_send_email_admin((string)($application['email'] ?? ''), $clientSubject, $clientMessage, $fromEmail);
-                }
-
-                $updated = true;
-                break;
+            if ($statusColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($statusColumn) . ' = :status';
+                $params[':status'] = 'active';
             }
-        }
-        unset($application);
 
-        if (!$updated) {
-            $error = 'Application not found.';
-        } else {
-            if (dd_save_founder_applications_admin($storageFile, $applications)) {
-                $message = 'Application updated successfully.';
+            if ($isActiveColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($isActiveColumn) . ' = :is_active';
+                $params[':is_active'] = 1;
+            } elseif ($disabledColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($disabledColumn) . ' = :disabled';
+                $params[':disabled'] = 0;
+            }
+
+            if ($updatedByColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($updatedByColumn) . ' = :updated_by';
+                $params[':updated_by'] = 'admin';
+            }
+
+            if ($updatedAtColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($updatedAtColumn) . ' = CURRENT_TIMESTAMP';
+            }
+
+            if ($updates === array()) {
+                $error = 'No enable-related status columns were found in the worker table.';
             } else {
-                $error = 'Could not save status update.';
+                $sql = 'UPDATE ' . ddAdminEnableWorkerQuoteIdentifier($workerTable)
+                    . ' SET ' . implode(', ', $updates)
+                    . ' WHERE ' . ddAdminEnableWorkerQuoteIdentifier($userIdCol) . ' = :id';
+
+                $stmt = $pdo->prepare($sql);
+
+                foreach ($params as $placeholder => $value) {
+                    if (is_int($value)) {
+                        $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
+                    } elseif ($value === null) {
+                        $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
+                    } else {
+                        $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+                    }
+                }
+
+                $stmt->execute();
+
+                ddAdminEnableWorkerRedirect('admin-worker-view.php?id=' . $workerId);
             }
+        } catch (Throwable $e) {
+            $error = 'Could not enable worker.';
         }
     }
 }
 
-$applications = dd_load_founder_applications_admin($storageFile);
-
-usort($applications, function ($a, $b) {
-    return strcmp((string)($b['submitted_at'] ?? ''), (string)($a['submitted_at'] ?? ''));
-});
+$csrfToken = ddAdminEnableWorkerCsrfToken();
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Founder Applications Admin | Doggie Dorian's</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #0a0c10;
-      --panel: rgba(255,255,255,0.05);
-      --line: rgba(255,255,255,0.09);
-      --text: #f6f1e8;
-      --muted: #c9c0af;
-      --gold: #d7b26a;
-      --gold-light: #f0d59f;
-      --shadow: 0 18px 50px rgba(0,0,0,0.35);
-      --success-bg: rgba(104, 201, 128, 0.14);
-      --success-line: rgba(104, 201, 128, 0.22);
-      --error-bg: rgba(255, 91, 60, 0.14);
-      --error-line: rgba(255, 91, 60, 0.22);
-    }
-    body {
-      font-family: Arial, sans-serif;
-      background: linear-gradient(180deg, #06070a 0%, #0b0d12 100%);
-      color: var(--text);
-      padding: 28px;
-    }
-    .wrap {
-      max-width: 1300px;
-      margin: 0 auto;
-    }
-    h1 {
-      font-size: 2rem;
-      margin-bottom: 10px;
-    }
-    .sub {
-      color: var(--muted);
-      margin-bottom: 24px;
-    }
-    .notice, .error {
-      margin-bottom: 20px;
-      padding: 14px 16px;
-      border-radius: 12px;
-      color: var(--text);
-    }
-    .notice {
-      background: var(--success-bg);
-      border: 1px solid var(--success-line);
-    }
-    .error {
-      background: var(--error-bg);
-      border: 1px solid var(--error-line);
-    }
-    .empty {
-      padding: 24px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: var(--panel);
-      color: var(--muted);
-    }
-    .grid {
-      display: grid;
-      gap: 18px;
-    }
-    .card {
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: var(--panel);
-      box-shadow: var(--shadow);
-      padding: 22px;
-    }
-    .top {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      flex-wrap: wrap;
-      margin-bottom: 16px;
-    }
-    .title {
-      font-size: 1.25rem;
-      color: white;
-      margin-bottom: 4px;
-    }
-    .meta {
-      color: var(--muted);
-      font-size: 0.95rem;
-    }
-    .status {
-      display: inline-block;
-      padding: 8px 12px;
-      border-radius: 999px;
-      font-size: 0.82rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
-    .status.pending {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.10);
-    }
-    .status.approved {
-      background: rgba(104, 201, 128, 0.14);
-      border: 1px solid rgba(104, 201, 128, 0.22);
-    }
-    .status.declined {
-      background: rgba(255, 91, 60, 0.14);
-      border: 1px solid rgba(255, 91, 60, 0.22);
-    }
-    .detail-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 14px;
-      margin-bottom: 16px;
-    }
-    .detail {
-      padding: 14px;
-      border-radius: 14px;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.06);
-    }
-    .detail strong {
-      display: block;
-      margin-bottom: 4px;
-      color: white;
-      font-size: 0.92rem;
-    }
-    .detail span {
-      color: var(--muted);
-      font-size: 0.95rem;
-      word-break: break-word;
-    }
-    .block {
-      margin-bottom: 14px;
-      padding: 14px;
-      border-radius: 14px;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.06);
-    }
-    .block strong {
-      display: block;
-      margin-bottom: 6px;
-      color: white;
-    }
-    .block p {
-      color: var(--muted);
-      white-space: pre-wrap;
-    }
-    .link-box {
-      margin-bottom: 14px;
-      padding: 14px;
-      border-radius: 14px;
-      background: rgba(215,178,106,0.08);
-      border: 1px solid rgba(215,178,106,0.16);
-    }
-    .link-box strong {
-      display: block;
-      margin-bottom: 6px;
-      color: white;
-    }
-    .link-box a {
-      color: var(--gold-light);
-      word-break: break-all;
-    }
-    form {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin-top: 12px;
-    }
-    select, button {
-      border-radius: 999px;
-      padding: 10px 14px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.04);
-      color: white;
-    }
-    button {
-      background: linear-gradient(135deg, var(--gold) 0%, var(--gold-light) 100%);
-      color: #15120d;
-      font-weight: 700;
-      border: none;
-      cursor: pointer;
-    }
-    @media (max-width: 840px) {
-      .detail-grid {
-        grid-template-columns: 1fr;
-      }
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enable Worker | Doggie Dorian’s</title>
+    <meta name="description" content="Admin enable worker page for Doggie Dorian’s.">
+    <style>
+        :root {
+            --bg: #07101d;
+            --panel: rgba(15, 23, 42, 0.92);
+            --line: rgba(148, 163, 184, 0.16);
+            --text: #e5edf7;
+            --muted: #94a3b8;
+            --gold-soft: #f5deb3;
+            --green: #22c55e;
+            --amber: #f59e0b;
+            --red: #ef4444;
+            --shadow: 0 24px 70px rgba(2, 8, 23, 0.42);
+            --max: 900px;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            min-height: 100%;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(212, 175, 55, 0.14), transparent 28%),
+                radial-gradient(circle at top right, rgba(56, 189, 248, 0.08), transparent 22%),
+                linear-gradient(180deg, #07101d 0%, #0b1220 50%, #0f172a 100%);
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .page {
+            max-width: var(--max);
+            margin: 0 auto;
+            padding: 28px 18px 80px;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+            margin-bottom: 22px;
+        }
+
+        .brand {
+            font-size: 1.55rem;
+            font-weight: 900;
+            letter-spacing: 0.04em;
+        }
+
+        .top-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .top-link {
+            padding: 10px 14px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            font-weight: 700;
+            font-size: 0.94rem;
+        }
+
+        .panel {
+            background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.82));
+            border: 1px solid rgba(212, 175, 55, 0.14);
+            border-radius: 28px;
+            padding: 24px;
+            box-shadow: var(--shadow);
+        }
+
+        .eyebrow {
+            color: var(--gold-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            font-size: 0.75rem;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+
+        h1 {
+            margin: 0 0 10px;
+            font-size: 2rem;
+            line-height: 1.08;
+        }
+
+        .sub {
+            color: rgba(244,241,234,0.72);
+            line-height: 1.65;
+            font-size: 0.98rem;
+            margin-bottom: 18px;
+        }
+
+        .summary {
+            display: grid;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .box {
+            padding: 14px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .label {
+            color: rgba(244,241,234,0.56);
+            text-transform: uppercase;
+            letter-spacing: 0.10em;
+            font-size: 0.72rem;
+            font-weight: 800;
+            margin-bottom: 6px;
+        }
+
+        .value {
+            font-weight: 800;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+
+        .warn {
+            padding: 14px 16px;
+            border-radius: 16px;
+            margin-bottom: 16px;
+            font-weight: 700;
+            background: rgba(239, 68, 68, 0.16);
+            color: #ffd5d5;
+            border: 1px solid rgba(239, 68, 68, 0.20);
+        }
+
+        .note {
+            padding: 14px 16px;
+            border-radius: 16px;
+            margin-bottom: 16px;
+            font-weight: 700;
+            background: rgba(245, 158, 11, 0.16);
+            color: #fde68a;
+            border: 1px solid rgba(245, 158, 11, 0.20);
+        }
+
+        .good {
+            padding: 14px 16px;
+            border-radius: 16px;
+            margin-bottom: 16px;
+            font-weight: 700;
+            background: rgba(34, 197, 94, 0.16);
+            color: #d7f1dd;
+            border: 1px solid rgba(34, 197, 94, 0.20);
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 18px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 48px;
+            padding: 0 18px;
+            border-radius: 999px;
+            font-weight: 800;
+            border: 1px solid transparent;
+            cursor: pointer;
+            font: inherit;
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #22c55e, #4ade80);
+            color: #07101d;
+        }
+
+        .btn-secondary {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.08);
+            color: var(--text);
+        }
+
+        @media (max-width: 760px) {
+            h1 {
+                font-size: 1.65rem;
+            }
+
+            .page {
+                padding: 20px 12px 60px;
+            }
+        }
+    </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>Founder Applications</h1>
-    <p class="sub">Review incoming founder requests, then approve or decline them.</p>
+    <div class="page">
+        <div class="topbar">
+            <div class="brand">Doggie Dorian’s</div>
+            <div class="top-links">
+                <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
+                <a class="top-link" href="admin-walker-management.php">Workers</a>
+                <a class="top-link" href="admin-worker-view.php?id=<?php echo (int) $workerId; ?>">Worker View</a>
+                <a class="top-link" href="logout.php">Logout</a>
+            </div>
+        </div>
 
-    <?php if ($message !== ''): ?>
-      <div class="notice"><?php echo htmlspecialchars($message); ?></div>
-    <?php endif; ?>
-
-    <?php if ($error !== ''): ?>
-      <div class="error"><?php echo htmlspecialchars($error); ?></div>
-    <?php endif; ?>
-
-    <?php if (empty($applications)): ?>
-      <div class="empty">No founder applications have been submitted yet.</div>
-    <?php else: ?>
-      <div class="grid">
-        <?php foreach ($applications as $application): ?>
-          <div class="card">
-            <div class="top">
-              <div>
-                <div class="title"><?php echo htmlspecialchars($application['full_name'] ?? 'Unknown Applicant'); ?></div>
-                <div class="meta">
-                  <?php echo htmlspecialchars($application['plan_name'] ?? 'Unknown Plan'); ?> •
-                  Submitted <?php echo htmlspecialchars($application['submitted_at'] ?? ''); ?>
-                </div>
-              </div>
-              <div class="status <?php echo dd_status_class((string)($application['status'] ?? 'pending')); ?>">
-                <?php echo htmlspecialchars($application['status'] ?? 'pending'); ?>
-              </div>
+        <section class="panel">
+            <div class="eyebrow">Admin Worker Control</div>
+            <h1>Enable Worker</h1>
+            <div class="sub">
+                This will enable the selected worker account from the admin side.
             </div>
 
-            <div class="detail-grid">
-              <div class="detail">
-                <strong>Email</strong>
-                <span><?php echo htmlspecialchars($application['email'] ?? ''); ?></span>
-              </div>
-              <div class="detail">
-                <strong>Phone</strong>
-                <span><?php echo htmlspecialchars($application['phone'] ?? ''); ?></span>
-              </div>
-              <div class="detail">
-                <strong>Dog Name</strong>
-                <span><?php echo htmlspecialchars($application['pet_name'] ?? ''); ?></span>
-              </div>
-              <div class="detail">
-                <strong>Breed / Age</strong>
-                <span>
-                  <?php echo htmlspecialchars($application['pet_breed'] ?? ''); ?>
-                  <?php if (!empty($application['pet_age'])): ?>
-                    • <?php echo htmlspecialchars($application['pet_age']); ?>
-                  <?php endif; ?>
-                </span>
-              </div>
-            </div>
-
-            <div class="block">
-              <strong>Service Needs</strong>
-              <p><?php echo htmlspecialchars($application['service_needs'] ?? ''); ?></p>
-            </div>
-
-            <div class="block">
-              <strong>Notes</strong>
-              <p><?php echo htmlspecialchars($application['notes'] ?? ''); ?></p>
-            </div>
-
-            <?php if (!empty($application['approval_token'])): ?>
-              <div class="link-box">
-                <strong>Private Payment Link</strong>
-                <a href="<?php echo htmlspecialchars($siteBaseUrl . '/founder-payment.php?token=' . urlencode($application['approval_token'])); ?>" target="_blank">
-                  <?php echo htmlspecialchars($siteBaseUrl . '/founder-payment.php?token=' . urlencode($application['approval_token'])); ?>
-                </a>
-              </div>
+            <?php if ($error !== ''): ?>
+                <div class="warn"><?php echo ddAdminEnableWorkerH($error); ?></div>
             <?php endif; ?>
 
-            <form method="post">
-              <input type="hidden" name="application_id" value="<?php echo htmlspecialchars($application['id'] ?? ''); ?>">
-              <select name="status">
-                <option value="pending" <?php echo (($application['status'] ?? '') === 'pending') ? 'selected' : ''; ?>>Pending</option>
-                <option value="approved" <?php echo (($application['status'] ?? '') === 'approved') ? 'selected' : ''; ?>>Approved</option>
-                <option value="declined" <?php echo (($application['status'] ?? '') === 'declined') ? 'selected' : ''; ?>>Declined</option>
-              </select>
-              <button type="submit">Update Status</button>
+            <?php if ($alreadyActive): ?>
+                <div class="note">This worker already appears to be active, but you can still confirm the action if needed.</div>
+            <?php else: ?>
+                <div class="good">You are about to enable this worker account.</div>
+            <?php endif; ?>
+
+            <div class="summary">
+                <div class="box">
+                    <div class="label">Worker</div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerName); ?></div>
+                </div>
+                <div class="box">
+                    <div class="label">Role</div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—'); ?></div>
+                </div>
+                <div class="box">
+                    <div class="label">Email</div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerEmail); ?></div>
+                </div>
+                <div class="box">
+                    <div class="label">Status</div>
+                    <div class="value"><?php echo $alreadyActive ? 'Active' : 'Disabled'; ?></div>
+                </div>
+                <div class="box">
+                    <div class="label">Source Table</div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerTable); ?></div>
+                </div>
+            </div>
+
+            <form method="post" action="">
+                <input type="hidden" name="csrf_token" value="<?php echo ddAdminEnableWorkerH($csrfToken); ?>">
+                <input type="hidden" name="worker_id" value="<?php echo (int) $workerId; ?>">
+
+                <div class="actions">
+                    <button class="btn btn-success" type="submit">Confirm Enable</button>
+                    <a class="btn btn-secondary" href="admin-worker-view.php?id=<?php echo (int) $workerId; ?>">Cancel</a>
+                </div>
             </form>
-          </div>
-        <?php endforeach; ?>
-      </div>
-    <?php endif; ?>
-  </div>
+        </section>
+    </div>
 </body>
 </html>

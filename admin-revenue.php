@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/database/setup.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/admin-auth.php';
 
 function e($value): string
@@ -899,42 +899,48 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
       color: #9acbff;
     }
 
-    .empty-state {
-      padding: 36px 20px;
-      text-align: center;
+    .amount {
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--gold);
+    }
+
+    .muted {
       color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
     }
 
-    .empty-state strong {
-      display: block;
-      color: var(--text);
-      font-size: 18px;
-      margin-bottom: 10px;
+    .empty-state {
+      padding: 24px;
+      border-radius: 18px;
+      border: 1px dashed var(--line);
+      color: var(--muted);
+      background: rgba(255,255,255,0.015);
     }
 
-    @media (max-width: 1400px) {
+    @media (max-width: 1180px) {
       .summary-grid {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
-    }
 
-    @media (max-width: 1200px) {
       .layout {
         grid-template-columns: 1fr;
       }
     }
 
-    @media (max-width: 700px) {
+    @media (max-width: 640px) {
       .summary-grid {
         grid-template-columns: 1fr;
       }
 
       h1 {
-        font-size: 32px;
+        font-size: 34px;
       }
 
       .wrap {
-        padding: 24px 14px 46px;
+        padding-left: 16px;
+        padding-right: 16px;
       }
     }
   </style>
@@ -946,63 +952,63 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
         <div class="eyebrow">Doggie Dorian’s Admin</div>
         <h1>Revenue Dashboard</h1>
         <div class="subtext">
-          View tracked value, collected payments, unpaid balances, and revenue mix across member bookings, non-member bookings, and custom plans without mixing payment data into operational booking workflow.
+          Review collected, outstanding, and service-level revenue across member bookings, non-member bookings, and custom plans.
         </div>
       </div>
-
       <div class="top-actions">
-        <a href="admin-bookings.php" class="top-btn">Main Bookings</a>
-        <a href="admin-dashboard.php" class="top-btn primary">Admin Home</a>
+        <a class="top-btn" href="admin-dashboard.php">Dashboard</a>
+        <a class="top-btn" href="admin-bookings.php">Bookings</a>
+        <a class="top-btn primary" href="admin-members.php">Members</a>
       </div>
     </div>
 
     <div class="summary-grid">
       <div class="card">
-        <div class="card-label">Tracked Value</div>
-        <div class="card-value"><?= money($summary['tracked_value']) ?></div>
-        <div class="card-note">All tracked booking and plan amounts</div>
+        <div class="card-label">Tracked Revenue</div>
+        <div class="card-value"><?= e(money((float) $summary['tracked_value'])) ?></div>
+        <div class="card-note">Total value across all revenue records currently tracked.</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Collected Revenue</div>
-        <div class="card-value"><?= money($summary['collected_value']) ?></div>
-        <div class="card-note">Rows marked paid through payment status</div>
+        <div class="card-label">Collected</div>
+        <div class="card-value"><?= e(money((float) $summary['collected_value'])) ?></div>
+        <div class="card-note"><?= e((string) $summary['paid_count']) ?> paid records counted.</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Outstanding Value</div>
-        <div class="card-value"><?= money($summary['outstanding_value']) ?></div>
-        <div class="card-note">Tracked value not yet marked paid</div>
+        <div class="card-label">Outstanding</div>
+        <div class="card-value"><?= e(money((float) $summary['outstanding_value'])) ?></div>
+        <div class="card-note">Open balances still awaiting payment.</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Cancelled Value</div>
-        <div class="card-value"><?= money($summary['cancelled_value']) ?></div>
-        <div class="card-note">Operationally cancelled rows not counted as collected</div>
+        <div class="card-label">Cancelled</div>
+        <div class="card-value"><?= e(money((float) $summary['cancelled_value'])) ?></div>
+        <div class="card-note">Cancelled records separated from active revenue.</div>
       </div>
 
       <div class="card">
         <div class="card-label">Member Bookings</div>
-        <div class="card-value"><?= money($summary['member_booking_value']) ?></div>
-        <div class="card-note">Tracked member booking value</div>
+        <div class="card-value"><?= e(money((float) $summary['member_booking_value'])) ?></div>
+        <div class="card-note">Revenue tied to member booking records.</div>
       </div>
 
       <div class="card">
         <div class="card-label">Non-Member</div>
-        <div class="card-value"><?= money($summary['non_member_value']) ?></div>
-        <div class="card-note">Tracked public booking value</div>
+        <div class="card-value"><?= e(money((float) $summary['non_member_value'])) ?></div>
+        <div class="card-note">Revenue generated from public booking requests.</div>
       </div>
 
       <div class="card">
         <div class="card-label">Custom Plans</div>
-        <div class="card-value"><?= money($summary['custom_plan_value']) ?></div>
-        <div class="card-note">Tracked custom plan value</div>
+        <div class="card-value"><?= e(money((float) $summary['custom_plan_value'])) ?></div>
+        <div class="card-note">Custom walking plans and premium plan totals.</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Paid Records</div>
-        <div class="card-value"><?= (int) $summary['paid_count'] ?></div>
-        <div class="card-note"><?= (int) $summary['record_count'] ?> tracked rows total</div>
+        <div class="card-label">Tracked Records</div>
+        <div class="card-value"><?= e((string) $summary['record_count']) ?></div>
+        <div class="card-note">Revenue-bearing rows currently included.</div>
       </div>
     </div>
 
@@ -1011,24 +1017,21 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
         <div class="panel-inner">
           <h2 class="panel-title">Revenue by Source</h2>
           <div class="panel-subtitle">
-            Compare how much tracked value is coming from member bookings, non-member bookings, and custom plans.
+            Compare where revenue is coming from across the core booking and plan systems.
           </div>
 
-          <?php if (!$sourceBreakdownRows): ?>
-            <div class="empty-state">
-              <strong>No revenue tracked yet</strong>
-              No source totals are available right now.
-            </div>
+          <?php if (empty($sourceBreakdownRows)): ?>
+            <div class="empty-state">No revenue sources are available yet.</div>
           <?php else: ?>
             <div class="list">
               <?php foreach ($sourceBreakdownRows as $row): ?>
                 <div class="list-row">
                   <div class="list-left">
                     <strong><?= e((string) $row['label']) ?></strong>
-                    <span><?= (int) $row['count'] ?> rows</span>
+                    <span><?= e((string) $row['count']) ?> record(s)</span>
                   </div>
                   <div class="list-right">
-                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <strong><?= e(money((float) $row['amount'])) ?></strong>
                     <span>Tracked value</span>
                   </div>
                 </div>
@@ -1040,26 +1043,23 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
 
       <div class="panel">
         <div class="panel-inner">
-          <h2 class="panel-title">Revenue by Service / Plan</h2>
+          <h2 class="panel-title">Payment Status Breakdown</h2>
           <div class="panel-subtitle">
-            See which services and plan types are producing the most tracked value.
+            Review how much revenue is already collected and how much remains pending or unpaid.
           </div>
 
-          <?php if (!$serviceBreakdownRows): ?>
-            <div class="empty-state">
-              <strong>No service revenue yet</strong>
-              No service or plan breakdown is available right now.
-            </div>
+          <?php if (empty($paymentBreakdownRows)): ?>
+            <div class="empty-state">No payment records are available yet.</div>
           <?php else: ?>
             <div class="list">
-              <?php foreach ($serviceBreakdownRows as $row): ?>
+              <?php foreach ($paymentBreakdownRows as $row): ?>
                 <div class="list-row">
                   <div class="list-left">
                     <strong><?= e((string) $row['label']) ?></strong>
-                    <span><?= (int) $row['count'] ?> rows</span>
+                    <span><?= e((string) $row['count']) ?> record(s)</span>
                   </div>
                   <div class="list-right">
-                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <strong><?= e(money((float) $row['amount'])) ?></strong>
                     <span>Tracked value</span>
                   </div>
                 </div>
@@ -1073,26 +1073,23 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
     <div class="layout">
       <div class="panel">
         <div class="panel-inner">
-          <h2 class="panel-title">Payment Breakdown</h2>
+          <h2 class="panel-title">Revenue by Service</h2>
           <div class="panel-subtitle">
-            Revenue grouped by payment status instead of booking workflow status.
+            See which services and plan types are generating the most value.
           </div>
 
-          <?php if (!$paymentBreakdownRows): ?>
-            <div class="empty-state">
-              <strong>No payment data yet</strong>
-              No payment breakdown is available right now.
-            </div>
+          <?php if (empty($serviceBreakdownRows)): ?>
+            <div class="empty-state">No service revenue has been recorded yet.</div>
           <?php else: ?>
             <div class="list">
-              <?php foreach ($paymentBreakdownRows as $row): ?>
+              <?php foreach ($serviceBreakdownRows as $row): ?>
                 <div class="list-row">
                   <div class="list-left">
                     <strong><?= e((string) $row['label']) ?></strong>
-                    <span><?= (int) $row['count'] ?> rows</span>
+                    <span><?= e((string) $row['count']) ?> record(s)</span>
                   </div>
                   <div class="list-right">
-                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <strong><?= e(money((float) $row['amount'])) ?></strong>
                     <span>Tracked value</span>
                   </div>
                 </div>
@@ -1104,26 +1101,23 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
 
       <div class="panel">
         <div class="panel-inner">
-          <h2 class="panel-title">Daily Collections</h2>
+          <h2 class="panel-title">Recent Collections</h2>
           <div class="panel-subtitle">
-            Paid revenue grouped by payment date where available.
+            Daily totals based on paid dates currently stored in the database.
           </div>
 
-          <?php if (!$dailyCollectionRows): ?>
-            <div class="empty-state">
-              <strong>No collected revenue yet</strong>
-              No paid rows with collection dates are available right now.
-            </div>
+          <?php if (empty($dailyCollectionRows)): ?>
+            <div class="empty-state">No paid collection dates are available yet.</div>
           <?php else: ?>
             <div class="list">
               <?php foreach ($dailyCollectionRows as $row): ?>
                 <div class="list-row">
                   <div class="list-left">
                     <strong><?= e(displayDate((string) $row['label'])) ?></strong>
-                    <span><?= (int) $row['count'] ?> paid rows</span>
+                    <span><?= e((string) $row['count']) ?> paid record(s)</span>
                   </div>
                   <div class="list-right">
-                    <strong><?= money((float) $row['amount']) ?></strong>
+                    <strong><?= e(money((float) $row['amount'])) ?></strong>
                     <span>Collected</span>
                   </div>
                 </div>
@@ -1136,29 +1130,25 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
 
     <div class="panel">
       <div class="panel-inner">
-        <h2 class="panel-title">Recent Revenue Rows</h2>
+        <h2 class="panel-title">Recent Revenue Records</h2>
         <div class="panel-subtitle">
-          Recent tracked rows across member bookings, non-member bookings, and custom plans for quick spot-checking.
+          A live revenue ledger across bookings, public requests, and custom plans.
         </div>
 
-        <?php if (!$recentRevenueRows): ?>
-          <div class="empty-state">
-            <strong>No revenue rows yet</strong>
-            No tracked rows are available right now.
-          </div>
+        <?php if (empty($recentRevenueRows)): ?>
+          <div class="empty-state">No revenue records are available yet.</div>
         <?php else: ?>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Source</th>
-                  <th>ID</th>
-                  <th>Item</th>
+                  <th>Record</th>
                   <th>Date</th>
                   <th>Workflow Status</th>
                   <th>Payment Status</th>
                   <th>Payment Method</th>
-                  <th>Notes</th>
+                  <th>Extra</th>
                   <th>Amount</th>
                 </tr>
               </thead>
@@ -1169,16 +1159,16 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
                       <div class="primary-text"><?= e((string) $row['source']) ?></div>
                     </td>
                     <td>
-                      <div class="primary-text">#<?= e((string) $row['id']) ?></div>
-                    </td>
-                    <td>
                       <div class="primary-text"><?= e((string) $row['label']) ?></div>
+                      <div class="muted">ID: <?= e((string) $row['id']) ?></div>
                     </td>
                     <td>
                       <div class="primary-text"><?= e(displayDateTime((string) $row['date'])) ?></div>
                     </td>
                     <td>
-                      <span class="status-pill"><?= e(titleize((string) $row['workflow_status'], '—')) ?></span>
+                      <span class="status-pill <?= e(paymentStatusClass((string) $row['workflow_status'])) ?>">
+                        <?= e(titleize((string) $row['workflow_status'], '—')) ?>
+                      </span>
                     </td>
                     <td>
                       <span class="status-pill <?= e(paymentStatusClass((string) $row['payment_status_key'])) ?>">
@@ -1189,10 +1179,10 @@ $recentRevenueRows = array_slice($recentRevenueRows, 0, 20);
                       <div class="primary-text"><?= e((string) $row['payment_method']) ?></div>
                     </td>
                     <td>
-                      <div class="primary-text"><?= e(trim((string) $row['extra']) !== '' ? (string) $row['extra'] : '—') ?></div>
+                      <div class="muted"><?= e((string) $row['extra'] !== '' ? (string) $row['extra'] : '—') ?></div>
                     </td>
                     <td>
-                      <div class="primary-text"><?= money((float) $row['amount']) ?></div>
+                      <div class="amount"><?= e(money((float) $row['amount'])) ?></div>
                     </td>
                   </tr>
                 <?php endforeach; ?>

@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/admin-auth.php';
-require_once __DIR__ . '/data/config/db.php';
+require_once __DIR__ . '/db.php';
 
 function safeRedirect(string $url): void
 {
@@ -11,14 +11,19 @@ function safeRedirect(string $url): void
     exit;
 }
 
-function h($value): string
+function h(mixed $value): string
 {
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function quotedIdentifier(string $value): string
+{
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
 function formatDate(?string $date): string
 {
-    $date = trim((string)$date);
+    $date = trim((string) $date);
     if ($date === '') {
         return 'N/A';
     }
@@ -33,7 +38,7 @@ function formatDate(?string $date): string
 
 function formatDateTime(?string $date): string
 {
-    $date = trim((string)$date);
+    $date = trim((string) $date);
     if ($date === '') {
         return 'N/A';
     }
@@ -46,32 +51,40 @@ function formatDateTime(?string $date): string
     return date('F j, Y \a\t g:i A', $timestamp);
 }
 
-function formatMoney($amount): string
+function formatMoney(mixed $amount): string
 {
     if ($amount === null || $amount === '') {
         return 'N/A';
     }
 
-    return '$' . number_format((float)$amount, 2);
+    if (!is_numeric($amount)) {
+        return h((string) $amount);
+    }
+
+    return '$' . number_format((float) $amount, 2);
 }
 
 function tableExists(PDO $pdo, string $table): bool
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool)$stmt->fetchColumn();
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
+        $stmt->execute([':table' => $table]);
+        return (bool) $stmt->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function getColumns(PDO $pdo, string $table): array
 {
     try {
-        $stmt = $pdo->query("PRAGMA table_info(" . $table . ")");
+        $stmt = $pdo->query('PRAGMA table_info(' . quotedIdentifier($table) . ')');
         $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
         $columns = [];
 
         foreach ($rows as $row) {
             if (!empty($row['name'])) {
-                $columns[] = (string)$row['name'];
+                $columns[] = (string) $row['name'];
             }
         }
 
@@ -88,38 +101,89 @@ function pickExistingColumn(array $columns, array $choices): ?string
             return $choice;
         }
     }
+
     return null;
+}
+
+function buildSelectFragment(?string $column, string $alias, string $fallbackSql = 'NULL', string $tableAlias = ''): string
+{
+    if ($column === null) {
+        return $fallbackSql . ' AS ' . quotedIdentifier($alias);
+    }
+
+    $prefix = $tableAlias !== '' ? $tableAlias . '.' : '';
+    return $prefix . quotedIdentifier($column) . ' AS ' . quotedIdentifier($alias);
+}
+
+function fetchOneSafe(PDO $pdo, string $sql, array $params = []): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function fetchAllSafe(PDO $pdo, string $sql, array $params = []): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    } catch (Throwable $e) {
+        return [];
+    }
 }
 
 function buildStatusBadgeClass(?string $status): string
 {
-    $normalized = strtolower(trim((string)$status));
+    $normalized = strtolower(trim((string) $status));
 
     return match ($normalized) {
         'requested', 'pending' => 'status-requested',
         'confirmed' => 'status-confirmed',
-        'in progress' => 'status-in-progress',
+        'in progress', 'in_progress' => 'status-in-progress',
         'completed' => 'status-completed',
-        'cancelled' => 'status-cancelled',
+        'cancelled', 'canceled' => 'status-cancelled',
         default => 'status-default',
     };
 }
 
 function normalizeStatusLabel(?string $status): string
 {
-    $normalized = strtolower(trim((string)$status));
+    $normalized = strtolower(trim((string) $status));
 
     return match ($normalized) {
         '', 'pending', 'requested' => 'Requested',
         'confirmed' => 'Confirmed',
-        'in progress' => 'In Progress',
+        'in progress', 'in_progress' => 'In Progress',
         'completed' => 'Completed',
-        'cancelled' => 'Cancelled',
-        default => trim((string)$status) !== '' ? trim((string)$status) : 'Requested',
+        'cancelled', 'canceled' => 'Cancelled',
+        default => trim((string) $status) !== '' ? ucwords(str_replace(['_', '-'], ' ', trim((string) $status))) : 'Requested',
     };
 }
 
-$userId = (int)($_GET['id'] ?? 0);
+function buildFullNameExpression(string $alias, ?string $nameCol, ?string $firstCol, ?string $lastCol, string $fallback = "'N/A'"): string
+{
+    if ($nameCol !== null) {
+        return "COALESCE(NULLIF($alias." . quotedIdentifier($nameCol) . ", ''), $fallback)";
+    }
+
+    $first = $firstCol !== null ? "COALESCE($alias." . quotedIdentifier($firstCol) . ", '')" : "''";
+    $last = $lastCol !== null ? "COALESCE($alias." . quotedIdentifier($lastCol) . ", '')" : "''";
+
+    return "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), $fallback)";
+}
+
+if (empty($_SESSION['admin_member_view_csrf']) || !is_string($_SESSION['admin_member_view_csrf'])) {
+    $_SESSION['admin_member_view_csrf'] = bin2hex(random_bytes(32));
+}
+$csrfToken = (string) $_SESSION['admin_member_view_csrf'];
+
+$userId = (int) ($_GET['id'] ?? 0);
 
 if ($userId <= 0) {
     safeRedirect('admin-members.php?status_type=error&status_message=' . urlencode('Invalid member ID'));
@@ -133,32 +197,76 @@ $allowedStatuses = [
     'Cancelled',
 ];
 
-$flashType = trim((string)($_GET['status_type'] ?? ''));
-$flashMessage = trim((string)($_GET['status_message'] ?? ''));
+$flashType = trim((string) ($_GET['status_type'] ?? ''));
+$flashMessage = trim((string) ($_GET['status_message'] ?? ''));
+
+$user = null;
+$dogs = [];
+$bookings = [];
+$clientProfile = null;
+
+$bookingHasAdminNotes = false;
+$bookingHasStatusUpdatedAt = false;
+$bookingHasStatusUpdatedBy = false;
 
 try {
     if (!isset($pdo) || !($pdo instanceof PDO)) {
-        throw new RuntimeException('Database connection is not available from data/config/db.php.');
+        throw new RuntimeException('Database connection is not available from db.php.');
     }
 
     if (!tableExists($pdo, 'users')) {
         throw new RuntimeException('The users table was not found.');
     }
 
-    $userStmt = $pdo->prepare("
-        SELECT *
-        FROM users
-        WHERE id = ?
+    $userColumns = getColumns($pdo, 'users');
+
+    $userIdCol = pickExistingColumn($userColumns, ['id', 'user_id']);
+    $userNameCol = pickExistingColumn($userColumns, ['full_name', 'name', 'display_name', 'username']);
+    $userFirstCol = pickExistingColumn($userColumns, ['first_name']);
+    $userLastCol = pickExistingColumn($userColumns, ['last_name']);
+    $userEmailCol = pickExistingColumn($userColumns, ['email']);
+    $userPhoneCol = pickExistingColumn($userColumns, ['phone', 'phone_number', 'mobile']);
+    $userStatusCol = pickExistingColumn($userColumns, ['status']);
+    $userRoleCol = pickExistingColumn($userColumns, ['role']);
+    $userCreatedCol = pickExistingColumn($userColumns, ['created_at', 'created_on', 'joined_at']);
+
+    if ($userIdCol === null) {
+        throw new RuntimeException('The users table is missing an ID column.');
+    }
+
+    $userSql = "
+        SELECT
+            " . buildSelectFragment($userIdCol, 'id', '0') . ",
+            " . buildSelectFragment($userNameCol, 'full_name', "''") . ",
+            " . buildSelectFragment($userFirstCol, 'first_name', "''") . ",
+            " . buildSelectFragment($userLastCol, 'last_name', "''") . ",
+            " . buildSelectFragment($userEmailCol, 'email', "''") . ",
+            " . buildSelectFragment($userPhoneCol, 'phone', "''") . ",
+            " . buildSelectFragment($userStatusCol, 'status', "''") . ",
+            " . buildSelectFragment($userRoleCol, 'role', "'member'") . ",
+            " . buildSelectFragment($userCreatedCol, 'created_at', "''") . "
+        FROM " . quotedIdentifier('users') . "
+        WHERE " . quotedIdentifier($userIdCol) . " = :user_id
         LIMIT 1
-    ");
-    $userStmt->execute([$userId]);
-    $user = $userStmt->fetch(PDO::FETCH_ASSOC);
+    ";
+
+    $user = fetchOneSafe($pdo, $userSql, [':user_id' => $userId]);
 
     if (!$user) {
         safeRedirect('admin-members.php?status_type=error&status_message=' . urlencode('Member not found'));
     }
 
-    $dogs = [];
+    $derivedFullName = trim((string) ($user['full_name'] ?? ''));
+    if ($derivedFullName === '') {
+        $derivedFullName = trim((string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
+        if ($derivedFullName === '') {
+            $derivedFullName = trim((string) ($user['email'] ?? ''));
+        }
+        if ($derivedFullName === '') {
+            $derivedFullName = 'Member';
+        }
+        $user['full_name'] = $derivedFullName;
+    }
 
     if (tableExists($pdo, 'dogs')) {
         $dogColumns = getColumns($pdo, 'dogs');
@@ -171,46 +279,39 @@ try {
         $dogCreatedCol = pickExistingColumn($dogColumns, ['created_at', 'created_on']);
 
         if ($dogOwnerCol !== null) {
-            $selectParts = [
-                "id",
-                $dogNameCol !== null ? "$dogNameCol AS display_name" : "'Dog' AS display_name",
-                $dogBreedCol !== null ? "$dogBreedCol AS display_breed" : "NULL AS display_breed",
-                $dogAgeCol !== null ? "$dogAgeCol AS display_age" : "NULL AS display_age",
-                $dogNotesCol !== null ? "$dogNotesCol AS display_notes" : "NULL AS display_notes",
-                $dogCreatedCol !== null ? "$dogCreatedCol AS display_created" : "NULL AS display_created",
+            $dogSelectParts = [
+                quotedIdentifier('id'),
+                $dogNameCol !== null ? quotedIdentifier($dogNameCol) . ' AS ' . quotedIdentifier('display_name') : "'Dog' AS " . quotedIdentifier('display_name'),
+                $dogBreedCol !== null ? quotedIdentifier($dogBreedCol) . ' AS ' . quotedIdentifier('display_breed') : "NULL AS " . quotedIdentifier('display_breed'),
+                $dogAgeCol !== null ? quotedIdentifier($dogAgeCol) . ' AS ' . quotedIdentifier('display_age') : "NULL AS " . quotedIdentifier('display_age'),
+                $dogNotesCol !== null ? quotedIdentifier($dogNotesCol) . ' AS ' . quotedIdentifier('display_notes') : "NULL AS " . quotedIdentifier('display_notes'),
+                $dogCreatedCol !== null ? quotedIdentifier($dogCreatedCol) . ' AS ' . quotedIdentifier('display_created') : "NULL AS " . quotedIdentifier('display_created'),
             ];
 
-            $orderBy = $dogCreatedCol !== null ? "$dogCreatedCol DESC" : "id DESC";
+            $orderBy = $dogCreatedCol !== null ? quotedIdentifier($dogCreatedCol) . ' DESC' : quotedIdentifier('id') . ' DESC';
 
             $dogSql = "
-                SELECT " . implode(", ", $selectParts) . "
-                FROM dogs
-                WHERE $dogOwnerCol = ?
-                ORDER BY $orderBy
+                SELECT " . implode(', ', $dogSelectParts) . "
+                FROM " . quotedIdentifier('dogs') . "
+                WHERE " . quotedIdentifier($dogOwnerCol) . " = :user_id
+                ORDER BY {$orderBy}
             ";
 
-            $dogStmt = $pdo->prepare($dogSql);
-            $dogStmt->execute([$userId]);
-            $dogs = $dogStmt->fetchAll(PDO::FETCH_ASSOC);
+            $dogs = fetchAllSafe($pdo, $dogSql, [':user_id' => $userId]);
         }
     }
-
-    $bookings = [];
-    $bookingHasAdminNotes = false;
-    $bookingHasStatusUpdatedAt = false;
-    $bookingHasStatusUpdatedBy = false;
 
     if (tableExists($pdo, 'bookings')) {
         $bookingColumns = getColumns($pdo, 'bookings');
 
         $bookingUserCol = pickExistingColumn($bookingColumns, ['member_id', 'user_id', 'client_id']);
-        $bookingServiceCol = pickExistingColumn($bookingColumns, ['service_type', 'service']);
-        $bookingDateCol = pickExistingColumn($bookingColumns, ['service_date', 'booking_date', 'created_at']);
-        $bookingTimeCol = pickExistingColumn($bookingColumns, ['service_time']);
-        $bookingDurationCol = pickExistingColumn($bookingColumns, ['duration_minutes']);
-        $bookingStatusCol = pickExistingColumn($bookingColumns, ['status']);
-        $bookingPriceCol = pickExistingColumn($bookingColumns, ['price', 'estimated_price', 'amount']);
-        $bookingNotesCol = pickExistingColumn($bookingColumns, ['notes', 'client_notes']);
+        $bookingServiceCol = pickExistingColumn($bookingColumns, ['service_type', 'service', 'booking_type', 'type']);
+        $bookingDateCol = pickExistingColumn($bookingColumns, ['service_date', 'booking_date', 'created_at', 'created_on']);
+        $bookingTimeCol = pickExistingColumn($bookingColumns, ['service_time', 'booking_time', 'time']);
+        $bookingDurationCol = pickExistingColumn($bookingColumns, ['duration_minutes', 'duration']);
+        $bookingStatusCol = pickExistingColumn($bookingColumns, ['status', 'booking_status', 'walk_status']);
+        $bookingPriceCol = pickExistingColumn($bookingColumns, ['price', 'estimated_price', 'amount', 'total_price']);
+        $bookingNotesCol = pickExistingColumn($bookingColumns, ['notes', 'client_notes', 'special_instructions']);
         $bookingAdminNotesCol = pickExistingColumn($bookingColumns, ['admin_notes']);
         $bookingStatusUpdatedAtCol = pickExistingColumn($bookingColumns, ['status_updated_at']);
         $bookingStatusUpdatedByCol = pickExistingColumn($bookingColumns, ['status_updated_by']);
@@ -220,37 +321,33 @@ try {
         $bookingHasStatusUpdatedBy = $bookingStatusUpdatedByCol !== null;
 
         if ($bookingUserCol !== null) {
-            $selectParts = [
-                "id",
-                $bookingServiceCol !== null ? "$bookingServiceCol AS display_service" : "'Service' AS display_service",
-                $bookingDateCol !== null ? "$bookingDateCol AS display_date" : "NULL AS display_date",
-                $bookingTimeCol !== null ? "$bookingTimeCol AS display_time" : "NULL AS display_time",
-                $bookingDurationCol !== null ? "$bookingDurationCol AS display_duration" : "NULL AS display_duration",
-                $bookingStatusCol !== null ? "$bookingStatusCol AS display_status" : "'Requested' AS display_status",
-                $bookingPriceCol !== null ? "$bookingPriceCol AS display_price" : "NULL AS display_price",
-                $bookingNotesCol !== null ? "$bookingNotesCol AS display_notes" : "NULL AS display_notes",
-                $bookingAdminNotesCol !== null ? "$bookingAdminNotesCol AS display_admin_notes" : "NULL AS display_admin_notes",
-                $bookingStatusUpdatedAtCol !== null ? "$bookingStatusUpdatedAtCol AS display_status_updated_at" : "NULL AS display_status_updated_at",
-                $bookingStatusUpdatedByCol !== null ? "$bookingStatusUpdatedByCol AS display_status_updated_by" : "NULL AS display_status_updated_by",
+            $bookingSelectParts = [
+                quotedIdentifier('id'),
+                $bookingServiceCol !== null ? quotedIdentifier($bookingServiceCol) . ' AS ' . quotedIdentifier('display_service') : "'Service' AS " . quotedIdentifier('display_service'),
+                $bookingDateCol !== null ? quotedIdentifier($bookingDateCol) . ' AS ' . quotedIdentifier('display_date') : "NULL AS " . quotedIdentifier('display_date'),
+                $bookingTimeCol !== null ? quotedIdentifier($bookingTimeCol) . ' AS ' . quotedIdentifier('display_time') : "NULL AS " . quotedIdentifier('display_time'),
+                $bookingDurationCol !== null ? quotedIdentifier($bookingDurationCol) . ' AS ' . quotedIdentifier('display_duration') : "NULL AS " . quotedIdentifier('display_duration'),
+                $bookingStatusCol !== null ? quotedIdentifier($bookingStatusCol) . ' AS ' . quotedIdentifier('display_status') : "'Requested' AS " . quotedIdentifier('display_status'),
+                $bookingPriceCol !== null ? quotedIdentifier($bookingPriceCol) . ' AS ' . quotedIdentifier('display_price') : "NULL AS " . quotedIdentifier('display_price'),
+                $bookingNotesCol !== null ? quotedIdentifier($bookingNotesCol) . ' AS ' . quotedIdentifier('display_notes') : "NULL AS " . quotedIdentifier('display_notes'),
+                $bookingAdminNotesCol !== null ? quotedIdentifier($bookingAdminNotesCol) . ' AS ' . quotedIdentifier('display_admin_notes') : "NULL AS " . quotedIdentifier('display_admin_notes'),
+                $bookingStatusUpdatedAtCol !== null ? quotedIdentifier($bookingStatusUpdatedAtCol) . ' AS ' . quotedIdentifier('display_status_updated_at') : "NULL AS " . quotedIdentifier('display_status_updated_at'),
+                $bookingStatusUpdatedByCol !== null ? quotedIdentifier($bookingStatusUpdatedByCol) . ' AS ' . quotedIdentifier('display_status_updated_by') : "NULL AS " . quotedIdentifier('display_status_updated_by'),
             ];
 
-            $orderBy = $bookingDateCol !== null ? "$bookingDateCol DESC" : "id DESC";
+            $orderBy = $bookingDateCol !== null ? quotedIdentifier($bookingDateCol) . ' DESC' : quotedIdentifier('id') . ' DESC';
 
             $bookingSql = "
-                SELECT " . implode(", ", $selectParts) . "
-                FROM bookings
-                WHERE $bookingUserCol = ?
-                ORDER BY $orderBy
+                SELECT " . implode(', ', $bookingSelectParts) . "
+                FROM " . quotedIdentifier('bookings') . "
+                WHERE " . quotedIdentifier($bookingUserCol) . " = :user_id
+                ORDER BY {$orderBy}
                 LIMIT 15
             ";
 
-            $bookingStmt = $pdo->prepare($bookingSql);
-            $bookingStmt->execute([$userId]);
-            $bookings = $bookingStmt->fetchAll(PDO::FETCH_ASSOC);
+            $bookings = fetchAllSafe($pdo, $bookingSql, [':user_id' => $userId]);
         }
     }
-
-    $clientProfile = null;
 
     if (tableExists($pdo, 'client_profiles')) {
         $profileColumns = getColumns($pdo, 'client_profiles');
@@ -259,11 +356,11 @@ try {
         if ($profileUserCol !== null) {
             $profileStmt = $pdo->prepare("
                 SELECT *
-                FROM client_profiles
-                WHERE $profileUserCol = ?
+                FROM " . quotedIdentifier('client_profiles') . "
+                WHERE " . quotedIdentifier($profileUserCol) . " = :user_id
                 LIMIT 1
             ");
-            $profileStmt->execute([$userId]);
+            $profileStmt->execute([':user_id' => $userId]);
             $clientProfile = $profileStmt->fetch(PDO::FETCH_ASSOC) ?: null;
         }
     }
@@ -611,8 +708,8 @@ try {
         </div>
 
         <div class="actions">
-            <a href="admin-add-dog.php?user_id=<?php echo (int)$userId; ?>" class="btn btn-primary">+ Add Dog</a>
-            <a href="admin-create-booking.php?user_id=<?php echo (int)$userId; ?>" class="btn btn-primary">+ Create Booking</a>
+            <a href="admin-add-dog.php?user_id=<?php echo (int) $userId; ?>" class="btn btn-primary">+ Add Dog</a>
+            <a href="admin-create-booking.php?user_id=<?php echo (int) $userId; ?>" class="btn btn-primary">+ Create Booking</a>
             <a href="admin-members.php" class="btn btn-secondary">← Back to Members</a>
         </div>
     </div>
@@ -643,7 +740,7 @@ try {
 
             <div class="box">
                 <div class="label">Status</div>
-                <div class="value"><?php echo h($user['status'] ?? 'N/A'); ?></div>
+                <div class="value"><?php echo h($user['status'] !== '' ? $user['status'] : 'N/A'); ?></div>
             </div>
 
             <div class="box">
@@ -658,7 +755,7 @@ try {
 
             <div class="box">
                 <div class="label">User ID</div>
-                <div class="value"><?php echo h((string)($user['id'] ?? 'N/A')); ?></div>
+                <div class="value"><?php echo h((string) ($user['id'] ?? 'N/A')); ?></div>
             </div>
 
             <div class="box">
@@ -667,6 +764,21 @@ try {
             </div>
         </div>
     </section>
+
+    <?php if ($clientProfile): ?>
+        <section class="section">
+            <h2>Client Profile</h2>
+            <div class="grid">
+                <?php foreach ($clientProfile as $key => $value): ?>
+                    <?php if (in_array((string) $key, ['id', 'user_id', 'member_id', 'client_id'], true)) continue; ?>
+                    <div class="box">
+                        <div class="label"><?php echo h(ucwords(str_replace('_', ' ', (string) $key))); ?></div>
+                        <div class="value"><?php echo h((string) ($value !== null && $value !== '' ? $value : 'N/A')); ?></div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </section>
+    <?php endif; ?>
 
     <section class="section">
         <h2>Dogs</h2>
@@ -680,7 +792,7 @@ try {
                         <div class="item-title"><?php echo h($dog['display_name'] ?? 'Dog'); ?></div>
                         <div class="item-meta">
                             Breed: <?php echo h($dog['display_breed'] ?? 'N/A'); ?><br>
-                            Age: <?php echo h((string)($dog['display_age'] ?? 'N/A')); ?><br>
+                            Age: <?php echo h((string) ($dog['display_age'] ?? 'N/A')); ?><br>
                             Notes: <?php echo h($dog['display_notes'] ?? 'N/A'); ?><br>
                             Added: <?php echo formatDateTime($dog['display_created'] ?? ''); ?>
                         </div>
@@ -699,12 +811,12 @@ try {
             <div class="list">
                 <?php foreach ($bookings as $booking): ?>
                     <?php
-                    $bookingId = (int)($booking['id'] ?? 0);
-                    $rawStatus = trim((string)($booking['display_status'] ?? 'Requested'));
+                    $bookingId = (int) ($booking['id'] ?? 0);
+                    $rawStatus = trim((string) ($booking['display_status'] ?? 'Requested'));
                     $currentStatus = normalizeStatusLabel($rawStatus);
-                    $adminNotes = trim((string)($booking['display_admin_notes'] ?? ''));
-                    $statusUpdatedAt = trim((string)($booking['display_status_updated_at'] ?? ''));
-                    $statusUpdatedBy = trim((string)($booking['display_status_updated_by'] ?? ''));
+                    $adminNotes = trim((string) ($booking['display_admin_notes'] ?? ''));
+                    $statusUpdatedAt = trim((string) ($booking['display_status_updated_at'] ?? ''));
+                    $statusUpdatedBy = trim((string) ($booking['display_status_updated_by'] ?? ''));
                     ?>
                     <div class="item">
                         <div class="booking-layout">
@@ -721,7 +833,7 @@ try {
                                 <div class="item-meta">
                                     Date: <?php echo formatDate($booking['display_date'] ?? ''); ?><br>
                                     Time: <?php echo h($booking['display_time'] ?? 'N/A'); ?><br>
-                                    Duration: <?php echo h((string)($booking['display_duration'] ?? 'N/A')); ?><br>
+                                    Duration: <?php echo h((string) ($booking['display_duration'] ?? 'N/A')); ?><br>
                                     Price: <?php echo formatMoney($booking['display_price'] ?? null); ?><br>
                                     Client Notes: <?php echo h($booking['display_notes'] ?? 'N/A'); ?><br>
                                     Admin Notes:
@@ -750,7 +862,8 @@ try {
                                 <?php if ($bookingHasAdminNotes): ?>
                                     <form method="post" action="admin-update-booking-status.php" class="status-form">
                                         <input type="hidden" name="booking_id" value="<?php echo $bookingId; ?>">
-                                        <input type="hidden" name="user_id" value="<?php echo (int)$userId; ?>">
+                                        <input type="hidden" name="user_id" value="<?php echo (int) $userId; ?>">
+                                        <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
 
                                         <label for="status_<?php echo $bookingId; ?>">Booking Status</label>
                                         <select name="status" id="status_<?php echo $bookingId; ?>" required>

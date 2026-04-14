@@ -2,100 +2,380 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/database/setup.php';
-require_once __DIR__ . '/admin-auth.php';
+require_once __DIR__ . '/db.php';
 
-function e(?string $value): string
+date_default_timezone_set('America/New_York');
+
+$pdoConnection = null;
+
+if (isset($pdo) && $pdo instanceof PDO) {
+    $pdoConnection = $pdo;
+} elseif (isset($db) && $db instanceof PDO) {
+    $pdoConnection = $db;
+}
+
+if (!$pdoConnection instanceof PDO) {
+    http_response_code(500);
+    exit('Database connection not available.');
+}
+
+$pdoConnection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$pdoConnection->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+
+/*
+|--------------------------------------------------------------------------
+| Admin protection
+|--------------------------------------------------------------------------
+*/
+function dd_nm_redirect(string $url): never
+{
+    header('Location: ' . $url);
+    exit;
+}
+
+function dd_nm_is_admin_session(): bool
+{
+    if (!empty($_SESSION['is_admin'])) {
+        return true;
+    }
+
+    if (!empty($_SESSION['admin_id'])) {
+        return true;
+    }
+
+    $role = strtolower(trim((string) ($_SESSION['role'] ?? '')));
+    return in_array($role, ['admin', 'superadmin', 'owner'], true);
+}
+
+if (empty($_SESSION['user_id']) && empty($_SESSION['admin_id']) && empty($_SESSION['is_admin'])) {
+    dd_nm_redirect('admin-login.php');
+}
+
+if (!dd_nm_is_admin_session()) {
+    dd_nm_redirect('admin-dashboard.php');
+}
+
+/*
+|--------------------------------------------------------------------------
+| CSRF
+|--------------------------------------------------------------------------
+*/
+if (empty($_SESSION['admin_nonmember_list_csrf']) || !is_string($_SESSION['admin_nonmember_list_csrf'])) {
+    $_SESSION['admin_nonmember_list_csrf'] = bin2hex(random_bytes(32));
+}
+$csrfToken = (string) $_SESSION['admin_nonmember_list_csrf'];
+
+/*
+|--------------------------------------------------------------------------
+| Helpers
+|--------------------------------------------------------------------------
+*/
+function dd_nm_e(mixed $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function tableExists(PDO $pdo, string $table): bool
+function dd_nm_qi(string $value): string
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool) $stmt->fetchColumn();
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
-function getColumns(PDO $pdo, string $table): array
+function dd_nm_table_exists(PDO $pdo, string $table): bool
 {
-    $columns = [];
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    if ($stmt) {
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
-            $columns[] = $column['name'];
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute([':table' => $table]);
+        return (bool) $stmt->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function dd_nm_get_columns(PDO $pdo, string $table): array
+{
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . dd_nm_qi($table) . ')');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        $columns = [];
+
+        foreach ($rows as $row) {
+            if (!empty($row['name'])) {
+                $columns[] = (string) $row['name'];
+            }
+        }
+
+        return $columns;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function dd_nm_first_existing_column(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
         }
     }
-    return $columns;
+
+    return null;
 }
 
-function hasColumn(array $columns, string $column): bool
+function dd_nm_safe_fetch_all(PDO $pdo, string $sql, array $params = []): array
 {
-    return in_array($column, $columns, true);
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : [];
+    } catch (Throwable $e) {
+        return [];
+    }
 }
 
-function requestStatusClass(string $status): string
+function dd_nm_safe_fetch_one(PDO $pdo, string $sql, array $params = []): ?array
 {
-    return match ($status) {
-        'reviewed'  => 'status reviewed',
-        'approved'  => 'status approved',
-        'converted' => 'status converted',
-        'cancelled' => 'status cancelled',
-        default     => 'status pending',
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function dd_nm_safe_execute(PDOStatement $stmt, array $params = []): bool
+{
+    try {
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function dd_nm_request_status_class(string $status): string
+{
+    return match (strtolower(trim($status))) {
+        'reviewed', 'confirmed'  => 'status reviewed',
+        'approved', 'scheduled'  => 'status approved',
+        'converted', 'completed' => 'status converted',
+        'cancelled', 'canceled'  => 'status cancelled',
+        default                  => 'status pending',
     };
 }
 
+function dd_nm_normalize_status_label(string $status): string
+{
+    $normalized = strtolower(trim($status));
+
+    return match ($normalized) {
+        'pending'   => 'Pending',
+        'reviewed'  => 'Reviewed',
+        'approved'  => 'Approved',
+        'converted' => 'Converted',
+        'confirmed' => 'Confirmed',
+        'scheduled' => 'Scheduled',
+        'completed' => 'Completed',
+        'cancelled', 'canceled' => 'Cancelled',
+        default => trim($status) !== '' ? ucwords(str_replace(['_', '-'], ' ', $status)) : 'Pending',
+    };
+}
+
+function dd_nm_format_date(?string $value): string
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return dd_nm_e($value);
+    }
+
+    return date('F j, Y', $timestamp);
+}
+
+function dd_nm_format_datetime(?string $value): string
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return dd_nm_e($value);
+    }
+
+    return date('F j, Y g:i A', $timestamp);
+}
+
+function dd_nm_format_money(mixed $amount): string
+{
+    if ($amount === null || $amount === '') {
+        return '—';
+    }
+
+    if (!is_numeric($amount)) {
+        return dd_nm_e((string) $amount);
+    }
+
+    return '$' . number_format((float) $amount, 2);
+}
+
+function dd_nm_first_non_empty(array $row, array $keys): string
+{
+    foreach ($keys as $key) {
+        if (isset($row[$key]) && $row[$key] !== null && trim((string) $row[$key]) !== '') {
+            return (string) $row[$key];
+        }
+    }
+
+    return '';
+}
+
+/*
+|--------------------------------------------------------------------------
+| Detect table
+|--------------------------------------------------------------------------
+*/
 $tableName = null;
-if (tableExists($pdo, 'public_booking_requests')) {
-    $tableName = 'public_booking_requests';
-} elseif (tableExists($pdo, 'non_member_bookings')) {
-    $tableName = 'non_member_bookings';
-} elseif (tableExists($pdo, 'public_booking_submissions')) {
-    $tableName = 'public_booking_submissions';
+
+foreach (['non_member_bookings', 'public_booking_requests', 'public_booking_submissions'] as $candidateTable) {
+    if (dd_nm_table_exists($pdoConnection, $candidateTable)) {
+        $tableName = $candidateTable;
+        break;
+    }
 }
 
 if ($tableName === null) {
-    die('No non-member booking table was found.');
+    http_response_code(500);
+    exit('No non-member booking table was found.');
 }
 
-$requestColumns = getColumns($pdo, $tableName);
+$requestColumns = dd_nm_get_columns($pdoConnection, $tableName);
 
-$allowedFilterStatuses = ['all', 'pending', 'reviewed', 'approved', 'converted', 'cancelled'];
-$currentFilter = $_GET['status'] ?? 'all';
+$idCol = dd_nm_first_existing_column($requestColumns, ['id', 'request_id']);
+$statusCol = dd_nm_first_existing_column($requestColumns, ['status']);
+$createdAtCol = dd_nm_first_existing_column($requestColumns, ['created_at', 'submitted_at', 'created_on']);
+$updatedAtCol = dd_nm_first_existing_column($requestColumns, ['updated_at', 'modified_at']);
+$fullNameCol = dd_nm_first_existing_column($requestColumns, ['full_name', 'name', 'client_name']);
+$emailCol = dd_nm_first_existing_column($requestColumns, ['email']);
+$phoneCol = dd_nm_first_existing_column($requestColumns, ['phone', 'phone_number']);
+$petNameCol = dd_nm_first_existing_column($requestColumns, ['pet_name', 'dog_name', 'name']);
+$petBreedCol = dd_nm_first_existing_column($requestColumns, ['pet_breed', 'breed']);
+$petSizeCol = dd_nm_first_existing_column($requestColumns, ['pet_size', 'dog_size', 'size']);
+$serviceTypeCol = dd_nm_first_existing_column($requestColumns, ['service_type', 'service']);
+$serviceDateCol = dd_nm_first_existing_column($requestColumns, ['service_date', 'date_start', 'booking_date']);
+$serviceTimeCol = dd_nm_first_existing_column($requestColumns, ['service_time', 'preferred_walk_time', 'booking_time']);
+$durationCol = dd_nm_first_existing_column($requestColumns, ['duration_minutes', 'walk_duration']);
+$feedingScheduleCol = dd_nm_first_existing_column($requestColumns, ['feeding_schedule']);
+$notesCol = dd_nm_first_existing_column($requestColumns, ['notes', 'note']);
+$priceCol = dd_nm_first_existing_column($requestColumns, ['price', 'estimated_price', 'total_price']);
+$bookingSourceCol = dd_nm_first_existing_column($requestColumns, ['booking_source']);
+
+if ($idCol === null) {
+    http_response_code(500);
+    exit('The non-member booking table is missing an ID column.');
+}
+
+/*
+|--------------------------------------------------------------------------
+| Status system
+|--------------------------------------------------------------------------
+*/
+$legacyStatuses = ['pending', 'reviewed', 'approved', 'converted', 'cancelled'];
+$newStatuses = ['Pending', 'Confirmed', 'Scheduled', 'Completed', 'Cancelled'];
+
+$usesLegacyWorkflow = in_array($tableName, ['public_booking_requests', 'public_booking_submissions'], true);
+
+$allowedFilterStatuses = $usesLegacyWorkflow
+    ? ['all', 'pending', 'reviewed', 'approved', 'converted', 'cancelled']
+    : ['all', 'pending', 'confirmed', 'scheduled', 'completed', 'cancelled'];
+
+$currentFilter = strtolower(trim((string) ($_GET['status'] ?? 'all')));
 if (!in_array($currentFilter, $allowedFilterStatuses, true)) {
     $currentFilter = 'all';
 }
 
-$flashMessage = '';
-$flashType = 'success';
+/*
+|--------------------------------------------------------------------------
+| Base WHERE clauses
+|--------------------------------------------------------------------------
+*/
+$baseWhereParts = [];
+$baseParams = [];
 
+if ($bookingSourceCol !== null) {
+    $baseWhereParts[] = "COALESCE(" . dd_nm_qi($bookingSourceCol) . ", 'non-member') = 'non-member'";
+}
+
+$baseWhereSql = '';
+if (!empty($baseWhereParts)) {
+    $baseWhereSql = ' WHERE ' . implode(' AND ', $baseWhereParts);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Inline status update
+|--------------------------------------------------------------------------
+*/
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $postedToken = (string) ($_POST['csrf_token'] ?? '');
     $requestId = (int) ($_POST['request_id'] ?? 0);
     $newStatus = trim((string) ($_POST['new_status'] ?? ''));
 
-    if ($requestId <= 0 || !in_array($newStatus, ['pending', 'reviewed', 'approved', 'converted', 'cancelled'], true)) {
+    if ($postedToken === '' || !hash_equals($csrfToken, $postedToken)) {
         header('Location: admin-non-member-bookings.php?error=1&status=' . urlencode($currentFilter));
         exit;
     }
 
-    if (hasColumn($requestColumns, 'status')) {
-        $stmt = $pdo->prepare("
-            UPDATE {$tableName}
-            SET status = :status
-            WHERE id = :id
-        ");
-        $stmt->execute([
-            'status' => $newStatus,
-            'id' => $requestId,
-        ]);
+    $validStatuses = $usesLegacyWorkflow ? $legacyStatuses : $newStatuses;
 
-        header('Location: admin-non-member-bookings.php?updated=1&status=' . urlencode($currentFilter));
+    if ($requestId <= 0 || !in_array($newStatus, $validStatuses, true)) {
+        header('Location: admin-non-member-bookings.php?error=1&status=' . urlencode($currentFilter));
         exit;
+    }
+
+    if ($statusCol !== null) {
+        $setParts = [
+            dd_nm_qi($statusCol) . ' = :status',
+        ];
+        $params = [
+            ':status' => $newStatus,
+            ':id' => $requestId,
+        ];
+
+        if ($updatedAtCol !== null) {
+            $setParts[] = dd_nm_qi($updatedAtCol) . ' = :updated_at';
+            $params[':updated_at'] = date('Y-m-d H:i:s');
+        }
+
+        $stmt = $pdoConnection->prepare("
+            UPDATE " . dd_nm_qi($tableName) . "
+            SET " . implode(', ', $setParts) . "
+            WHERE " . dd_nm_qi($idCol) . " = :id
+        ");
+
+        if (dd_nm_safe_execute($stmt, $params)) {
+            header('Location: admin-non-member-bookings.php?updated=1&status=' . urlencode($currentFilter));
+            exit;
+        }
     }
 
     header('Location: admin-non-member-bookings.php?error=1&status=' . urlencode($currentFilter));
     exit;
 }
+
+/*
+|--------------------------------------------------------------------------
+| Flash messages
+|--------------------------------------------------------------------------
+*/
+$flashMessage = '';
+$flashType = 'success';
 
 if (isset($_GET['updated'])) {
     $flashMessage = 'Non-member booking updated successfully.';
@@ -104,95 +384,161 @@ if (isset($_GET['updated'])) {
     $flashType = 'error';
 }
 
-$whereSql = '';
-$params = [];
-
-if ($currentFilter !== 'all' && hasColumn($requestColumns, 'status')) {
-    $whereSql = 'WHERE status = :status_filter';
-    $params['status_filter'] = $currentFilter;
-}
-
+/*
+|--------------------------------------------------------------------------
+| Summary
+|--------------------------------------------------------------------------
+*/
 $summary = [
     'total' => 0,
     'pending' => 0,
     'reviewed' => 0,
     'approved' => 0,
     'converted' => 0,
+    'confirmed' => 0,
+    'scheduled' => 0,
+    'completed' => 0,
     'cancelled' => 0,
 ];
 
-if (hasColumn($requestColumns, 'status')) {
-    $summaryStmt = $pdo->query("
+$totalSql = 'SELECT COUNT(*) AS total_count FROM ' . dd_nm_qi($tableName) . $baseWhereSql;
+$totalRow = dd_nm_safe_fetch_one($pdoConnection, $totalSql, $baseParams);
+$summary['total'] = (int) ($totalRow['total_count'] ?? 0);
+
+if ($statusCol !== null) {
+    $statusSummarySql = '
         SELECT
-            COUNT(*) AS total_count,
-            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
-            SUM(CASE WHEN status = 'reviewed' THEN 1 ELSE 0 END) AS reviewed_count,
-            SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
-            SUM(CASE WHEN status = 'converted' THEN 1 ELSE 0 END) AS converted_count,
-            SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count
-        FROM {$tableName}
-    ");
+            LOWER(COALESCE(' . dd_nm_qi($statusCol) . ", '')) AS status_key,
+            COUNT(*) AS row_count
+        FROM " . dd_nm_qi($tableName) .
+        $baseWhereSql . '
+        GROUP BY LOWER(COALESCE(' . dd_nm_qi($statusCol) . ", ''))
+    ";
 
-    if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
-        $summary['total'] = (int) ($summaryRow['total_count'] ?? 0);
-        $summary['pending'] = (int) ($summaryRow['pending_count'] ?? 0);
-        $summary['reviewed'] = (int) ($summaryRow['reviewed_count'] ?? 0);
-        $summary['approved'] = (int) ($summaryRow['approved_count'] ?? 0);
-        $summary['converted'] = (int) ($summaryRow['converted_count'] ?? 0);
-        $summary['cancelled'] = (int) ($summaryRow['cancelled_count'] ?? 0);
-    }
-} else {
-    $countStmt = $pdo->query("SELECT COUNT(*) FROM {$tableName}");
-    $summary['total'] = (int) $countStmt->fetchColumn();
-}
+    $statusRows = dd_nm_safe_fetch_all($pdoConnection, $statusSummarySql, $baseParams);
 
-$selectParts = ['id'];
-$optionalColumns = [
-    'full_name',
-    'name',
-    'email',
-    'phone',
-    'pet_name',
-    'pet_breed',
-    'pet_size',
-    'service_type',
-    'service_date',
-    'service_time',
-    'duration_minutes',
-    'feeding_schedule',
-    'notes',
-    'note',
-    'price',
-    'status',
-    'created_at'
-];
+    foreach ($statusRows as $statusRow) {
+        $key = strtolower(trim((string) ($statusRow['status_key'] ?? '')));
+        $count = (int) ($statusRow['row_count'] ?? 0);
 
-foreach ($optionalColumns as $column) {
-    if (hasColumn($requestColumns, $column)) {
-        $selectParts[] = $column;
-    }
-}
-
-$sql = "
-    SELECT " . implode(', ', $selectParts) . "
-    FROM {$tableName}
-    {$whereSql}
-    ORDER BY " . (hasColumn($requestColumns, 'created_at') ? 'created_at DESC, ' : '') . "id DESC
-";
-
-$stmt = $pdo->prepare($sql);
-$stmt->execute($params);
-$requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-function firstNonEmpty(array $row, array $keys): string
-{
-    foreach ($keys as $key) {
-        if (!empty($row[$key])) {
-            return (string) $row[$key];
+        switch ($key) {
+            case 'pending':
+                $summary['pending'] = $count;
+                break;
+            case 'reviewed':
+                $summary['reviewed'] = $count;
+                break;
+            case 'approved':
+                $summary['approved'] = $count;
+                break;
+            case 'converted':
+                $summary['converted'] = $count;
+                break;
+            case 'confirmed':
+                $summary['confirmed'] = $count;
+                break;
+            case 'scheduled':
+                $summary['scheduled'] = $count;
+                break;
+            case 'completed':
+                $summary['completed'] = $count;
+                break;
+            case 'cancelled':
+            case 'canceled':
+                $summary['cancelled'] += $count;
+                break;
         }
     }
-    return '';
 }
+
+/*
+|--------------------------------------------------------------------------
+| Filters
+|--------------------------------------------------------------------------
+*/
+$whereParts = $baseWhereParts;
+$params = $baseParams;
+
+if ($currentFilter !== 'all' && $statusCol !== null) {
+    $whereParts[] = "LOWER(COALESCE(" . dd_nm_qi($statusCol) . ", '')) = :status_filter";
+    $params[':status_filter'] = $currentFilter;
+}
+
+$whereSql = '';
+if (!empty($whereParts)) {
+    $whereSql = 'WHERE ' . implode(' AND ', $whereParts);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Load rows
+|--------------------------------------------------------------------------
+*/
+$selectParts = [
+    dd_nm_qi($idCol) . ' AS id',
+    ($fullNameCol !== null ? dd_nm_qi($fullNameCol) : "''") . ' AS full_name',
+    ($emailCol !== null ? dd_nm_qi($emailCol) : "''") . ' AS email',
+    ($phoneCol !== null ? dd_nm_qi($phoneCol) : "''") . ' AS phone',
+    ($petNameCol !== null ? dd_nm_qi($petNameCol) : "''") . ' AS pet_name',
+    ($petBreedCol !== null ? dd_nm_qi($petBreedCol) : "''") . ' AS pet_breed',
+    ($petSizeCol !== null ? dd_nm_qi($petSizeCol) : "''") . ' AS pet_size',
+    ($serviceTypeCol !== null ? dd_nm_qi($serviceTypeCol) : "''") . ' AS service_type',
+    ($serviceDateCol !== null ? dd_nm_qi($serviceDateCol) : "''") . ' AS service_date',
+    ($serviceTimeCol !== null ? dd_nm_qi($serviceTimeCol) : "''") . ' AS service_time',
+    ($durationCol !== null ? dd_nm_qi($durationCol) : 'NULL') . ' AS duration_minutes',
+    ($feedingScheduleCol !== null ? dd_nm_qi($feedingScheduleCol) : "''") . ' AS feeding_schedule',
+    ($notesCol !== null ? dd_nm_qi($notesCol) : "''") . ' AS notes',
+    ($priceCol !== null ? dd_nm_qi($priceCol) : 'NULL') . ' AS price',
+    ($statusCol !== null ? dd_nm_qi($statusCol) : "'Pending'") . ' AS status',
+    ($createdAtCol !== null ? dd_nm_qi($createdAtCol) : "''") . ' AS created_at',
+];
+
+$sql = "
+    SELECT " . implode(",\n           ", $selectParts) . "
+    FROM " . dd_nm_qi($tableName) . "
+    {$whereSql}
+    ORDER BY " . ($createdAtCol !== null ? dd_nm_qi($createdAtCol) . ' DESC, ' : '') . dd_nm_qi($idCol) . " DESC
+";
+
+$requests = dd_nm_safe_fetch_all($pdoConnection, $sql, $params);
+
+$summaryCards = $usesLegacyWorkflow
+    ? [
+        ['label' => 'Total Requests', 'value' => $summary['total'], 'note' => 'All non-member requests received'],
+        ['label' => 'Pending', 'value' => $summary['pending'], 'note' => 'New requests awaiting review'],
+        ['label' => 'Reviewed', 'value' => $summary['reviewed'], 'note' => 'Checked by admin'],
+        ['label' => 'Approved', 'value' => $summary['approved'], 'note' => 'Ready for next action'],
+        ['label' => 'Converted', 'value' => $summary['converted'], 'note' => 'Moved into core workflow'],
+        ['label' => 'Cancelled', 'value' => $summary['cancelled'], 'note' => 'Closed requests'],
+    ]
+    : [
+        ['label' => 'Total Requests', 'value' => $summary['total'], 'note' => 'All non-member requests received'],
+        ['label' => 'Pending', 'value' => $summary['pending'], 'note' => 'New requests awaiting review'],
+        ['label' => 'Confirmed', 'value' => $summary['confirmed'], 'note' => 'Confirmed by admin'],
+        ['label' => 'Scheduled', 'value' => $summary['scheduled'], 'note' => 'Ready for service'],
+        ['label' => 'Completed', 'value' => $summary['completed'], 'note' => 'Service completed'],
+        ['label' => 'Cancelled', 'value' => $summary['cancelled'], 'note' => 'Closed requests'],
+    ];
+
+$filterPills = $usesLegacyWorkflow
+    ? [
+        ['key' => 'all', 'label' => 'All'],
+        ['key' => 'pending', 'label' => 'Pending'],
+        ['key' => 'reviewed', 'label' => 'Reviewed'],
+        ['key' => 'approved', 'label' => 'Approved'],
+        ['key' => 'converted', 'label' => 'Converted'],
+        ['key' => 'cancelled', 'label' => 'Cancelled'],
+    ]
+    : [
+        ['key' => 'all', 'label' => 'All'],
+        ['key' => 'pending', 'label' => 'Pending'],
+        ['key' => 'confirmed', 'label' => 'Confirmed'],
+        ['key' => 'scheduled', 'label' => 'Scheduled'],
+        ['key' => 'completed', 'label' => 'Completed'],
+        ['key' => 'cancelled', 'label' => 'Cancelled'],
+    ];
+
+$statusOptions = $usesLegacyWorkflow ? $legacyStatuses : $newStatuses;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -412,7 +758,7 @@ function firstNonEmpty(array $row, array $keys): string
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 1420px;
+      min-width: 1540px;
     }
 
     thead th {
@@ -490,24 +836,33 @@ function firstNonEmpty(array $row, array $keys): string
     .actions {
       display: grid;
       gap: 8px;
+      min-width: 180px;
     }
 
     .actions form {
       margin: 0;
     }
 
-    .actions button {
+    .actions button,
+    .actions a {
       width: 100%;
-      min-height: 34px;
+      min-height: 36px;
       border-radius: 10px;
       border: 1px solid var(--line);
       background: rgba(255,255,255,0.04);
       color: var(--text);
       font-weight: 800;
       cursor: pointer;
+      font-size: 13px;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 12px;
     }
 
-    .actions button:hover {
+    .actions button:hover,
+    .actions a:hover {
       border-color: rgba(212,175,55,0.26);
     }
 
@@ -557,53 +912,27 @@ function firstNonEmpty(array $row, array $keys): string
       </div>
 
       <div class="top-actions">
+        <a href="admin-dashboard.php" class="top-btn">Dashboard</a>
+        <a href="admin-revenue.php" class="top-btn">Revenue</a>
         <a href="admin-bookings.php" class="top-btn">Main Bookings</a>
-        <a href="admin-dashboard.php" class="top-btn primary">Admin Home</a>
+        <a href="admin-members.php" class="top-btn primary">Members</a>
       </div>
     </div>
 
     <?php if ($flashMessage !== ''): ?>
-      <div class="flash <?php echo e($flashType); ?>">
-        <?php echo e($flashMessage); ?>
+      <div class="flash <?php echo dd_nm_e($flashType); ?>">
+        <?php echo dd_nm_e($flashMessage); ?>
       </div>
     <?php endif; ?>
 
     <div class="summary-grid">
-      <div class="card">
-        <div class="card-label">Total Requests</div>
-        <div class="card-value"><?php echo $summary['total']; ?></div>
-        <div class="card-note">All non-member requests received</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Pending</div>
-        <div class="card-value"><?php echo $summary['pending']; ?></div>
-        <div class="card-note">New requests awaiting review</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Reviewed</div>
-        <div class="card-value"><?php echo $summary['reviewed']; ?></div>
-        <div class="card-note">Checked by admin</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Approved</div>
-        <div class="card-value"><?php echo $summary['approved']; ?></div>
-        <div class="card-note">Ready for next action</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Converted</div>
-        <div class="card-value"><?php echo $summary['converted']; ?></div>
-        <div class="card-note">Moved into core workflow</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Cancelled</div>
-        <div class="card-value"><?php echo $summary['cancelled']; ?></div>
-        <div class="card-note">Closed requests</div>
-      </div>
+      <?php foreach ($summaryCards as $card): ?>
+        <div class="card">
+          <div class="card-label"><?php echo dd_nm_e($card['label']); ?></div>
+          <div class="card-value"><?php echo (int) $card['value']; ?></div>
+          <div class="card-note"><?php echo dd_nm_e($card['note']); ?></div>
+        </div>
+      <?php endforeach; ?>
     </div>
 
     <div class="panel">
@@ -616,12 +945,14 @@ function firstNonEmpty(array $row, array $keys): string
         </div>
 
         <div class="filters">
-          <a class="filter-pill <?php echo $currentFilter === 'all' ? 'active' : ''; ?>" href="admin-non-member-bookings.php?status=all">All</a>
-          <a class="filter-pill <?php echo $currentFilter === 'pending' ? 'active' : ''; ?>" href="admin-non-member-bookings.php?status=pending">Pending</a>
-          <a class="filter-pill <?php echo $currentFilter === 'reviewed' ? 'active' : ''; ?>" href="admin-non-member-bookings.php?status=reviewed">Reviewed</a>
-          <a class="filter-pill <?php echo $currentFilter === 'approved' ? 'active' : ''; ?>" href="admin-non-member-bookings.php?status=approved">Approved</a>
-          <a class="filter-pill <?php echo $currentFilter === 'converted' ? 'active' : ''; ?>" href="admin-non-member-bookings.php?status=converted">Converted</a>
-          <a class="filter-pill <?php echo $currentFilter === 'cancelled' ? 'active' : ''; ?>" href="admin-non-member-bookings.php?status=cancelled">Cancelled</a>
+          <?php foreach ($filterPills as $pill): ?>
+            <a
+              class="filter-pill <?php echo $currentFilter === $pill['key'] ? 'active' : ''; ?>"
+              href="admin-non-member-bookings.php?status=<?php echo urlencode($pill['key']); ?>"
+            >
+              <?php echo dd_nm_e($pill['label']); ?>
+            </a>
+          <?php endforeach; ?>
         </div>
       </div>
 
@@ -649,90 +980,79 @@ function firstNonEmpty(array $row, array $keys): string
             <tbody>
               <?php foreach ($requests as $request): ?>
                 <?php
-                  $clientName = firstNonEmpty($request, ['full_name', 'name']);
-                  $requestNotes = firstNonEmpty($request, ['notes', 'note']);
+                  $clientName = dd_nm_first_non_empty($request, ['full_name', 'name', 'client_name']);
+                  $requestNotes = dd_nm_first_non_empty($request, ['notes', 'note']);
+                  $requestStatus = dd_nm_normalize_status_label((string) ($request['status'] ?? 'Pending'));
                 ?>
                 <tr>
                   <td>
                     <div class="primary-text">#<?php echo (int) $request['id']; ?></div>
-                    <div class="secondary-text"><?php echo e($request['created_at'] ?? ''); ?></div>
+                    <div class="secondary-text"><?php echo dd_nm_format_datetime((string) ($request['created_at'] ?? '')); ?></div>
                   </td>
 
                   <td>
-                    <div class="primary-text"><?php echo e($clientName ?: 'Unknown client'); ?></div>
+                    <div class="primary-text"><?php echo dd_nm_e($clientName !== '' ? $clientName : 'Unknown client'); ?></div>
                     <div class="secondary-text">
-                      <?php echo e($request['email'] ?? ''); ?><br>
-                      <?php echo e($request['phone'] ?? ''); ?>
+                      <?php echo dd_nm_e((string) ($request['email'] ?? '')); ?><br>
+                      <?php echo dd_nm_e((string) ($request['phone'] ?? '')); ?>
                     </div>
                   </td>
 
                   <td>
-                    <div class="primary-text"><?php echo e($request['pet_name'] ?? ''); ?></div>
+                    <div class="primary-text"><?php echo dd_nm_e((string) ($request['pet_name'] ?? '')); ?></div>
                     <div class="secondary-text">
-                      <?php echo e($request['pet_breed'] ?? ''); ?>
+                      <?php echo dd_nm_e((string) ($request['pet_breed'] ?? '')); ?>
                       <?php if (!empty($request['pet_size'])): ?>
-                        <br><?php echo e($request['pet_size']); ?>
+                        <br><?php echo dd_nm_e((string) $request['pet_size']); ?>
                       <?php endif; ?>
                     </div>
                   </td>
 
                   <td>
-                    <div class="primary-text"><?php echo e(ucfirst((string) ($request['service_type'] ?? ''))); ?></div>
+                    <div class="primary-text"><?php echo dd_nm_e(ucwords(str_replace(['_', '-'], ' ', (string) ($request['service_type'] ?? '')))); ?></div>
                     <div class="secondary-text">
                       <?php
                         $duration = $request['duration_minutes'] ?? null;
-                        echo $duration ? e((string) $duration . ' min') : 'No duration';
+                        echo $duration ? dd_nm_e((string) $duration . ' min') : 'No duration';
                       ?>
                     </div>
                   </td>
 
                   <td>
-                    <div class="primary-text"><?php echo e($request['service_date'] ?? ''); ?></div>
-                    <div class="secondary-text"><?php echo e($request['service_time'] ?? ''); ?></div>
+                    <div class="primary-text"><?php echo dd_nm_format_date((string) ($request['service_date'] ?? '')); ?></div>
+                    <div class="secondary-text"><?php echo dd_nm_e((string) ($request['service_time'] ?? '')); ?></div>
                   </td>
 
                   <td>
-                    <div class="primary-text">$<?php echo number_format((float) ($request['price'] ?? 0), 2); ?></div>
+                    <div class="primary-text"><?php echo dd_nm_format_money($request['price'] ?? null); ?></div>
                   </td>
 
                   <td>
-                    <div class="secondary-text"><?php echo e($request['feeding_schedule'] ?? ''); ?></div>
+                    <div class="secondary-text"><?php echo dd_nm_e((string) ($request['feeding_schedule'] ?? '')); ?></div>
                     <?php if ($requestNotes !== ''): ?>
-                      <div class="secondary-text" style="margin-top:8px;"><?php echo e($requestNotes); ?></div>
+                      <div class="secondary-text" style="margin-top:8px;"><?php echo dd_nm_e($requestNotes); ?></div>
                     <?php endif; ?>
                   </td>
 
                   <td>
-                    <span class="<?php echo e(requestStatusClass((string) ($request['status'] ?? 'pending'))); ?>">
-                      <?php echo e((string) ($request['status'] ?? 'pending')); ?>
+                    <span class="<?php echo dd_nm_e(dd_nm_request_status_class((string) ($request['status'] ?? 'pending'))); ?>">
+                      <?php echo dd_nm_e($requestStatus); ?>
                     </span>
                   </td>
 
                   <td>
                     <div class="actions">
-                      <form method="post">
-                        <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
-                        <input type="hidden" name="new_status" value="reviewed">
-                        <button type="submit">Mark Reviewed</button>
-                      </form>
+                      <a href="admin-non-member-bookings-view.php?id=<?php echo (int) $request['id']; ?>">View</a>
 
-                      <form method="post">
-                        <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
-                        <input type="hidden" name="new_status" value="approved">
-                        <button type="submit">Approve</button>
-                      </form>
-
-                      <form method="post">
-                        <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
-                        <input type="hidden" name="new_status" value="converted">
-                        <button type="submit">Mark Converted</button>
-                      </form>
-
-                      <form method="post">
-                        <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
-                        <input type="hidden" name="new_status" value="cancelled">
-                        <button type="submit">Cancel</button>
-                      </form>
+                      <?php foreach ($statusOptions as $statusOption): ?>
+                        <?php if (strtolower(trim($statusOption)) === strtolower(trim((string) ($request['status'] ?? '')))) continue; ?>
+                        <form method="post">
+                          <input type="hidden" name="csrf_token" value="<?php echo dd_nm_e($csrfToken); ?>">
+                          <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
+                          <input type="hidden" name="new_status" value="<?php echo dd_nm_e($statusOption); ?>">
+                          <button type="submit"><?php echo dd_nm_e($statusOption); ?></button>
+                        </form>
+                      <?php endforeach; ?>
                     </div>
                   </td>
                 </tr>

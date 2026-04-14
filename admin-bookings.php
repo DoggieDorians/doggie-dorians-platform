@@ -10,107 +10,123 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
-function h($value)
+function ddAdminBookingsH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirectTo($url)
+function ddAdminBookingsRedirect(string $url): void
 {
     header('Location: ' . $url);
     exit;
 }
 
-function isAdmin()
+function ddAdminBookingsNormalizeRole($value): string
 {
-    if (!empty($_SESSION['is_admin'])) {
-        return true;
-    }
-
-    return isset($_SESSION['role']) && strtolower((string) $_SESSION['role']) === 'admin';
+    return strtolower(trim((string) $value));
 }
 
-if (!isAdmin()) {
-    redirectTo('admin-login.php');
+function ddAdminBookingsSessionBool(string $key): bool
+{
+    return isset($_SESSION[$key]) && $_SESSION[$key] === true;
 }
 
-function hasTable(PDO $pdo, $table)
+function ddAdminBookingsSessionNonempty(string $key): bool
 {
-    static $cache = array();
-
-    if (isset($cache[$table])) {
-        return $cache[$table];
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
-        $stmt->execute(array(':name' => $table));
-        $cache[$table] = (bool) $stmt->fetchColumn();
-        return $cache[$table];
-    } catch (Throwable $e) {
-        $cache[$table] = false;
-        return false;
-    }
+    return isset($_SESSION[$key]) && $_SESSION[$key] !== '' && $_SESSION[$key] !== null;
 }
 
-function getTableColumns(PDO $pdo, $table)
+function ddAdminBookingsIsAdmin(): bool
 {
-    static $cache = array();
+    $roleCandidates = array(
+        ddAdminBookingsNormalizeRole($_SESSION['role'] ?? ''),
+        ddAdminBookingsNormalizeRole($_SESSION['user_role'] ?? ''),
+        ddAdminBookingsNormalizeRole($_SESSION['user_type'] ?? ''),
+        ddAdminBookingsNormalizeRole($_SESSION['account_type'] ?? ''),
+        ddAdminBookingsNormalizeRole($_SESSION['access_role'] ?? ''),
+        ddAdminBookingsNormalizeRole($_SESSION['admin']['role'] ?? ''),
+    );
 
-    if (isset($cache[$table])) {
-        return $cache[$table];
+    $hasAdminRole = in_array('admin', $roleCandidates, true);
+
+    $hasAdminFlag = (
+        ddAdminBookingsSessionBool('admin_logged_in')
+        || ddAdminBookingsSessionBool('is_admin')
+        || (
+            isset($_SESSION['admin'])
+            && is_array($_SESSION['admin'])
+            && (
+                (!empty($_SESSION['admin']['logged_in']) && $_SESSION['admin']['logged_in'] === true)
+                || (!empty($_SESSION['admin']['is_admin']) && $_SESSION['admin']['is_admin'] === true)
+            )
+        )
+    );
+
+    $hasAdminIdentity = (
+        ddAdminBookingsSessionNonempty('admin_id')
+        || ddAdminBookingsSessionNonempty('admin_email')
+        || ddAdminBookingsSessionNonempty('admin_name')
+        || (
+            isset($_SESSION['admin'])
+            && is_array($_SESSION['admin'])
+            && !empty($_SESSION['admin'])
+        )
+    );
+
+    return ($hasAdminFlag && ($hasAdminRole || $hasAdminIdentity))
+        || ($hasAdminRole && $hasAdminIdentity);
+}
+
+function ddAdminBookingsNormalizeAdminSession(): void
+{
+    if (!ddAdminBookingsIsAdmin()) {
+        return;
     }
 
-    if (!hasTable($pdo, $table)) {
-        $cache[$table] = array();
-        return array();
+    $_SESSION['admin_logged_in'] = true;
+    $_SESSION['is_admin'] = true;
+
+    if (empty($_SESSION['role'])) {
+        $_SESSION['role'] = 'admin';
     }
 
-    try {
-        $safeTable = str_replace('"', '""', $table);
-        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
-        $columns = array();
+    if (empty($_SESSION['user_role'])) {
+        $_SESSION['user_role'] = 'admin';
+    }
 
-        if ($stmt) {
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach ($rows as $row) {
-                if (isset($row['name'])) {
-                    $columns[] = (string) $row['name'];
-                }
-            }
+    if (empty($_SESSION['admin_name']) && !empty($_SESSION['admin']['name'])) {
+        $_SESSION['admin_name'] = (string) $_SESSION['admin']['name'];
+    }
+
+    if (empty($_SESSION['admin_email']) && !empty($_SESSION['admin']['email'])) {
+        $_SESSION['admin_email'] = (string) $_SESSION['admin']['email'];
+    }
+
+    if (empty($_SESSION['admin_id'])) {
+        if (!empty($_SESSION['admin']['id'])) {
+            $_SESSION['admin_id'] = (int) $_SESSION['admin']['id'];
+        } elseif (!empty($_SESSION['user_id'])) {
+            $_SESSION['admin_id'] = (int) $_SESSION['user_id'];
         }
+    }
 
-        $cache[$table] = $columns;
-        return $columns;
-    } catch (Throwable $e) {
-        $cache[$table] = array();
-        return array();
+    if (empty($_SESSION['user_id']) && !empty($_SESSION['admin_id'])) {
+        $_SESSION['user_id'] = (int) $_SESSION['admin_id'];
     }
 }
 
-function firstExistingColumn(PDO $pdo, $table, array $candidates)
+if (!ddAdminBookingsIsAdmin()) {
+    ddAdminBookingsRedirect('admin-login.php');
+}
+
+ddAdminBookingsNormalizeAdminSession();
+
+function ddAdminBookingsQuoteIdentifier(string $identifier): string
 {
-    $columns = getTableColumns($pdo, $table);
-
-    foreach ($candidates as $candidate) {
-        if (in_array($candidate, $columns, true)) {
-            return $candidate;
-        }
-    }
-
-    return null;
+    return '"' . str_replace('"', '""', $identifier) . '"';
 }
 
-function safeExecute(PDOStatement $stmt, array $params = array())
-{
-    try {
-        return $stmt->execute($params);
-    } catch (Throwable $e) {
-        return false;
-    }
-}
-
-function safeFetchAll(PDO $pdo, $sql, array $params = array())
+function ddAdminBookingsSafeFetchAll(PDO $pdo, string $sql, array $params = array()): array
 {
     try {
         $stmt = $pdo->prepare($sql);
@@ -125,7 +141,7 @@ function safeFetchAll(PDO $pdo, $sql, array $params = array())
     }
 }
 
-function safeFetchOne(PDO $pdo, $sql, array $params = array())
+function ddAdminBookingsSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
 {
     try {
         $stmt = $pdo->prepare($sql);
@@ -134,241 +150,71 @@ function safeFetchOne(PDO $pdo, $sql, array $params = array())
         }
 
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $row !== false ? $row : null;
+        return is_array($row) ? $row : null;
     } catch (Throwable $e) {
         return null;
     }
 }
 
-function normalizeStatus($status)
+function ddAdminBookingsTableExists(PDO $pdo, string $table): bool
 {
-    $status = strtolower(trim((string) $status));
+    static $cache = array();
 
-    if ($status === 'new' || $status === 'open' || $status === 'unassigned') {
-        return 'available';
-    }
-    if ($status === 'assigned' || $status === 'confirmed') {
-        return 'accepted';
-    }
-    if ($status === 'active' || $status === 'walking' || $status === 'started' || $status === 'in progress') {
-        return 'in_progress';
-    }
-    if ($status === 'done' || $status === 'finished' || $status === 'closed') {
-        return 'completed';
-    }
-    if ($status === 'canceled' || $status === 'cancelled' || $status === 'void') {
-        return 'cancelled';
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
     }
 
-    return $status !== '' ? $status : 'pending';
-}
-
-function normalizePublicStatus($status)
-{
-    $status = strtolower(trim((string) $status));
-    $allowed = array('new', 'reviewed', 'confirmed', 'completed', 'cancelled');
-
-    if (in_array($status, $allowed, true)) {
-        return $status;
-    }
-
-    return 'new';
-}
-
-function normalizePaymentStatus($status)
-{
-    $status = strtolower(trim((string) $status));
-    $allowed = array('unpaid', 'pending', 'paid', 'partially_paid', 'refunded');
-
-    if (in_array($status, $allowed, true)) {
-        return $status;
-    }
-
-    return 'unpaid';
-}
-
-function normalizePaymentMethod($method)
-{
-    $method = strtolower(trim((string) $method));
-
-    $map = array(
-        'stripe' => 'stripe',
-        'zelle' => 'zelle',
-        'cash' => 'cash',
-        'venmo' => 'venmo',
-        'bank transfer' => 'bank_transfer',
-        'bank_transfer' => 'bank_transfer',
-        'check' => 'check',
-        'cheque' => 'check',
-        'other' => 'other',
+    $row = ddAdminBookingsSafeFetchOne(
+        $pdo,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1",
+        array(':table' => $table)
     );
 
-    return isset($map[$method]) ? $map[$method] : '';
+    $cache[$table] = $row !== null;
+    return $cache[$table];
 }
 
-function paymentMethodDisplayName($method)
+function ddAdminBookingsGetTableColumns(PDO $pdo, string $table): array
 {
-    $method = normalizePaymentMethod($method);
+    static $cache = array();
 
-    if ($method === 'bank_transfer') {
-        return 'Bank Transfer';
+    if (isset($cache[$table])) {
+        return $cache[$table];
     }
 
-    if ($method === '') {
-        return '—';
-    }
-
-    return ucfirst($method);
-}
-
-function normalizeServiceType($type)
-{
-    $type = strtolower(trim((string) $type));
-
-    if ($type === '') {
-        return 'service';
-    }
-    if (strpos($type, 'walk') !== false) {
-        return 'walk';
-    }
-    if (strpos($type, 'board') !== false) {
-        return 'boarding';
-    }
-    if (strpos($type, 'daycare') !== false || strpos($type, 'day care') !== false) {
-        return 'daycare';
-    }
-    if (strpos($type, 'sit') !== false) {
-        return 'sitting';
-    }
-    if (strpos($type, 'drop') !== false) {
-        return 'drop-in';
-    }
-
-    return $type;
-}
-
-function serviceDisplayName($type)
-{
-    $type = normalizeServiceType($type);
-
-    if ($type === 'drop-in') {
-        return 'Drop-In';
-    }
-
-    return ucfirst($type);
-}
-
-function formatDateDisplay($date)
-{
-    $date = trim((string) $date);
-    if ($date === '') {
-        return '—';
-    }
-
-    $ts = strtotime($date);
-    return $ts !== false ? date('F j, Y', $ts) : $date;
-}
-
-function formatTimeDisplay($time)
-{
-    $time = trim((string) $time);
-    if ($time === '') {
-        return '—';
-    }
-
-    $ts = strtotime($time);
-    return $ts !== false ? date('g:i A', $ts) : $time;
-}
-
-function formatDateTimeDisplay($value)
-{
-    $value = trim((string) $value);
-    if ($value === '') {
-        return '—';
+    if (!ddAdminBookingsTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 
     try {
-        $dateTime = new DateTime($value, new DateTimeZone('UTC'));
-        $dateTime->setTimezone(new DateTimeZone('America/New_York'));
-        return $dateTime->format('F j, Y \a\t g:i A T');
-    } catch (Throwable $e) {
-        $ts = strtotime($value);
-        return $ts !== false ? date('F j, Y \a\t g:i A', $ts) : $value;
-    }
-}
-
-function formatDateTimeLocalInput($value)
-{
-    $value = trim((string) $value);
-    if ($value === '') {
-        return '';
-    }
-
-    try {
-        $dateTime = new DateTime($value, new DateTimeZone('UTC'));
-        $dateTime->setTimezone(new DateTimeZone('America/New_York'));
-        return $dateTime->format('Y-m-d\TH:i');
-    } catch (Throwable $e) {
-        $ts = strtotime($value);
-        return $ts !== false ? date('Y-m-d\TH:i', $ts) : '';
-    }
-}
-
-function normalizeDateTimeLocalToUtc($value)
-{
-    $value = trim((string) $value);
-    if ($value === '') {
-        return '';
-    }
-
-    try {
-        $dateTime = new DateTime($value, new DateTimeZone('America/New_York'));
-        $dateTime->setTimezone(new DateTimeZone('UTC'));
-        return $dateTime->format('Y-m-d H:i:s');
-    } catch (Throwable $e) {
-        return '';
-    }
-}
-
-function currentUtcTimestampFromNewYork()
-{
-    try {
-        $dateTime = new DateTime('now', new DateTimeZone('America/New_York'));
-        $dateTime->setTimezone(new DateTimeZone('UTC'));
-        return $dateTime->format('Y-m-d H:i:s');
-    } catch (Throwable $e) {
-        return gmdate('Y-m-d H:i:s');
-    }
-}
-
-function formatMoney($value)
-{
-    if ($value === null || $value === '') {
-        return '—';
-    }
-
-    if (is_numeric($value)) {
-        return '$' . number_format((float) $value, 2);
-    }
-
-    return '$' . (string) $value;
-}
-
-function valueFromRow(array $row, array $candidates, $default = '')
-{
-    foreach ($candidates as $candidate) {
-        if (isset($row[$candidate]) && $row[$candidate] !== null && $row[$candidate] !== '') {
-            return $row[$candidate];
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminBookingsQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
         }
-    }
 
-    return $default;
+        $columns = array();
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            if (!empty($row['name'])) {
+                $columns[] = (string) $row['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
 }
 
-function bookingBaseTable(PDO $pdo)
+function ddAdminBookingsFirstExistingColumn(PDO $pdo, string $table, array $candidates): ?string
 {
-    foreach (array('bookings', 'walks') as $candidate) {
-        if (hasTable($pdo, $candidate)) {
+    $columns = ddAdminBookingsGetTableColumns($pdo, $table);
+
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
             return $candidate;
         }
     }
@@ -376,16 +222,18 @@ function bookingBaseTable(PDO $pdo)
     return null;
 }
 
-function buildNameFromParts(array $row)
+function ddAdminBookingsValueFromRow(array $row, array $candidates, $default = '')
 {
-    $first = trim((string) valueFromRow($row, array('first_name', 'firstname', 'client_first_name', 'owner_first_name'), ''));
-    $last = trim((string) valueFromRow($row, array('last_name', 'lastname', 'client_last_name', 'owner_last_name'), ''));
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
+            return $row[$candidate];
+        }
+    }
 
-    $full = trim($first . ' ' . $last);
-    return $full !== '' ? $full : '';
+    return $default;
 }
 
-function decodeJsonIfPossible($value)
+function ddAdminBookingsDecodeJsonIfPossible($value): ?array
 {
     if (!is_string($value) && !is_numeric($value)) {
         return null;
@@ -405,84 +253,25 @@ function decodeJsonIfPossible($value)
     return is_array($decoded) ? $decoded : null;
 }
 
-function looksLikeJsonObjectOrArray($value)
+function ddAdminBookingsCollectJsonSourcesFromRow(array $row): array
 {
-    if (!is_string($value) && !is_numeric($value)) {
-        return false;
+    $sources = array();
+
+    foreach ($row as $key => $value) {
+        if (!is_string($key)) {
+            continue;
+        }
+
+        $decoded = ddAdminBookingsDecodeJsonIfPossible($value);
+        if (is_array($decoded)) {
+            $sources[] = $decoded;
+        }
     }
 
-    $value = trim((string) $value);
-    if ($value === '') {
-        return false;
-    }
-
-    $firstChar = substr($value, 0, 1);
-    $lastChar = substr($value, -1);
-
-    if (!(($firstChar === '{' && $lastChar === '}') || ($firstChar === '[' && $lastChar === ']'))) {
-        return false;
-    }
-
-    json_decode($value, true);
-    return json_last_error() === JSON_ERROR_NONE;
+    return $sources;
 }
 
-function stripJsonLinesFromText($text)
-{
-    $text = trim((string) $text);
-    if ($text === '') {
-        return '';
-    }
-
-    $lines = preg_split("/\r\n|\n|\r/", $text);
-    $cleanLines = array();
-
-    foreach ($lines as $line) {
-        $trimmed = trim((string) $line);
-
-        if ($trimmed === '') {
-            continue;
-        }
-
-        if (looksLikeJsonObjectOrArray($trimmed)) {
-            continue;
-        }
-
-        $cleanLines[] = rtrim((string) $line);
-    }
-
-    return trim(implode("\n", $cleanLines));
-}
-
-function cleanDisplayNotesText($text)
-{
-    $text = stripJsonLinesFromText($text);
-    if ($text === '') {
-        return '';
-    }
-
-    $lines = preg_split("/\r\n|\n|\r/", $text);
-    $cleanLines = array();
-
-    foreach ($lines as $line) {
-        $trimmed = trim((string) $line);
-        if ($trimmed === '') {
-            continue;
-        }
-
-        $lower = strtolower($trimmed);
-
-        if ($lower === 'booking details:' || $lower === 'booking details') {
-            continue;
-        }
-
-        $cleanLines[] = trim((string) $line);
-    }
-
-    return trim(implode("\n", $cleanLines));
-}
-
-function extractNestedScalar(array $data, array $paths)
+function ddAdminBookingsExtractNestedScalar(array $data, array $paths): string
 {
     foreach ($paths as $path) {
         $parts = explode('.', $path);
@@ -509,32 +298,31 @@ function extractNestedScalar(array $data, array $paths)
     return '';
 }
 
-function collectJsonSourcesFromRow(array $row)
+function ddAdminBookingsBuildNameFromParts(array $row): string
 {
-    $sources = array();
+    $first = trim((string) ddAdminBookingsValueFromRow(
+        $row,
+        array('first_name', 'firstname', 'client_first_name', 'owner_first_name'),
+        ''
+    ));
+    $last = trim((string) ddAdminBookingsValueFromRow(
+        $row,
+        array('last_name', 'lastname', 'client_last_name', 'owner_last_name'),
+        ''
+    ));
 
-    foreach ($row as $key => $value) {
-        if (!is_string($key)) {
-            continue;
-        }
-
-        $decoded = decodeJsonIfPossible($value);
-        if (is_array($decoded)) {
-            $sources[] = $decoded;
-        }
-    }
-
-    return $sources;
+    $full = trim($first . ' ' . $last);
+    return $full !== '' ? $full : '';
 }
 
-function extractDisplayNotesFromSources(array $jsonSources, $rawNotes)
+function ddAdminBookingsExtractDisplayNotes(array $jsonSources, $rawNotes): string
 {
     $rawNotes = trim((string) $rawNotes);
 
     if ($rawNotes !== '') {
-        $cleanRawNotes = cleanDisplayNotesText($rawNotes);
-        if ($cleanRawNotes !== '') {
-            return $cleanRawNotes;
+        $decodedRawNotes = ddAdminBookingsDecodeJsonIfPossible($rawNotes);
+        if (!is_array($decodedRawNotes)) {
+            return $rawNotes;
         }
     }
 
@@ -552,10 +340,10 @@ function extractDisplayNotesFromSources(array $jsonSources, $rawNotes)
             'details',
             'message',
             'booking_details',
-            'care_instructions'
+            'care_instructions',
         ) as $key) {
             if (isset($json[$key]) && is_scalar($json[$key])) {
-                $text = cleanDisplayNotesText((string) $json[$key]);
+                $text = trim((string) $json[$key]);
                 if ($text !== '') {
                     $parts[] = $text;
                 }
@@ -568,26 +356,24 @@ function extractDisplayNotesFromSources(array $jsonSources, $rawNotes)
     return empty($parts) ? '' : implode("\n", $parts);
 }
 
-function lookupRelatedName(PDO $pdo, $table, $idValue, array $idCandidates, array $nameCandidates)
+function ddAdminBookingsLookupRelatedName(PDO $pdo, string $table, $idValue, array $idCandidates, array $nameCandidates): string
 {
-    if ($idValue === null || $idValue === '' || !hasTable($pdo, $table)) {
+    if ($idValue === null || $idValue === '' || !ddAdminBookingsTableExists($pdo, $table)) {
         return '';
     }
 
-    $idColumn = firstExistingColumn($pdo, $table, $idCandidates);
-    $nameColumn = firstExistingColumn($pdo, $table, $nameCandidates);
+    $idColumn = ddAdminBookingsFirstExistingColumn($pdo, $table, $idCandidates);
+    $nameColumn = ddAdminBookingsFirstExistingColumn($pdo, $table, $nameCandidates);
 
     if ($idColumn === null || $nameColumn === null) {
         return '';
     }
 
-    $safeTable = '"' . str_replace('"', '""', $table) . '"';
-    $safeIdColumn = '"' . str_replace('"', '""', $idColumn) . '"';
-    $safeNameColumn = '"' . str_replace('"', '""', $nameColumn) . '"';
-
-    $row = safeFetchOne(
+    $row = ddAdminBookingsSafeFetchOne(
         $pdo,
-        'SELECT ' . $safeNameColumn . ' AS resolved_name FROM ' . $safeTable . ' WHERE ' . $safeIdColumn . ' = :id LIMIT 1',
+        'SELECT ' . ddAdminBookingsQuoteIdentifier($nameColumn) . ' AS resolved_name'
+        . ' FROM ' . ddAdminBookingsQuoteIdentifier($table)
+        . ' WHERE ' . ddAdminBookingsQuoteIdentifier($idColumn) . ' = :id LIMIT 1',
         array(':id' => $idValue)
     );
 
@@ -601,73 +387,261 @@ function lookupRelatedName(PDO $pdo, $table, $idValue, array $idCandidates, arra
     return '';
 }
 
-function lookupRelatedFullName(PDO $pdo, $table, $idValue, array $idCandidates, array $fullNameCandidates, array $firstNameCandidates, array $lastNameCandidates)
-{
-    if ($idValue === null || $idValue === '' || !hasTable($pdo, $table)) {
+function ddAdminBookingsLookupRelatedFullName(
+    PDO $pdo,
+    string $table,
+    $idValue,
+    array $idCandidates,
+    array $fullNameCandidates,
+    array $firstNameCandidates,
+    array $lastNameCandidates
+): string {
+    if ($idValue === null || $idValue === '' || !ddAdminBookingsTableExists($pdo, $table)) {
         return '';
     }
 
-    $idColumn = firstExistingColumn($pdo, $table, $idCandidates);
+    $idColumn = ddAdminBookingsFirstExistingColumn($pdo, $table, $idCandidates);
     if ($idColumn === null) {
         return '';
     }
 
-    $fullNameColumn = firstExistingColumn($pdo, $table, $fullNameCandidates);
-    $firstNameColumn = firstExistingColumn($pdo, $table, $firstNameCandidates);
-    $lastNameColumn = firstExistingColumn($pdo, $table, $lastNameCandidates);
+    $fullNameColumn = ddAdminBookingsFirstExistingColumn($pdo, $table, $fullNameCandidates);
+    $firstNameColumn = ddAdminBookingsFirstExistingColumn($pdo, $table, $firstNameCandidates);
+    $lastNameColumn = ddAdminBookingsFirstExistingColumn($pdo, $table, $lastNameCandidates);
 
-    if ($fullNameColumn === null && $firstNameColumn === null && $lastNameColumn === null) {
+    $selectParts = array();
+    if ($fullNameColumn !== null) {
+        $selectParts[] = ddAdminBookingsQuoteIdentifier($fullNameColumn) . ' AS full_name_value';
+    }
+    if ($firstNameColumn !== null) {
+        $selectParts[] = ddAdminBookingsQuoteIdentifier($firstNameColumn) . ' AS first_name_value';
+    }
+    if ($lastNameColumn !== null) {
+        $selectParts[] = ddAdminBookingsQuoteIdentifier($lastNameColumn) . ' AS last_name_value';
+    }
+
+    if (empty($selectParts)) {
         return '';
     }
 
-    $selectParts = array();
-
-    if ($fullNameColumn !== null) {
-        $selectParts[] = '"' . str_replace('"', '""', $fullNameColumn) . '" AS full_name';
-    } else {
-        $selectParts[] = "'' AS full_name";
-    }
-
-    if ($firstNameColumn !== null) {
-        $selectParts[] = '"' . str_replace('"', '""', $firstNameColumn) . '" AS first_name';
-    } else {
-        $selectParts[] = "'' AS first_name";
-    }
-
-    if ($lastNameColumn !== null) {
-        $selectParts[] = '"' . str_replace('"', '""', $lastNameColumn) . '" AS last_name';
-    } else {
-        $selectParts[] = "'' AS last_name";
-    }
-
-    $safeTable = '"' . str_replace('"', '""', $table) . '"';
-    $safeIdColumn = '"' . str_replace('"', '""', $idColumn) . '"';
-
-    $row = safeFetchOne(
+    $row = ddAdminBookingsSafeFetchOne(
         $pdo,
-        'SELECT ' . implode(', ', $selectParts) . ' FROM ' . $safeTable . ' WHERE ' . $safeIdColumn . ' = :id LIMIT 1',
+        'SELECT ' . implode(', ', $selectParts)
+        . ' FROM ' . ddAdminBookingsQuoteIdentifier($table)
+        . ' WHERE ' . ddAdminBookingsQuoteIdentifier($idColumn) . ' = :id LIMIT 1',
         array(':id' => $idValue)
     );
 
-    if (!$row) {
+    if ($row === null) {
         return '';
     }
 
-    $fullName = trim((string) ($row['full_name'] ?? ''));
-    if ($fullName !== '') {
-        return $fullName;
+    if (isset($row['full_name_value']) && trim((string) $row['full_name_value']) !== '') {
+        return trim((string) $row['full_name_value']);
     }
 
-    $firstName = trim((string) ($row['first_name'] ?? ''));
-    $lastName = trim((string) ($row['last_name'] ?? ''));
-    $combined = trim($firstName . ' ' . $lastName);
+    $first = trim((string) ($row['first_name_value'] ?? ''));
+    $last = trim((string) ($row['last_name_value'] ?? ''));
+    $full = trim($first . ' ' . $last);
 
-    return $combined !== '' ? $combined : '';
+    return $full !== '' ? $full : '';
 }
 
-function resolveMemberClientName(PDO $pdo, array $row, array $jsonSources)
+function ddAdminBookingsNormalizeServiceType($type): string
 {
-    $clientName = (string) valueFromRow(
+    $type = strtolower(trim((string) $type));
+
+    if ($type === '') {
+        return 'service';
+    }
+    if (strpos($type, 'walk') !== false) {
+        return 'walk';
+    }
+    if (strpos($type, 'board') !== false) {
+        return 'boarding';
+    }
+    if (strpos($type, 'daycare') !== false || strpos($type, 'day care') !== false) {
+        return 'daycare';
+    }
+    if (strpos($type, 'sit') !== false) {
+        return 'sitting';
+    }
+    if (strpos($type, 'drop') !== false) {
+        return 'drop-in';
+    }
+
+    return $type;
+}
+
+function ddAdminBookingsServiceDisplayName($type): string
+{
+    $type = ddAdminBookingsNormalizeServiceType($type);
+
+    if ($type === 'drop-in') {
+        return 'Drop-In';
+    }
+
+    return ucfirst(str_replace('_', ' ', $type));
+}
+
+function ddAdminBookingsNormalizeStatus($status): string
+{
+    $status = strtolower(trim((string) $status));
+
+    if ($status === 'new' || $status === 'open' || $status === 'unassigned') {
+        return 'available';
+    }
+    if ($status === 'assigned' || $status === 'confirmed' || $status === 'accepted' || $status === 'approved') {
+        return 'accepted';
+    }
+    if ($status === 'active' || $status === 'walking' || $status === 'started' || $status === 'in progress') {
+        return 'in_progress';
+    }
+    if ($status === 'done' || $status === 'finished' || $status === 'closed' || $status === 'complete') {
+        return 'completed';
+    }
+    if ($status === 'canceled' || $status === 'cancelled' || $status === 'void' || $status === 'rejected') {
+        return 'cancelled';
+    }
+
+    return $status !== '' ? $status : 'pending';
+}
+
+function ddAdminBookingsNormalizePublicStatus($status): string
+{
+    $status = strtolower(trim((string) $status));
+    $allowed = array('new', 'reviewed', 'confirmed', 'completed', 'cancelled');
+
+    if (in_array($status, $allowed, true)) {
+        return $status;
+    }
+
+    return $status !== '' ? $status : 'new';
+}
+
+function ddAdminBookingsStatusBadgeClass($status): string
+{
+    $status = strtolower(trim((string) $status));
+
+    $map = array(
+        'pending' => 'badge-pending',
+        'new' => 'badge-pending',
+        'available' => 'badge-available',
+        'accepted' => 'badge-accepted',
+        'approved' => 'badge-accepted',
+        'confirmed' => 'badge-accepted',
+        'reviewed' => 'badge-progress',
+        'in_progress' => 'badge-progress',
+        'completed' => 'badge-complete',
+        'complete' => 'badge-complete',
+        'cancelled' => 'badge-cancelled',
+        'canceled' => 'badge-cancelled',
+        'rejected' => 'badge-cancelled',
+    );
+
+    return $map[$status] ?? 'badge-pending';
+}
+
+function ddAdminBookingsFormatDateDisplay($date): string
+{
+    $date = trim((string) $date);
+    if ($date === '') {
+        return '—';
+    }
+
+    $ts = strtotime($date);
+    return $ts !== false ? date('F j, Y', $ts) : $date;
+}
+
+function ddAdminBookingsFormatTimeDisplay($time): string
+{
+    $time = trim((string) $time);
+    if ($time === '') {
+        return '—';
+    }
+
+    $ts = strtotime($time);
+    return $ts !== false ? date('g:i A', $ts) : $time;
+}
+
+function ddAdminBookingsFormatDateTimeDisplay($value): string
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '—';
+    }
+
+    try {
+        $dateTime = new DateTime($value, new DateTimeZone('UTC'));
+        $dateTime->setTimezone(new DateTimeZone('America/New_York'));
+        return $dateTime->format('F j, Y \a\t g:i A T');
+    } catch (Throwable $e) {
+        $ts = strtotime($value);
+        return $ts !== false ? date('F j, Y \a\t g:i A', $ts) : $value;
+    }
+}
+
+function ddAdminBookingsFormatMoney($value): string
+{
+    if ($value === null || $value === '') {
+        return '—';
+    }
+
+    if (is_numeric($value)) {
+        return '$' . number_format((float) $value, 2);
+    }
+
+    return '$' . (string) $value;
+}
+
+function ddAdminBookingsCountUnreadNotifications(PDO $pdo): int
+{
+    $table = 'notifications';
+    if (!ddAdminBookingsTableExists($pdo, $table)) {
+        return 0;
+    }
+
+    $statusCol = ddAdminBookingsFirstExistingColumn($pdo, $table, array('is_read', 'read_flag', 'status'));
+    if ($statusCol === null) {
+        $row = ddAdminBookingsSafeFetchOne(
+            $pdo,
+            'SELECT COUNT(*) AS count_value FROM ' . ddAdminBookingsQuoteIdentifier($table)
+        );
+        return (int) ($row['count_value'] ?? 0);
+    }
+
+    if ($statusCol === 'status') {
+        $row = ddAdminBookingsSafeFetchOne(
+            $pdo,
+            'SELECT COUNT(*) AS count_value FROM ' . ddAdminBookingsQuoteIdentifier($table)
+            . ' WHERE LOWER(COALESCE(' . ddAdminBookingsQuoteIdentifier($statusCol) . ", '')) IN ('unread', 'new')"
+        );
+        return (int) ($row['count_value'] ?? 0);
+    }
+
+    $row = ddAdminBookingsSafeFetchOne(
+        $pdo,
+        'SELECT COUNT(*) AS count_value FROM ' . ddAdminBookingsQuoteIdentifier($table)
+        . ' WHERE COALESCE(' . ddAdminBookingsQuoteIdentifier($statusCol) . ', 0) = 0'
+    );
+
+    return (int) ($row['count_value'] ?? 0);
+}
+
+function ddAdminBookingsBaseTable(PDO $pdo): ?string
+{
+    foreach (array('bookings', 'walks') as $candidate) {
+        if (ddAdminBookingsTableExists($pdo, $candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function ddAdminBookingsResolveMemberClientName(PDO $pdo, array $row, array $jsonSources): string
+{
+    $name = trim((string) ddAdminBookingsValueFromRow(
         $row,
         array(
             'client_name',
@@ -677,134 +651,143 @@ function resolveMemberClientName(PDO $pdo, array $row, array $jsonSources)
             'customer',
             'full_name',
             'name',
-            'member_full_name'
+            'display_name',
         ),
         ''
-    );
+    ));
 
-    if ($clientName === '') {
-        $clientName = buildNameFromParts($row);
+    if ($name === '') {
+        $name = ddAdminBookingsBuildNameFromParts($row);
     }
 
-    if ($clientName === '') {
+    if ($name === '') {
         foreach ($jsonSources as $json) {
-            $clientName = extractNestedScalar($json, array(
+            $name = ddAdminBookingsExtractNestedScalar($json, array(
                 'client_name',
                 'owner_name',
                 'member_name',
                 'customer_name',
                 'full_name',
                 'name',
+                'client.full_name',
                 'client.name',
-                'customer.name',
+                'owner.full_name',
                 'owner.name',
+                'member.full_name',
                 'member.name',
-                'user.name',
-                'member_full_name'
+                'customer.full_name',
+                'customer.name',
             ));
-
-            if ($clientName !== '') {
+            if ($name !== '') {
                 break;
             }
         }
     }
 
-    if ($clientName === '') {
-        $memberId = valueFromRow($row, array('member_id', 'memberID'), '');
-        if ($memberId !== '') {
-            $clientName = lookupRelatedFullName(
+    if ($name === '') {
+        $memberId = ddAdminBookingsValueFromRow($row, array('member_id', 'user_id', 'client_id'), null);
+
+        if ($memberId !== null && $memberId !== '') {
+            $name = ddAdminBookingsLookupRelatedFullName(
                 $pdo,
                 'members',
                 $memberId,
-                array('id', 'member_id'),
-                array('full_name', 'name', 'member_name', 'client_name'),
-                array('first_name', 'firstname'),
-                array('last_name', 'lastname')
+                array('id', 'member_id', 'user_id'),
+                array('full_name', 'name', 'client_name'),
+                array('first_name'),
+                array('last_name')
             );
         }
-    }
 
-    if ($clientName === '') {
-        $userId = valueFromRow($row, array('user_id', 'client_id', 'owner_id'), '');
-        if ($userId !== '') {
-            $clientName = lookupRelatedFullName(
+        if ($name === '' && $memberId !== null && $memberId !== '') {
+            $name = ddAdminBookingsLookupRelatedFullName(
                 $pdo,
                 'users',
-                $userId,
-                array('id', 'user_id'),
-                array('full_name', 'name', 'display_name', 'client_name'),
-                array('first_name', 'firstname'),
-                array('last_name', 'lastname')
+                $memberId,
+                array('id', 'user_id', 'member_id'),
+                array('full_name', 'name'),
+                array('first_name'),
+                array('last_name')
+            );
+        }
+
+        if ($name === '' && $memberId !== null && $memberId !== '') {
+            $name = ddAdminBookingsLookupRelatedFullName(
+                $pdo,
+                'client_profiles',
+                $memberId,
+                array('id', 'user_id', 'member_id', 'client_id'),
+                array('full_name', 'name', 'client_name'),
+                array('first_name'),
+                array('last_name')
             );
         }
     }
 
-    if ($clientName === '') {
-        foreach ($jsonSources as $json) {
-            $memberId = extractNestedScalar($json, array('member_id', 'member.id', 'booking.member_id'));
-            if ($memberId !== '') {
-                $clientName = lookupRelatedFullName(
-                    $pdo,
-                    'members',
-                    $memberId,
-                    array('id', 'member_id'),
-                    array('full_name', 'name', 'member_name', 'client_name'),
-                    array('first_name', 'firstname'),
-                    array('last_name', 'lastname')
-                );
-                if ($clientName !== '') {
-                    break;
-                }
-            }
+    return $name !== '' ? $name : 'Member Client';
+}
 
-            $userId = extractNestedScalar($json, array('user_id', 'user.id', 'client_id', 'owner_id'));
-            if ($userId !== '') {
-                $clientName = lookupRelatedFullName(
-                    $pdo,
-                    'users',
-                    $userId,
-                    array('id', 'user_id'),
-                    array('full_name', 'name', 'display_name', 'client_name'),
-                    array('first_name', 'firstname'),
-                    array('last_name', 'lastname')
-                );
-                if ($clientName !== '') {
-                    break;
-                }
+function ddAdminBookingsResolvePublicClientName(array $row, array $jsonSources): string
+{
+    $name = trim((string) ddAdminBookingsValueFromRow(
+        $row,
+        array(
+            'client_name',
+            'owner_name',
+            'full_name',
+            'name',
+            'customer_name',
+            'customer',
+        ),
+        ''
+    ));
+
+    if ($name === '') {
+        $name = ddAdminBookingsBuildNameFromParts($row);
+    }
+
+    if ($name === '') {
+        foreach ($jsonSources as $json) {
+            $name = ddAdminBookingsExtractNestedScalar($json, array(
+                'client_name',
+                'owner_name',
+                'full_name',
+                'name',
+                'customer_name',
+                'client.full_name',
+                'client.name',
+                'owner.full_name',
+                'owner.name',
+                'customer.full_name',
+                'customer.name',
+            ));
+            if ($name !== '') {
+                break;
             }
         }
     }
 
-    return $clientName !== '' ? $clientName : 'Member Client';
+    return $name !== '' ? $name : 'Public Client';
 }
 
-function resolveMemberPetName(PDO $pdo, array $row, array $jsonSources)
+function ddAdminBookingsResolvePetName(PDO $pdo, array $row, array $jsonSources): string
 {
-    $petName = (string) valueFromRow(
+    $petName = trim((string) ddAdminBookingsValueFromRow(
         $row,
-        array(
-            'pet_name',
-            'dog_name',
-            'pet',
-            'dog',
-            'dogs',
-            'pet_names'
-        ),
+        array('pet_name', 'dog_name', 'pet', 'dog'),
         ''
-    );
+    ));
 
     if ($petName === '') {
         foreach ($jsonSources as $json) {
-            $petName = extractNestedScalar($json, array(
+            $petName = ddAdminBookingsExtractNestedScalar($json, array(
                 'pet_name',
                 'dog_name',
                 'pet',
                 'dog',
                 'pet.name',
                 'dog.name',
-                'primary_pet_name'
             ));
-
             if ($petName !== '') {
                 break;
             }
@@ -812,572 +795,265 @@ function resolveMemberPetName(PDO $pdo, array $row, array $jsonSources)
     }
 
     if ($petName === '') {
-        $dogId = valueFromRow($row, array('dog_id', 'pet_id'), '');
-        if ($dogId !== '') {
-            $petName = lookupRelatedName(
+        $petId = ddAdminBookingsValueFromRow($row, array('pet_id', 'dog_id'), null);
+
+        if ($petId !== null && $petId !== '') {
+            $petName = ddAdminBookingsLookupRelatedName(
                 $pdo,
                 'dogs',
-                $dogId,
-                array('id', 'dog_id'),
+                $petId,
+                array('id', 'dog_id', 'pet_id'),
                 array('dog_name', 'pet_name', 'name')
             );
         }
-    }
 
-    if ($petName === '') {
-        $petId = valueFromRow($row, array('pet_id', 'dog_id'), '');
-        if ($petId !== '') {
-            $petName = lookupRelatedName(
+        if ($petName === '' && $petId !== null && $petId !== '') {
+            $petName = ddAdminBookingsLookupRelatedName(
                 $pdo,
                 'pets',
                 $petId,
-                array('id', 'pet_id'),
+                array('id', 'pet_id', 'dog_id'),
                 array('pet_name', 'dog_name', 'name')
             );
-        }
-    }
-
-    if ($petName === '') {
-        foreach ($jsonSources as $json) {
-            $dogId = extractNestedScalar($json, array('dog_id', 'pet_id', 'dog.id', 'pet.id'));
-            if ($dogId !== '') {
-                $petName = lookupRelatedName(
-                    $pdo,
-                    'dogs',
-                    $dogId,
-                    array('id', 'dog_id'),
-                    array('dog_name', 'pet_name', 'name')
-                );
-                if ($petName !== '') {
-                    break;
-                }
-            }
-
-            $petId = extractNestedScalar($json, array('pet_id', 'dog_id', 'pet.id', 'dog.id'));
-            if ($petId !== '') {
-                $petName = lookupRelatedName(
-                    $pdo,
-                    'pets',
-                    $petId,
-                    array('id', 'pet_id'),
-                    array('pet_name', 'dog_name', 'name')
-                );
-                if ($petName !== '') {
-                    break;
-                }
-            }
         }
     }
 
     return $petName;
 }
 
-function getMissingPaymentColumns(PDO $pdo, $table)
+function ddAdminBookingsResolveWorkerName(PDO $pdo, array $row): string
 {
-    if ($table === null || !hasTable($pdo, $table)) {
-        return array('payment_status', 'payment_method', 'payment_paid_at', 'payment_reference', 'payment_notes');
+    $name = trim((string) ddAdminBookingsValueFromRow(
+        $row,
+        array(
+            'walker_name',
+            'worker_name',
+            'assigned_walker_name',
+            'assigned_worker_name',
+        ),
+        ''
+    ));
+
+    if ($name !== '') {
+        return $name;
     }
 
-    $required = array('payment_status', 'payment_method', 'payment_paid_at', 'payment_reference', 'payment_notes');
-    $existing = getTableColumns($pdo, $table);
-    $missing = array();
+    $workerId = ddAdminBookingsValueFromRow($row, array('walker_id', 'worker_id', 'assigned_worker_id', 'assigned_walker_id'), null);
 
-    foreach ($required as $column) {
-        if (!in_array($column, $existing, true)) {
-            $missing[] = $column;
+    if ($workerId === null || $workerId === '') {
+        return '';
+    }
+
+    $name = ddAdminBookingsLookupRelatedFullName(
+        $pdo,
+        'walkers',
+        $workerId,
+        array('id', 'walker_id', 'worker_id'),
+        array('full_name', 'name', 'walker_name', 'worker_name'),
+        array('first_name'),
+        array('last_name')
+    );
+
+    if ($name === '') {
+        $name = ddAdminBookingsLookupRelatedFullName(
+            $pdo,
+            'workers',
+            $workerId,
+            array('id', 'worker_id', 'walker_id'),
+            array('full_name', 'name', 'worker_name', 'walker_name'),
+            array('first_name'),
+            array('last_name')
+        );
+    }
+
+    return $name;
+}
+
+function ddAdminBookingsBuildSortTimestamp(array $row): int
+{
+    foreach (array('created_at', 'updated_at', 'submitted_at', 'booking_date', 'service_date', 'date') as $key) {
+        if (!empty($row[$key])) {
+            $ts = strtotime((string) $row[$key]);
+            if ($ts !== false) {
+                return $ts;
+            }
         }
     }
 
-    return $missing;
+    return 0;
 }
 
-function paymentColumnsReady(PDO $pdo, $table)
+function ddAdminBookingsFetchMemberBookings(PDO $pdo): array
 {
-    return count(getMissingPaymentColumns($pdo, $table)) === 0;
-}
-
-function updateRowById(PDO $pdo, $table, $idColumn, $idValue, array $updates)
-{
-    if ($table === null || $idColumn === null || empty($updates)) {
-        return false;
-    }
-
-    $setParts = array();
-    $params = array(':row_id' => $idValue);
-
-    foreach ($updates as $column => $value) {
-        $setParts[] = '"' . str_replace('"', '""', $column) . '" = :' . $column;
-        $params[':' . $column] = $value;
-    }
-
-    $sql = 'UPDATE "' . str_replace('"', '""', $table) . '" SET ' . implode(', ', $setParts) . ' WHERE "' . str_replace('"', '""', $idColumn) . '" = :row_id';
-    $stmt = $pdo->prepare($sql);
-
-    return safeExecute($stmt, $params);
-}
-
-function fetchMemberBookings(PDO $pdo)
-{
-    $table = bookingBaseTable($pdo);
+    $table = ddAdminBookingsBaseTable($pdo);
     if ($table === null) {
         return array();
     }
 
-    $rows = safeFetchAll($pdo, 'SELECT * FROM "' . str_replace('"', '""', $table) . '" ORDER BY rowid DESC');
+    $rows = ddAdminBookingsSafeFetchAll(
+        $pdo,
+        'SELECT * FROM ' . ddAdminBookingsQuoteIdentifier($table) . ' ORDER BY rowid DESC'
+    );
+
     $normalized = array();
 
     foreach ($rows as $row) {
-        $jsonSources = collectJsonSourcesFromRow($row);
+        $jsonSources = ddAdminBookingsCollectJsonSourcesFromRow($row);
 
-        $clientName = resolveMemberClientName($pdo, $row, $jsonSources);
-        $petName = resolveMemberPetName($pdo, $row, $jsonSources);
+        $id = (int) ddAdminBookingsValueFromRow($row, array('id', 'booking_id'), 0);
+        $serviceType = (string) ddAdminBookingsValueFromRow($row, array('service_type', 'service'), '');
+        $status = ddAdminBookingsNormalizeStatus(ddAdminBookingsValueFromRow($row, array('status'), 'pending'));
+        $date = (string) ddAdminBookingsValueFromRow($row, array('date', 'booking_date', 'service_date'), '');
+        $time = (string) ddAdminBookingsValueFromRow($row, array('time', 'service_time', 'booking_time', 'start_time'), '');
+        $createdAt = (string) ddAdminBookingsValueFromRow($row, array('created_at', 'submitted_at', 'updated_at'), '');
+        $price = ddAdminBookingsValueFromRow($row, array('price', 'amount', 'total_price', 'total'), '');
+        $paymentStatus = (string) ddAdminBookingsValueFromRow($row, array('payment_status', 'paid_status'), '');
+        $paymentMethod = (string) ddAdminBookingsValueFromRow($row, array('payment_method'), '');
+        $notesRaw = (string) ddAdminBookingsValueFromRow($row, array('notes', 'special_instructions', 'instructions', 'care_notes', 'client_notes'), '');
 
-        $serviceType = (string) valueFromRow(
-            $row,
-            array(
-                'service_type',
-                'type',
-                'booking_type',
-                'category',
-                'service'
-            ),
-            ''
-        );
-
-        if ($serviceType === '') {
-            foreach ($jsonSources as $json) {
-                $serviceType = extractNestedScalar($json, array(
-                    'service_type',
-                    'type',
-                    'booking_type',
-                    'category',
-                    'service',
-                    'booking.service_type'
-                ));
-
-                if ($serviceType !== '') {
-                    break;
-                }
-            }
-        }
-
-        $serviceDate = (string) valueFromRow(
-            $row,
-            array(
-                'service_date',
-                'booking_date',
-                'walk_date',
-                'date',
-                'scheduled_date',
-                'start_date'
-            ),
-            ''
-        );
-
-        if ($serviceDate === '') {
-            foreach ($jsonSources as $json) {
-                $serviceDate = extractNestedScalar($json, array(
-                    'service_date',
-                    'booking_date',
-                    'walk_date',
-                    'date',
-                    'scheduled_date',
-                    'start_date',
-                    'booking.date'
-                ));
-
-                if ($serviceDate !== '') {
-                    break;
-                }
-            }
-        }
-
-        $serviceTime = (string) valueFromRow(
-            $row,
-            array(
-                'service_time',
-                'booking_time',
-                'walk_time',
-                'time',
-                'scheduled_time',
-                'start_time'
-            ),
-            ''
-        );
-
-        if ($serviceTime === '') {
-            foreach ($jsonSources as $json) {
-                $serviceTime = extractNestedScalar($json, array(
-                    'service_time',
-                    'booking_time',
-                    'walk_time',
-                    'time',
-                    'scheduled_time',
-                    'start_time',
-                    'booking.time'
-                ));
-
-                if ($serviceTime !== '') {
-                    break;
-                }
-            }
-        }
-
-        $rawNotes = (string) valueFromRow(
-            $row,
-            array(
-                'notes',
-                'special_instructions',
-                'instructions',
-                'care_notes',
-                'client_notes'
-            ),
-            ''
-        );
-
-        $cleanNotes = extractDisplayNotesFromSources($jsonSources, $rawNotes);
+        $clientName = ddAdminBookingsResolveMemberClientName($pdo, $row, $jsonSources);
+        $petName = ddAdminBookingsResolvePetName($pdo, $row, $jsonSources);
+        $workerName = ddAdminBookingsResolveWorkerName($pdo, $row);
+        $notes = ddAdminBookingsExtractDisplayNotes($jsonSources, $notesRaw);
 
         $normalized[] = array(
             'source' => 'member',
-            'id' => (int) valueFromRow($row, array('id', 'booking_id', 'walk_id'), 0),
+            'source_label' => 'Member',
+            'table' => $table,
+            'id' => $id,
+            'service_type' => ddAdminBookingsNormalizeServiceType($serviceType),
+            'service_label' => ddAdminBookingsServiceDisplayName($serviceType),
             'client_name' => $clientName,
-            'service_type' => normalizeServiceType($serviceType !== '' ? $serviceType : 'service'),
-            'service_date' => $serviceDate,
-            'service_time' => $serviceTime,
             'pet_name' => $petName,
-            'price' => valueFromRow($row, array('price', 'total_price', 'amount'), ''),
-            'status' => normalizeStatus((string) valueFromRow($row, array('status', 'booking_status', 'service_status', 'walk_status'), 'pending')),
-            'payment_status' => normalizePaymentStatus((string) valueFromRow($row, array('payment_status'), 'unpaid')),
-            'payment_method' => normalizePaymentMethod((string) valueFromRow($row, array('payment_method'), '')),
-            'payment_paid_at' => (string) valueFromRow($row, array('payment_paid_at'), ''),
-            'payment_reference' => (string) valueFromRow($row, array('payment_reference'), ''),
-            'payment_notes' => cleanDisplayNotesText((string) valueFromRow($row, array('payment_notes'), '')),
-            'notes' => $cleanNotes,
-            'created_at' => (string) valueFromRow($row, array('created_at'), ''),
-            'raw' => $row,
+            'worker_name' => $workerName,
+            'status' => $status,
+            'status_label' => ucwords(str_replace('_', ' ', $status)),
+            'date' => $date,
+            'time' => $time,
+            'created_at' => $createdAt,
+            'price' => $price,
+            'payment_status' => $paymentStatus,
+            'payment_method' => $paymentMethod,
+            'notes' => $notes,
+            'sort_timestamp' => ddAdminBookingsBuildSortTimestamp($row),
+            'view_url' => 'booking-details.php?id=' . $id,
+            'edit_url' => 'admin-edit-booking.php?id=' . $id,
+            'assign_url' => 'admin-assign-walker.php?id=' . $id,
+            'status_url' => 'admin-update-booking-status.php?id=' . $id,
         );
     }
 
     return $normalized;
 }
 
-function fetchPublicBookings(PDO $pdo)
+function ddAdminBookingsFetchPublicBookings(PDO $pdo): array
 {
-    if (!hasTable($pdo, 'non_member_bookings')) {
+    $table = 'non_member_bookings';
+    if (!ddAdminBookingsTableExists($pdo, $table)) {
         return array();
     }
 
-    $rows = safeFetchAll($pdo, 'SELECT * FROM non_member_bookings ORDER BY rowid DESC');
+    $rows = ddAdminBookingsSafeFetchAll(
+        $pdo,
+        'SELECT * FROM ' . ddAdminBookingsQuoteIdentifier($table) . ' ORDER BY rowid DESC'
+    );
+
     $normalized = array();
 
     foreach ($rows as $row) {
+        $jsonSources = ddAdminBookingsCollectJsonSourcesFromRow($row);
+
+        $id = (int) ddAdminBookingsValueFromRow($row, array('id', 'booking_id'), 0);
+        $serviceType = (string) ddAdminBookingsValueFromRow($row, array('service_type', 'service'), '');
+        $status = ddAdminBookingsNormalizePublicStatus(ddAdminBookingsValueFromRow($row, array('status'), 'new'));
+        $date = (string) ddAdminBookingsValueFromRow($row, array('date', 'booking_date', 'service_date'), '');
+        $time = (string) ddAdminBookingsValueFromRow($row, array('time', 'service_time', 'booking_time', 'start_time'), '');
+        $createdAt = (string) ddAdminBookingsValueFromRow($row, array('created_at', 'submitted_at', 'updated_at'), '');
+        $price = ddAdminBookingsValueFromRow($row, array('price', 'amount', 'total_price', 'total'), '');
+        $paymentStatus = (string) ddAdminBookingsValueFromRow($row, array('payment_status', 'paid_status'), '');
+        $paymentMethod = (string) ddAdminBookingsValueFromRow($row, array('payment_method'), '');
+        $notesRaw = (string) ddAdminBookingsValueFromRow($row, array('notes', 'special_instructions', 'instructions', 'care_notes', 'client_notes'), '');
+
+        $clientName = ddAdminBookingsResolvePublicClientName($row, $jsonSources);
+        $petName = ddAdminBookingsResolvePetName($pdo, $row, $jsonSources);
+        $notes = ddAdminBookingsExtractDisplayNotes($jsonSources, $notesRaw);
+
         $normalized[] = array(
             'source' => 'public',
-            'id' => (int) valueFromRow($row, array('id'), 0),
-            'client_name' => (string) valueFromRow($row, array('full_name', 'name'), 'Public Client'),
-            'email' => (string) valueFromRow($row, array('email'), ''),
-            'phone' => (string) valueFromRow($row, array('phone'), ''),
-            'service_type' => normalizeServiceType((string) valueFromRow($row, array('service_type', 'service'), 'service')),
-            'service_date' => (string) valueFromRow($row, array('service_date', 'date', 'date_start'), ''),
-            'service_time' => (string) valueFromRow($row, array('service_time', 'time', 'preferred_walk_time'), ''),
-            'pet_name' => (string) valueFromRow($row, array('pet_name', 'dog_name'), ''),
-            'pet_breed' => (string) valueFromRow($row, array('pet_breed', 'breed'), ''),
-            'pet_size' => (string) valueFromRow($row, array('pet_size', 'size', 'dog_size'), ''),
-            'price' => '',
-            'status' => normalizePublicStatus((string) valueFromRow($row, array('status'), 'new')),
-            'payment_status' => normalizePaymentStatus((string) valueFromRow($row, array('payment_status'), 'unpaid')),
-            'payment_method' => normalizePaymentMethod((string) valueFromRow($row, array('payment_method'), '')),
-            'payment_paid_at' => (string) valueFromRow($row, array('payment_paid_at'), ''),
-            'payment_reference' => (string) valueFromRow($row, array('payment_reference'), ''),
-            'payment_notes' => cleanDisplayNotesText((string) valueFromRow($row, array('payment_notes'), '')),
-            'notes' => cleanDisplayNotesText((string) valueFromRow($row, array('notes'), '')),
-            'created_at' => (string) valueFromRow($row, array('created_at'), ''),
-            'raw' => $row,
+            'source_label' => 'Public',
+            'table' => $table,
+            'id' => $id,
+            'service_type' => ddAdminBookingsNormalizeServiceType($serviceType),
+            'service_label' => ddAdminBookingsServiceDisplayName($serviceType),
+            'client_name' => $clientName,
+            'pet_name' => $petName,
+            'worker_name' => '',
+            'status' => $status,
+            'status_label' => ucwords(str_replace('_', ' ', $status)),
+            'date' => $date,
+            'time' => $time,
+            'created_at' => $createdAt,
+            'price' => $price,
+            'payment_status' => $paymentStatus,
+            'payment_method' => $paymentMethod,
+            'notes' => $notes,
+            'sort_timestamp' => ddAdminBookingsBuildSortTimestamp($row),
+            'view_url' => 'admin-non-member-booking-view.php?id=' . $id,
+            'edit_url' => 'admin-booking-update.php?id=' . $id,
+            'assign_url' => '',
+            'status_url' => 'admin-booking-update.php?id=' . $id,
         );
     }
 
     return $normalized;
 }
 
-function statusBadgeClass($status)
+function ddAdminBookingsSortNormalizedBookings(array $bookings): array
 {
-    if ($status === 'accepted' || $status === 'confirmed') {
-        return 'badge-accepted';
-    }
-    if ($status === 'in_progress' || $status === 'reviewed') {
-        return 'badge-progress';
-    }
-    if ($status === 'completed') {
-        return 'badge-complete';
-    }
-    if ($status === 'cancelled') {
-        return 'badge-cancelled';
-    }
-    if ($status === 'available' || $status === 'new') {
-        return 'badge-available';
-    }
+    usort($bookings, function (array $a, array $b): int {
+        $aTs = (int) ($a['sort_timestamp'] ?? 0);
+        $bTs = (int) ($b['sort_timestamp'] ?? 0);
 
-    return 'badge-pending';
+        if ($aTs === $bTs) {
+            return (int) ($b['id'] ?? 0) <=> (int) ($a['id'] ?? 0);
+        }
+
+        return $bTs <=> $aTs;
+    });
+
+    return $bookings;
 }
 
-function paymentBadgeClass($status)
-{
-    if ($status === 'paid') {
-        return 'badge-complete';
-    }
-    if ($status === 'pending' || $status === 'partially_paid') {
-        return 'badge-progress';
-    }
-    if ($status === 'refunded') {
-        return 'badge-cancelled';
-    }
-
-    return 'badge-pending';
-}
-
-$memberTable = bookingBaseTable($pdo);
-$memberTableIdColumn = $memberTable !== null ? firstExistingColumn($pdo, $memberTable, array('id', 'booking_id', 'walk_id')) : null;
-$memberStatusColumn = $memberTable !== null ? firstExistingColumn($pdo, $memberTable, array('status', 'booking_status', 'service_status', 'walk_status')) : null;
-$memberPaymentMissingColumns = getMissingPaymentColumns($pdo, $memberTable);
-$memberPaymentReady = count($memberPaymentMissingColumns) === 0;
-
-$publicTable = hasTable($pdo, 'non_member_bookings') ? 'non_member_bookings' : null;
-$publicTableIdColumn = $publicTable !== null ? firstExistingColumn($pdo, $publicTable, array('id')) : null;
-$publicPaymentMissingColumns = getMissingPaymentColumns($pdo, $publicTable);
-$publicPaymentReady = count($publicPaymentMissingColumns) === 0;
-
-$flash = isset($_SESSION['admin_bookings_flash']) ? (string) $_SESSION['admin_bookings_flash'] : '';
-$flashType = isset($_SESSION['admin_bookings_flash_type']) ? (string) $_SESSION['admin_bookings_flash_type'] : '';
-unset($_SESSION['admin_bookings_flash'], $_SESSION['admin_bookings_flash_type']);
-
-$view = isset($_GET['view']) ? strtolower(trim((string) $_GET['view'])) : 'all';
+$view = strtolower(trim((string) ($_GET['view'] ?? 'all')));
 if (!in_array($view, array('all', 'member', 'public'), true)) {
     $view = 'all';
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = isset($_POST['action']) ? (string) $_POST['action'] : '';
-    $postedView = isset($_POST['view']) ? strtolower(trim((string) $_POST['view'])) : $view;
+$memberBookings = ddAdminBookingsFetchMemberBookings($pdo);
+$publicBookings = ddAdminBookingsFetchPublicBookings($pdo);
 
-    if (!in_array($postedView, array('all', 'member', 'public'), true)) {
-        $postedView = 'all';
-    }
-
-    if ($action === 'update_member_booking_status') {
-        $bookingId = isset($_POST['booking_id']) ? (int) $_POST['booking_id'] : 0;
-        $status = normalizeStatus(isset($_POST['status']) ? $_POST['status'] : 'pending');
-
-        if ($bookingId <= 0 || $memberTable === null || $memberTableIdColumn === null || $memberStatusColumn === null) {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Member booking status could not be updated.';
-            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-        }
-
-        $ok = updateRowById(
-            $pdo,
-            $memberTable,
-            $memberTableIdColumn,
-            $bookingId,
-            array(
-                $memberStatusColumn => $status,
-            )
-        );
-
-        if ($ok) {
-            $_SESSION['admin_bookings_flash_type'] = 'success';
-            $_SESSION['admin_bookings_flash'] = 'Member booking status updated successfully.';
-        } else {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Could not update the member booking status.';
-        }
-
-        redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-    }
-
-    if ($action === 'update_public_booking_status') {
-        $bookingId = isset($_POST['booking_id']) ? (int) $_POST['booking_id'] : 0;
-        $status = normalizePublicStatus(isset($_POST['status']) ? $_POST['status'] : 'new');
-
-        if ($bookingId <= 0 || $publicTable === null || $publicTableIdColumn === null) {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Public booking status could not be updated.';
-            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-        }
-
-        $ok = updateRowById(
-            $pdo,
-            $publicTable,
-            $publicTableIdColumn,
-            $bookingId,
-            array(
-                'status' => $status,
-            )
-        );
-
-        if ($ok) {
-            $_SESSION['admin_bookings_flash_type'] = 'success';
-            $_SESSION['admin_bookings_flash'] = 'Public booking status updated successfully.';
-        } else {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Could not update the public booking status.';
-        }
-
-        redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-    }
-
-    if ($action === 'update_member_payment') {
-        $bookingId = isset($_POST['booking_id']) ? (int) $_POST['booking_id'] : 0;
-
-        if ($bookingId <= 0 || $memberTable === null || $memberTableIdColumn === null) {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Member payment details could not be updated.';
-            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-        }
-
-        if (!$memberPaymentReady) {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Member payment fields are not ready yet. Missing: ' . implode(', ', $memberPaymentMissingColumns);
-            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-        }
-
-        $paymentStatus = normalizePaymentStatus(isset($_POST['payment_status']) ? $_POST['payment_status'] : 'unpaid');
-        $paymentMethod = normalizePaymentMethod(isset($_POST['payment_method']) ? $_POST['payment_method'] : '');
-        $paymentPaidAtInput = isset($_POST['payment_paid_at']) ? (string) $_POST['payment_paid_at'] : '';
-        $paymentPaidAt = normalizeDateTimeLocalToUtc($paymentPaidAtInput);
-        $paymentReference = trim((string) ($_POST['payment_reference'] ?? ''));
-        $paymentNotes = trim((string) ($_POST['payment_notes'] ?? ''));
-
-        if ($paymentStatus === 'paid' && $paymentPaidAt === '') {
-            $paymentPaidAt = currentUtcTimestampFromNewYork();
-        }
-
-        $ok = updateRowById(
-            $pdo,
-            $memberTable,
-            $memberTableIdColumn,
-            $bookingId,
-            array(
-                'payment_status' => $paymentStatus,
-                'payment_method' => $paymentMethod,
-                'payment_paid_at' => $paymentPaidAt,
-                'payment_reference' => $paymentReference,
-                'payment_notes' => $paymentNotes,
-            )
-        );
-
-        if ($ok) {
-            $_SESSION['admin_bookings_flash_type'] = 'success';
-            $_SESSION['admin_bookings_flash'] = 'Member payment details updated successfully.';
-        } else {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Could not update the member payment details.';
-        }
-
-        redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-    }
-
-    if ($action === 'update_public_payment') {
-        $bookingId = isset($_POST['booking_id']) ? (int) $_POST['booking_id'] : 0;
-
-        if ($bookingId <= 0 || $publicTable === null || $publicTableIdColumn === null) {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Public payment details could not be updated.';
-            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-        }
-
-        if (!$publicPaymentReady) {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Public payment fields are not ready yet. Missing: ' . implode(', ', $publicPaymentMissingColumns);
-            redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-        }
-
-        $paymentStatus = normalizePaymentStatus(isset($_POST['payment_status']) ? $_POST['payment_status'] : 'unpaid');
-        $paymentMethod = normalizePaymentMethod(isset($_POST['payment_method']) ? $_POST['payment_method'] : '');
-        $paymentPaidAtInput = isset($_POST['payment_paid_at']) ? (string) $_POST['payment_paid_at'] : '';
-        $paymentPaidAt = normalizeDateTimeLocalToUtc($paymentPaidAtInput);
-        $paymentReference = trim((string) ($_POST['payment_reference'] ?? ''));
-        $paymentNotes = trim((string) ($_POST['payment_notes'] ?? ''));
-
-        if ($paymentStatus === 'paid' && $paymentPaidAt === '') {
-            $paymentPaidAt = currentUtcTimestampFromNewYork();
-        }
-
-        $ok = updateRowById(
-            $pdo,
-            $publicTable,
-            $publicTableIdColumn,
-            $bookingId,
-            array(
-                'payment_status' => $paymentStatus,
-                'payment_method' => $paymentMethod,
-                'payment_paid_at' => $paymentPaidAt,
-                'payment_reference' => $paymentReference,
-                'payment_notes' => $paymentNotes,
-            )
-        );
-
-        if ($ok) {
-            $_SESSION['admin_bookings_flash_type'] = 'success';
-            $_SESSION['admin_bookings_flash'] = 'Public payment details updated successfully.';
-        } else {
-            $_SESSION['admin_bookings_flash_type'] = 'error';
-            $_SESSION['admin_bookings_flash'] = 'Could not update the public payment details.';
-        }
-
-        redirectTo('admin-bookings.php?view=' . urlencode($postedView));
-    }
-}
-
-$memberBookings = fetchMemberBookings($pdo);
-$publicBookings = fetchPublicBookings($pdo);
-
-$allBookings = array_merge($memberBookings, $publicBookings);
-
-usort($allBookings, function ($a, $b) {
-    $aDate = trim((isset($a['created_at']) ? $a['created_at'] : '') . ' ' . (isset($a['service_date']) ? $a['service_date'] : ''));
-    $bDate = trim((isset($b['created_at']) ? $b['created_at'] : '') . ' ' . (isset($b['service_date']) ? $b['service_date'] : ''));
-
-    $aTs = strtotime($aDate);
-    $bTs = strtotime($bDate);
-
-    if ($aTs === false) {
-        $aTs = 0;
-    }
-    if ($bTs === false) {
-        $bTs = 0;
-    }
-
-    if ($aTs === $bTs) {
-        return 0;
-    }
-
-    return $aTs > $bTs ? -1 : 1;
-});
-
-$displayBookings = $allBookings;
-if ($view === 'member') {
-    $displayBookings = $memberBookings;
-} elseif ($view === 'public') {
-    $displayBookings = $publicBookings;
-}
-
-$totalCount = count($allBookings);
 $memberCount = count($memberBookings);
 $publicCount = count($publicBookings);
-
+$totalCount = $memberCount + $publicCount;
 $newPublicCount = 0;
+
 foreach ($publicBookings as $booking) {
-    if ($booking['status'] === 'new') {
+    if (($booking['status'] ?? '') === 'new') {
         $newPublicCount++;
     }
 }
 
-$paidCount = 0;
-foreach ($allBookings as $booking) {
-    if (($booking['payment_status'] ?? '') === 'paid') {
-        $paidCount++;
-    }
+$displayBookings = array();
+if ($view === 'member') {
+    $displayBookings = $memberBookings;
+} elseif ($view === 'public') {
+    $displayBookings = $publicBookings;
+} else {
+    $displayBookings = array_merge($memberBookings, $publicBookings);
 }
+
+$displayBookings = ddAdminBookingsSortNormalizedBookings($displayBookings);
+$unreadNotifications = ddAdminBookingsCountUnreadNotifications($pdo);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -1385,7 +1061,7 @@ foreach ($allBookings as $booking) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Bookings | Doggie Dorian’s</title>
-    <meta name="description" content="Manage member and non-member bookings.">
+    <meta name="description" content="Doggie Dorian’s admin bookings control panel.">
     <style>
         * { box-sizing: border-box; }
 
@@ -1396,12 +1072,15 @@ foreach ($allBookings as $booking) {
             font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
-        a { color: inherit; text-decoration: none; }
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
 
         .page {
-            max-width: 1380px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 28px 18px 80px;
+            padding: 30px;
         }
 
         .topbar {
@@ -1410,18 +1089,19 @@ foreach ($allBookings as $booking) {
             align-items: center;
             gap: 16px;
             flex-wrap: wrap;
-            margin-bottom: 22px;
+            margin-bottom: 24px;
         }
 
         .brand {
-            font-size: 1.5rem;
             font-weight: 900;
-            letter-spacing: .04em;
+            font-size: 22px;
+            letter-spacing: .03em;
+            color: #fff;
         }
 
         .top-links {
             display: flex;
-            gap: 12px;
+            gap: 10px;
             flex-wrap: wrap;
         }
 
@@ -1430,21 +1110,22 @@ foreach ($allBookings as $booking) {
             border-radius: 999px;
             background: rgba(255,255,255,0.06);
             border: 1px solid rgba(255,255,255,0.08);
+            color: #fff;
             font-weight: 700;
         }
 
         .hero {
             display: grid;
-            grid-template-columns: 1.08fr 0.92fr;
-            gap: 20px;
+            grid-template-columns: 1.1fr 0.9fr;
+            gap: 18px;
             margin-bottom: 22px;
         }
 
         .card {
             background: linear-gradient(180deg, rgba(255,255,255,0.065), rgba(255,255,255,0.03));
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 24px;
             padding: 22px;
+            border-radius: 24px;
+            border: 1px solid rgba(255,255,255,0.08);
             box-shadow: 0 20px 60px rgba(0,0,0,0.28);
         }
 
@@ -1465,157 +1146,119 @@ foreach ($allBookings as $booking) {
             margin: 0 0 10px;
             font-size: 2rem;
             line-height: 1.08;
+            color: #fff;
         }
 
         h2 {
             margin: 0 0 10px;
-            font-size: 1.25rem;
-        }
-
-        h3 {
-            margin: 0 0 10px;
-            font-size: 1rem;
+            font-size: 1.2rem;
+            color: #fff;
         }
 
         .sub {
-            color: rgba(244,241,234,0.72);
-            line-height: 1.6;
-        }
-
-        .flash {
-            margin-bottom: 18px;
-            padding: 14px 18px;
-            border-radius: 16px;
-            font-weight: 700;
-        }
-
-        .flash-success {
-            background: rgba(125,206,141,0.14);
-            border: 1px solid rgba(125,206,141,0.30);
-            color: #d7f1dd;
-        }
-
-        .flash-error {
-            background: rgba(214,123,123,0.14);
-            border: 1px solid rgba(214,123,123,0.30);
-            color: #ffd5d5;
-        }
-
-        .notice {
-            margin-top: 14px;
-            padding: 14px 16px;
-            border-radius: 16px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08);
-            color: rgba(244,241,234,0.84);
-            line-height: 1.55;
-        }
-
-        .notice strong {
-            color: #f3e5c7;
+            color: rgba(244,241,234,0.76);
+            line-height: 1.65;
         }
 
         .stats {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 12px;
-            margin-top: 18px;
+            margin-top: 20px;
         }
 
         .stat {
-            padding: 16px;
-            border-radius: 18px;
             background: rgba(255,255,255,0.04);
             border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 20px;
+            padding: 16px;
         }
 
         .stat-label {
-            color: rgba(244,241,234,0.56);
+            color: rgba(244,241,234,0.64);
             text-transform: uppercase;
-            letter-spacing: .12em;
-            font-size: .73rem;
-            font-weight: 800;
+            letter-spacing: .08em;
+            font-size: 12px;
             margin-bottom: 8px;
         }
 
         .stat-value {
-            font-size: 1.3rem;
+            font-size: 28px;
             font-weight: 900;
+            color: #fff;
         }
 
         .filter-row {
             display: flex;
-            gap: 10px;
             flex-wrap: wrap;
+            gap: 10px;
             margin-top: 18px;
         }
 
         .filter-pill {
             padding: 10px 14px;
             border-radius: 999px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.08);
-            font-size: .9rem;
-            font-weight: 700;
+            font-weight: 800;
+            border: 1px solid rgba(255,255,255,0.10);
+            background: rgba(255,255,255,0.05);
+            color: rgba(255,255,255,0.86);
         }
 
         .filter-pill.active {
-            background: rgba(198,178,139,0.16);
-            border-color: rgba(198,178,139,0.32);
-            color: #f3e5c7;
+            background: linear-gradient(135deg, #e2c48d, #b9975b);
+            color: #000;
+            border-color: transparent;
+        }
+
+        .meta-strip {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+
+        .meta-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 999px;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: rgba(255,255,255,0.88);
+            font-size: .88rem;
+            font-weight: 700;
         }
 
         .booking-list {
             display: grid;
             gap: 16px;
-            margin-top: 22px;
         }
 
         .booking-card {
-            display: grid;
-            gap: 18px;
+            padding: 22px;
         }
 
         .booking-top {
             display: flex;
             justify-content: space-between;
-            gap: 12px;
+            gap: 16px;
             flex-wrap: wrap;
-            align-items: center;
+            align-items: flex-start;
+            margin-bottom: 16px;
         }
 
         .booking-title {
             font-size: 1.08rem;
             font-weight: 900;
+            line-height: 1.4;
+            color: #fff;
         }
 
-        .pill-row {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .pill {
-            display: inline-flex;
-            align-items: center;
-            padding: 7px 11px;
-            border-radius: 999px;
-            font-size: .78rem;
-            font-weight: 800;
-            letter-spacing: .03em;
-            text-transform: uppercase;
-            background: rgba(255,255,255,0.08);
-            color: #f5f3ef;
-        }
-
-        .pill.member {
-            background: rgba(109,174,255,0.16);
-            color: #d0e4ff;
-        }
-
-        .pill.public {
-            background: rgba(198,178,139,0.16);
-            color: #f3e5c7;
+        .booking-subtitle {
+            margin-top: 6px;
+            color: rgba(244,241,234,0.66);
+            font-size: .92rem;
         }
 
         .badge {
@@ -1627,6 +1270,7 @@ foreach ($allBookings as $booking) {
             font-weight: 900;
             letter-spacing: .02em;
             text-transform: capitalize;
+            white-space: nowrap;
         }
 
         .badge-pending { background: rgba(255,255,255,0.08); color: #f5f3ef; }
@@ -1636,170 +1280,121 @@ foreach ($allBookings as $booking) {
         .badge-complete { background: rgba(125,206,141,0.18); color: #d7f1dd; }
         .badge-cancelled { background: rgba(214,123,123,0.18); color: #ffd5d5; }
 
-        .meta-grid {
+        .source-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: rgba(255,255,255,0.86);
+            font-size: .78rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+        }
+
+        .booking-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 12px;
+            margin-bottom: 16px;
         }
 
-        .meta-box {
-            padding: 14px;
-            border-radius: 16px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .meta-label {
-            color: rgba(244,241,234,0.56);
-            text-transform: uppercase;
-            letter-spacing: .12em;
-            font-size: .73rem;
-            font-weight: 800;
-            margin-bottom: 6px;
-        }
-
-        .meta-value {
-            font-size: .95rem;
-            font-weight: 700;
-            line-height: 1.5;
-        }
-
-        .detail-copy {
-            color: rgba(244,241,234,0.74);
-            line-height: 1.65;
-            white-space: normal;
-        }
-
-        .detail-copy strong {
-            display: block;
-            margin-bottom: 6px;
-        }
-
-        .admin-grid {
-            display: grid;
-            grid-template-columns: 1fr 1.2fr;
-            gap: 16px;
-        }
-
-        .admin-panel {
-            padding: 18px;
+        .info-box {
             border-radius: 18px;
             background: rgba(255,255,255,0.04);
             border: 1px solid rgba(255,255,255,0.06);
+            padding: 14px;
         }
 
-        .panel-copy {
-            color: rgba(244,241,234,0.65);
-            line-height: 1.55;
-            margin-bottom: 12px;
+        .info-label {
+            color: rgba(244,241,234,0.58);
+            font-size: .78rem;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            margin-bottom: 7px;
         }
 
-        form {
-            display: grid;
-            gap: 12px;
-        }
-
-        .form-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
-        }
-
-        label {
-            display: block;
-            font-size: 13px;
-            font-weight: 800;
-            margin-bottom: 8px;
-            color: rgba(244,241,234,0.78);
-        }
-
-        select,
-        input[type="text"],
-        input[type="datetime-local"],
-        textarea {
-            width: 100%;
-            border-radius: 14px;
-            border: 1px solid rgba(255,255,255,0.10);
-            background: rgba(0,0,0,0.26);
+        .info-value {
             color: #fff;
-            padding: 13px 14px;
-            font: inherit;
-            outline: none;
+            font-weight: 800;
+            line-height: 1.45;
+            word-break: break-word;
         }
 
-        textarea {
-            min-height: 110px;
-            resize: vertical;
+        .notes-box {
+            margin-top: 6px;
+            padding: 14px;
+            border-radius: 18px;
+            background: rgba(255,255,255,0.03);
+            border: 1px dashed rgba(255,255,255,0.12);
         }
 
-        .btn-row {
+        .notes-text {
+            color: rgba(244,241,234,0.78);
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
+        .action-row {
             display: flex;
-            gap: 10px;
             flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 16px;
         }
 
         .btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-height: 46px;
-            padding: 12px 18px;
-            border-radius: 14px;
-            font-size: .94rem;
+            min-height: 42px;
+            padding: 10px 14px;
+            border-radius: 12px;
             font-weight: 800;
-            transition: transform .15s ease;
-            border: none;
-            cursor: pointer;
-        }
-
-        .btn:hover {
-            transform: translateY(-1px);
+            border: 1px solid rgba(255,255,255,0.10);
+            background: rgba(255,255,255,0.05);
+            color: #fff;
         }
 
         .btn-gold {
             background: linear-gradient(135deg, #e2c48d, #b9975b);
-            color: #0b0b10;
-        }
-
-        .btn-light {
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.12);
-            color: #fff;
+            color: #000;
+            border-color: transparent;
         }
 
         .empty {
-            padding: 20px;
+            padding: 18px;
             border-radius: 18px;
-            background: rgba(255,255,255,0.03);
-            border: 1px dashed rgba(255,255,255,0.12);
-            color: rgba(244,241,234,0.64);
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: rgba(244,241,234,0.68);
         }
 
-        @media (max-width: 1100px) {
+        @media (max-width: 1180px) {
             .hero,
             .stats,
-            .meta-grid,
-            .admin-grid,
-            .form-grid {
-                grid-template-columns: 1fr;
+            .booking-grid {
+                grid-template-columns: 1fr 1fr;
             }
         }
 
-        @media (max-width: 640px) {
+        @media (max-width: 760px) {
+            .hero,
+            .stats,
+            .booking-grid {
+                grid-template-columns: 1fr;
+            }
+
             .page {
                 padding: 20px 12px 60px;
             }
 
             h1 {
-                font-size: 1.65rem;
+                font-size: 1.7rem;
             }
 
-            .card {
-                padding: 18px;
-                border-radius: 22px;
-            }
-
-            .btn-row {
+            .action-row {
                 flex-direction: column;
             }
 
@@ -1816,24 +1411,21 @@ foreach ($allBookings as $booking) {
 
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
+                <a class="top-link" href="admin-revenue.php">Revenue</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
-                <a class="top-link" href="admin-group-walk-applications.php">Group Walk Applications</a>
+                <a class="top-link" href="admin-members.php">Members</a>
+                <a class="top-link" href="admin-group-walk-applications.php">Group Walks</a>
                 <a class="top-link" href="logout.php">Logout</a>
             </div>
         </div>
-
-        <?php if ($flash !== ''): ?>
-            <div class="flash <?php echo $flashType === 'success' ? 'flash-success' : 'flash-error'; ?>">
-                <?php echo h($flash); ?>
-            </div>
-        <?php endif; ?>
 
         <section class="hero">
             <div class="card hero-primary">
                 <div class="eyebrow">Booking Control</div>
                 <h1>Admin Bookings</h1>
                 <div class="sub">
-                    Review both member and public booking activity from one dashboard while keeping booking status and payment status managed separately.
+                    Review both member and public booking activity from one launch-ready dashboard page.
                 </div>
 
                 <div class="stats">
@@ -1850,9 +1442,14 @@ foreach ($allBookings as $booking) {
                         <div class="stat-value"><?php echo (int) $publicCount; ?></div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Paid</div>
-                        <div class="stat-value"><?php echo (int) $paidCount; ?></div>
+                        <div class="stat-label">New Public</div>
+                        <div class="stat-value"><?php echo (int) $newPublicCount; ?></div>
                     </div>
+                </div>
+
+                <div class="meta-strip">
+                    <div class="meta-chip">Unread Notifications: <?php echo (int) $unreadNotifications; ?></div>
+                    <div class="meta-chip">Current View: <?php echo ddAdminBookingsH(ucfirst($view)); ?></div>
                 </div>
             </div>
 
@@ -1869,12 +1466,10 @@ foreach ($allBookings as $booking) {
                     <a class="filter-pill <?php echo $view === 'public' ? 'active' : ''; ?>" href="admin-bookings.php?view=public">Public</a>
                 </div>
 
-                <div class="notice">
-                    <strong>Member payment fields:</strong>
-                    <?php echo $memberPaymentReady ? 'Ready' : 'Missing columns: ' . h(implode(', ', $memberPaymentMissingColumns)); ?>
-                    <br>
-                    <strong>Public payment fields:</strong>
-                    <?php echo $publicPaymentReady ? 'Ready' : 'Missing columns: ' . h(implode(', ', $publicPaymentMissingColumns)); ?>
+                <div class="action-row" style="margin-top:18px;">
+                    <a class="btn btn-gold" href="admin-create-booking.php">Create Booking</a>
+                    <a class="btn" href="admin-walks.php">View Walks</a>
+                    <a class="btn" href="admin-non-member-bookings.php">Public Bookings Page</a>
                 </div>
             </div>
         </section>
@@ -1886,251 +1481,93 @@ foreach ($allBookings as $booking) {
                 </div>
             <?php else: ?>
                 <?php foreach ($displayBookings as $booking): ?>
-                    <?php
-                    $isMemberBooking = $booking['source'] === 'member';
-                    $paymentReadyForRow = $isMemberBooking ? $memberPaymentReady : $publicPaymentReady;
-                    ?>
                     <div class="card booking-card">
                         <div class="booking-top">
-                            <div class="booking-title">
-                                #<?php echo (int) $booking['id']; ?> · <?php echo h(serviceDisplayName($booking['service_type'])); ?> · <?php echo h($booking['client_name']); ?>
+                            <div>
+                                <div class="booking-title">
+                                    #<?php echo (int) $booking['id']; ?>
+                                    · <?php echo ddAdminBookingsH($booking['service_label']); ?>
+                                    · <?php echo ddAdminBookingsH($booking['client_name']); ?>
+                                </div>
+                                <div class="booking-subtitle">
+                                    <span class="source-badge"><?php echo ddAdminBookingsH($booking['source_label']); ?></span>
+                                    <?php if ($booking['pet_name'] !== ''): ?>
+                                        · Pet: <?php echo ddAdminBookingsH($booking['pet_name']); ?>
+                                    <?php endif; ?>
+                                    <?php if ($booking['worker_name'] !== ''): ?>
+                                        · Worker: <?php echo ddAdminBookingsH($booking['worker_name']); ?>
+                                    <?php endif; ?>
+                                </div>
                             </div>
 
-                            <div class="pill-row">
-                                <span class="pill <?php echo $isMemberBooking ? 'member' : 'public'; ?>">
-                                    <?php echo $isMemberBooking ? 'Member Booking' : 'Public Booking'; ?>
-                                </span>
-                                <span class="badge <?php echo h(statusBadgeClass($booking['status'])); ?>">
-                                    Booking: <?php echo h(ucwords(str_replace('_', ' ', $booking['status']))); ?>
-                                </span>
-                                <span class="badge <?php echo h(paymentBadgeClass($booking['payment_status'])); ?>">
-                                    Payment: <?php echo h(ucwords(str_replace('_', ' ', $booking['payment_status']))); ?>
-                                </span>
+                            <span class="badge <?php echo ddAdminBookingsH(ddAdminBookingsStatusBadgeClass($booking['status'])); ?>">
+                                <?php echo ddAdminBookingsH($booking['status_label']); ?>
+                            </span>
+                        </div>
+
+                        <div class="booking-grid">
+                            <div class="info-box">
+                                <div class="info-label">Service Date</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH(ddAdminBookingsFormatDateDisplay($booking['date'])); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Service Time</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH(ddAdminBookingsFormatTimeDisplay($booking['time'])); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Created</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH(ddAdminBookingsFormatDateTimeDisplay($booking['created_at'])); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Price</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH(ddAdminBookingsFormatMoney($booking['price'])); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Payment Status</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH($booking['payment_status'] !== '' ? $booking['payment_status'] : '—'); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Payment Method</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH($booking['payment_method'] !== '' ? $booking['payment_method'] : '—'); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Source Table</div>
+                                <div class="info-value"><?php echo ddAdminBookingsH($booking['table']); ?></div>
+                            </div>
+
+                            <div class="info-box">
+                                <div class="info-label">Booking ID</div>
+                                <div class="info-value"><?php echo (int) $booking['id']; ?></div>
                             </div>
                         </div>
 
-                        <div class="meta-grid">
-                            <div class="meta-box">
-                                <div class="meta-label">Service Date</div>
-                                <div class="meta-value"><?php echo h(formatDateDisplay($booking['service_date'])); ?></div>
+                        <?php if ($booking['notes'] !== ''): ?>
+                            <div class="notes-box">
+                                <div class="info-label">Notes</div>
+                                <div class="notes-text"><?php echo ddAdminBookingsH($booking['notes']); ?></div>
                             </div>
+                        <?php endif; ?>
 
-                            <div class="meta-box">
-                                <div class="meta-label">Service Time</div>
-                                <div class="meta-value"><?php echo h(formatTimeDisplay($booking['service_time'])); ?></div>
-                            </div>
+                        <div class="action-row">
+                            <a class="btn btn-gold" href="<?php echo ddAdminBookingsH($booking['view_url']); ?>">Open Booking</a>
 
-                            <div class="meta-box">
-                                <div class="meta-label">Pet</div>
-                                <div class="meta-value"><?php echo h($booking['pet_name'] !== '' ? $booking['pet_name'] : '—'); ?></div>
-                            </div>
-
-                            <div class="meta-box">
-                                <div class="meta-label">Created</div>
-                                <div class="meta-value"><?php echo h(formatDateTimeDisplay($booking['created_at'])); ?></div>
-                            </div>
-
-                            <?php if ($isMemberBooking): ?>
-                                <div class="meta-box">
-                                    <div class="meta-label">Price</div>
-                                    <div class="meta-value"><?php echo h(formatMoney($booking['price'])); ?></div>
-                                </div>
-                            <?php else: ?>
-                                <div class="meta-box">
-                                    <div class="meta-label">Email</div>
-                                    <div class="meta-value"><?php echo h(isset($booking['email']) ? $booking['email'] : '—'); ?></div>
-                                </div>
-
-                                <div class="meta-box">
-                                    <div class="meta-label">Phone</div>
-                                    <div class="meta-value"><?php echo h(isset($booking['phone']) ? $booking['phone'] : '—'); ?></div>
-                                </div>
-
-                                <div class="meta-box">
-                                    <div class="meta-label">Breed</div>
-                                    <div class="meta-value"><?php echo h(isset($booking['pet_breed']) ? $booking['pet_breed'] : '—'); ?></div>
-                                </div>
-
-                                <div class="meta-box">
-                                    <div class="meta-label">Size</div>
-                                    <div class="meta-value"><?php echo h(isset($booking['pet_size']) ? $booking['pet_size'] : '—'); ?></div>
-                                </div>
+                            <?php if ($booking['edit_url'] !== ''): ?>
+                                <a class="btn" href="<?php echo ddAdminBookingsH($booking['edit_url']); ?>">Edit Booking</a>
                             <?php endif; ?>
 
-                            <div class="meta-box">
-                                <div class="meta-label">Payment Method</div>
-                                <div class="meta-value"><?php echo h(paymentMethodDisplayName($booking['payment_method'])); ?></div>
-                            </div>
+                            <?php if ($booking['assign_url'] !== ''): ?>
+                                <a class="btn" href="<?php echo ddAdminBookingsH($booking['assign_url']); ?>">Assign Worker</a>
+                            <?php endif; ?>
 
-                            <div class="meta-box">
-                                <div class="meta-label">Paid At</div>
-                                <div class="meta-value"><?php echo h(formatDateTimeDisplay($booking['payment_paid_at'])); ?></div>
-                            </div>
-
-                            <div class="meta-box">
-                                <div class="meta-label">Reference</div>
-                                <div class="meta-value"><?php echo h(trim((string) $booking['payment_reference']) !== '' ? $booking['payment_reference'] : '—'); ?></div>
-                            </div>
-                        </div>
-
-                        <?php if (trim((string) $booking['notes']) !== ''): ?>
-                            <div class="detail-copy">
-                                <strong style="color:#f3e5c7;">Notes:</strong>
-                                <?php echo nl2br(h(trim((string) $booking['notes']))); ?>
-                            </div>
-                        <?php endif; ?>
-
-                        <?php if (trim((string) $booking['payment_notes']) !== ''): ?>
-                            <div class="detail-copy">
-                                <strong style="color:#f3e5c7;">Payment Notes:</strong>
-                                <?php echo nl2br(h(trim((string) $booking['payment_notes']))); ?>
-                            </div>
-                        <?php endif; ?>
-
-                        <div class="admin-grid">
-                            <div class="admin-panel">
-                                <div class="eyebrow">Booking Status</div>
-                                <h3><?php echo $isMemberBooking ? 'Update member booking status' : 'Update public booking status'; ?></h3>
-                                <div class="panel-copy">
-                                    Booking progress is managed separately from payment tracking.
-                                </div>
-
-                                <?php if ($isMemberBooking): ?>
-                                    <form method="post" action="admin-bookings.php">
-                                        <input type="hidden" name="action" value="update_member_booking_status">
-                                        <input type="hidden" name="booking_id" value="<?php echo (int) $booking['id']; ?>">
-                                        <input type="hidden" name="view" value="<?php echo h($view); ?>">
-
-                                        <div>
-                                            <label for="member_status_<?php echo (int) $booking['id']; ?>">Member Booking Status</label>
-                                            <select id="member_status_<?php echo (int) $booking['id']; ?>" name="status">
-                                                <option value="pending" <?php echo $booking['status'] === 'pending' ? 'selected' : ''; ?>>Pending</option>
-                                                <option value="accepted" <?php echo $booking['status'] === 'accepted' ? 'selected' : ''; ?>>Accepted</option>
-                                                <option value="in_progress" <?php echo $booking['status'] === 'in_progress' ? 'selected' : ''; ?>>In Progress</option>
-                                                <option value="completed" <?php echo $booking['status'] === 'completed' ? 'selected' : ''; ?>>Completed</option>
-                                                <option value="cancelled" <?php echo $booking['status'] === 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
-                                            </select>
-                                        </div>
-
-                                        <div class="btn-row">
-                                            <button type="submit" class="btn btn-gold">Save Booking Status</button>
-                                        </div>
-                                    </form>
-                                <?php else: ?>
-                                    <form method="post" action="admin-bookings.php">
-                                        <input type="hidden" name="action" value="update_public_booking_status">
-                                        <input type="hidden" name="booking_id" value="<?php echo (int) $booking['id']; ?>">
-                                        <input type="hidden" name="view" value="<?php echo h($view); ?>">
-
-                                        <div>
-                                            <label for="public_status_<?php echo (int) $booking['id']; ?>">Public Booking Status</label>
-                                            <select id="public_status_<?php echo (int) $booking['id']; ?>" name="status">
-                                                <option value="new" <?php echo $booking['status'] === 'new' ? 'selected' : ''; ?>>New</option>
-                                                <option value="reviewed" <?php echo $booking['status'] === 'reviewed' ? 'selected' : ''; ?>>Reviewed</option>
-                                                <option value="confirmed" <?php echo $booking['status'] === 'confirmed' ? 'selected' : ''; ?>>Confirmed</option>
-                                                <option value="completed" <?php echo $booking['status'] === 'completed' ? 'selected' : ''; ?>>Completed</option>
-                                                <option value="cancelled" <?php echo $booking['status'] === 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
-                                            </select>
-                                        </div>
-
-                                        <div class="btn-row">
-                                            <button type="submit" class="btn btn-gold">Save Booking Status</button>
-                                        </div>
-                                    </form>
-                                <?php endif; ?>
-                            </div>
-
-                            <div class="admin-panel">
-                                <div class="eyebrow">Payment Details</div>
-                                <h3><?php echo $isMemberBooking ? 'Manage member payment' : 'Manage public payment'; ?></h3>
-                                <div class="panel-copy">
-                                    Mark bookings paid manually for Stripe, Zelle, cash, Venmo, bank transfer, check, or other methods.
-                                </div>
-
-                                <?php if (!$paymentReadyForRow): ?>
-                                    <div class="notice" style="margin-top:0;">
-                                        Payment fields are not ready for this booking type yet. Add the missing database columns first.
-                                    </div>
-                                <?php else: ?>
-                                    <form method="post" action="admin-bookings.php">
-                                        <input type="hidden" name="action" value="<?php echo $isMemberBooking ? 'update_member_payment' : 'update_public_payment'; ?>">
-                                        <input type="hidden" name="booking_id" value="<?php echo (int) $booking['id']; ?>">
-                                        <input type="hidden" name="view" value="<?php echo h($view); ?>">
-
-                                        <div class="form-grid">
-                                            <div>
-                                                <label for="payment_status_<?php echo (int) $booking['id']; ?>">Payment Status</label>
-                                                <select id="payment_status_<?php echo (int) $booking['id']; ?>" name="payment_status">
-                                                    <option value="unpaid" <?php echo $booking['payment_status'] === 'unpaid' ? 'selected' : ''; ?>>Unpaid</option>
-                                                    <option value="pending" <?php echo $booking['payment_status'] === 'pending' ? 'selected' : ''; ?>>Pending</option>
-                                                    <option value="paid" <?php echo $booking['payment_status'] === 'paid' ? 'selected' : ''; ?>>Paid</option>
-                                                    <option value="partially_paid" <?php echo $booking['payment_status'] === 'partially_paid' ? 'selected' : ''; ?>>Partially Paid</option>
-                                                    <option value="refunded" <?php echo $booking['payment_status'] === 'refunded' ? 'selected' : ''; ?>>Refunded</option>
-                                                </select>
-                                            </div>
-
-                                            <div>
-                                                <label for="payment_method_<?php echo (int) $booking['id']; ?>">Payment Method</label>
-                                                <select id="payment_method_<?php echo (int) $booking['id']; ?>" name="payment_method">
-                                                    <option value="" <?php echo $booking['payment_method'] === '' ? 'selected' : ''; ?>>Select Method</option>
-                                                    <option value="stripe" <?php echo $booking['payment_method'] === 'stripe' ? 'selected' : ''; ?>>Stripe</option>
-                                                    <option value="zelle" <?php echo $booking['payment_method'] === 'zelle' ? 'selected' : ''; ?>>Zelle</option>
-                                                    <option value="cash" <?php echo $booking['payment_method'] === 'cash' ? 'selected' : ''; ?>>Cash</option>
-                                                    <option value="venmo" <?php echo $booking['payment_method'] === 'venmo' ? 'selected' : ''; ?>>Venmo</option>
-                                                    <option value="bank_transfer" <?php echo $booking['payment_method'] === 'bank_transfer' ? 'selected' : ''; ?>>Bank Transfer</option>
-                                                    <option value="check" <?php echo $booking['payment_method'] === 'check' ? 'selected' : ''; ?>>Check</option>
-                                                    <option value="other" <?php echo $booking['payment_method'] === 'other' ? 'selected' : ''; ?>>Other</option>
-                                                </select>
-                                            </div>
-
-                                            <div>
-                                                <label for="payment_paid_at_<?php echo (int) $booking['id']; ?>">Payment Paid At</label>
-                                                <input
-                                                    type="datetime-local"
-                                                    id="payment_paid_at_<?php echo (int) $booking['id']; ?>"
-                                                    name="payment_paid_at"
-                                                    value="<?php echo h(formatDateTimeLocalInput($booking['payment_paid_at'])); ?>"
-                                                >
-                                            </div>
-
-                                            <div>
-                                                <label for="payment_reference_<?php echo (int) $booking['id']; ?>">Payment Reference</label>
-                                                <input
-                                                    type="text"
-                                                    id="payment_reference_<?php echo (int) $booking['id']; ?>"
-                                                    name="payment_reference"
-                                                    value="<?php echo h($booking['payment_reference']); ?>"
-                                                    placeholder="Transaction ID, memo, check number, or note"
-                                                >
-                                            </div>
-                                        </div>
-
-                                        <div>
-                                            <label for="payment_notes_<?php echo (int) $booking['id']; ?>">Payment Notes</label>
-                                            <textarea
-                                                id="payment_notes_<?php echo (int) $booking['id']; ?>"
-                                                name="payment_notes"
-                                                placeholder="Internal payment notes"><?php echo h($booking['payment_notes']); ?></textarea>
-                                        </div>
-
-                                        <div class="btn-row">
-                                            <button type="submit" class="btn btn-gold">Save Payment Details</button>
-                                            <a class="btn btn-light" href="admin-dashboard.php">Back to Dashboard</a>
-                                        </div>
-                                    </form>
-
-                                    <?php if (!$isMemberBooking && isset($booking['email']) && trim((string) $booking['email']) !== ''): ?>
-                                        <form method="post" action="process-admin-non-member-booking-update.php" style="margin-top: 10px;">
-                                            <input type="hidden" name="action" value="send_email">
-                                            <input type="hidden" name="id" value="<?php echo (int) $booking['id']; ?>">
-                                            <input type="hidden" name="return_url" value="admin-bookings.php?view=<?php echo h($view); ?>">
-                                            <div class="btn-row">
-                                                <button type="submit" class="btn btn-light">Email Client</button>
-                                            </div>
-                                        </form>
-                                    <?php endif; ?>
-                                <?php endif; ?>
-                            </div>
+                            <?php if ($booking['status_url'] !== ''): ?>
+                                <a class="btn" href="<?php echo ddAdminBookingsH($booking['status_url']); ?>">Update Status</a>
+                            <?php endif; ?>
                         </div>
                     </div>
                 <?php endforeach; ?>

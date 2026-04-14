@@ -10,33 +10,43 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
-function h($value)
+function h(mixed $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirectTo($url)
+function redirectTo(string $url): never
 {
     header('Location: ' . $url);
     exit;
 }
 
-function isAdmin()
+function isAdmin(): bool
 {
     if (!empty($_SESSION['is_admin'])) {
         return true;
     }
 
-    return isset($_SESSION['role']) && strtolower((string) $_SESSION['role']) === 'admin';
+    if (!empty($_SESSION['admin_id'])) {
+        return true;
+    }
+
+    $role = strtolower(trim((string) ($_SESSION['role'] ?? '')));
+    return in_array($role, ['admin', 'superadmin', 'owner'], true);
 }
 
 if (!isAdmin()) {
     redirectTo('admin-login.php');
 }
 
-function hasTable(PDO $pdo, $table)
+function quotedIdentifier(string $value): string
 {
-    static $cache = array();
+    return '"' . str_replace('"', '""', $value) . '"';
+}
+
+function hasTable(PDO $pdo, string $table): bool
+{
+    static $cache = [];
 
     if (isset($cache[$table])) {
         return $cache[$table];
@@ -44,39 +54,35 @@ function hasTable(PDO $pdo, $table)
 
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
-        $stmt->execute(array(':name' => $table));
+        $stmt->execute([':name' => $table]);
         $cache[$table] = (bool) $stmt->fetchColumn();
         return $cache[$table];
     } catch (Throwable $e) {
         $cache[$table] = false;
         return false;
-    } catch (Exception $e) {
-        $cache[$table] = false;
-        return false;
     }
 }
 
-function getTableColumns(PDO $pdo, $table)
+function getTableColumns(PDO $pdo, string $table): array
 {
-    static $cache = array();
+    static $cache = [];
 
     if (isset($cache[$table])) {
         return $cache[$table];
     }
 
     if (!hasTable($pdo, $table)) {
-        $cache[$table] = array();
-        return array();
+        $cache[$table] = [];
+        return [];
     }
 
     try {
-        $safeTable = str_replace('"', '""', $table);
-        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
-        $columns = array();
+        $safeTable = quotedIdentifier($table);
+        $stmt = $pdo->query('PRAGMA table_info(' . $safeTable . ')');
+        $columns = [];
 
         if ($stmt) {
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach ($rows as $row) {
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
                 if (isset($row['name'])) {
                     $columns[] = (string) $row['name'];
                 }
@@ -86,42 +92,37 @@ function getTableColumns(PDO $pdo, $table)
         $cache[$table] = $columns;
         return $columns;
     } catch (Throwable $e) {
-        $cache[$table] = array();
-        return array();
-    } catch (Exception $e) {
-        $cache[$table] = array();
-        return array();
+        $cache[$table] = [];
+        return [];
     }
 }
 
-function firstExistingColumn(PDO $pdo, $table, array $candidates)
+function firstExistingColumn(array $columns, array $candidates): ?string
 {
-    $columns = getTableColumns($pdo, $table);
     foreach ($candidates as $candidate) {
         if (in_array($candidate, $columns, true)) {
             return $candidate;
         }
     }
+
     return null;
 }
 
-function safeFetchAll(PDO $pdo, $sql, array $params = array())
+function safeFetchAll(PDO $pdo, string $sql, array $params = []): array
 {
     try {
         $stmt = $pdo->prepare($sql);
         if (!$stmt->execute($params)) {
-            return array();
+            return [];
         }
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        return is_array($rows) ? $rows : array();
+        return is_array($rows) ? $rows : [];
     } catch (Throwable $e) {
-        return array();
-    } catch (Exception $e) {
-        return array();
+        return [];
     }
 }
 
-function safeFetchOne(PDO $pdo, $sql, array $params = array())
+function safeFetchOne(PDO $pdo, string $sql, array $params = []): ?array
 {
     try {
         $stmt = $pdo->prepare($sql);
@@ -132,15 +133,13 @@ function safeFetchOne(PDO $pdo, $sql, array $params = array())
         return $row !== false ? $row : null;
     } catch (Throwable $e) {
         return null;
-    } catch (Exception $e) {
-        return null;
     }
 }
 
-function valueFromRow(array $row, array $candidates, $default = '')
+function valueFromRow(array $row, array $candidates, string $default = ''): string
 {
     foreach ($candidates as $candidate) {
-        if (isset($row[$candidate]) && $row[$candidate] !== null && $row[$candidate] !== '') {
+        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
             return (string) $row[$candidate];
         }
     }
@@ -148,9 +147,9 @@ function valueFromRow(array $row, array $candidates, $default = '')
     return $default;
 }
 
-function formatDateTimeDisplay($value)
+function formatDateTimeDisplay(string $value): string
 {
-    $value = trim((string) $value);
+    $value = trim($value);
     if ($value === '') {
         return '—';
     }
@@ -163,34 +162,32 @@ function formatDateTimeDisplay($value)
     return date('F j, Y \a\t g:i A', $ts);
 }
 
-function dd_plan_catalog()
+function ddPlanCatalog(): array
 {
-    return array(
+    return [
         'founder_walk_club' => 'Founder Walk Club',
         'founder_care_club' => 'Founder Care Club',
         'founder_elite_club' => 'Founder Elite Club',
-    );
+    ];
 }
 
-function dd_plan_name_from_membership(PDO $pdo, $planId)
+function ddPlanNameFromMembership(PDO $pdo, int $planId): string
 {
-    if ((int) $planId <= 0 || !hasTable($pdo, 'membership_plans')) {
+    if ($planId <= 0 || !hasTable($pdo, 'membership_plans')) {
         return '';
     }
 
-    $planIdCol = firstExistingColumn($pdo, 'membership_plans', array('id', 'plan_id'));
-    $slugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
-    $nameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
+    $planColumns = getTableColumns($pdo, 'membership_plans');
+    $planIdCol = firstExistingColumn($planColumns, ['id', 'plan_id']);
+    $slugCol = firstExistingColumn($planColumns, ['slug', 'plan_slug', 'code']);
+    $nameCol = firstExistingColumn($planColumns, ['name', 'plan_name', 'title']);
 
     if ($planIdCol === null) {
         return '';
     }
 
-    $row = safeFetchOne(
-        $pdo,
-        'SELECT * FROM membership_plans WHERE ' . $planIdCol . ' = :plan_id LIMIT 1',
-        array(':plan_id' => (int) $planId)
-    );
+    $sql = 'SELECT * FROM ' . quotedIdentifier('membership_plans') . ' WHERE ' . quotedIdentifier($planIdCol) . ' = :plan_id LIMIT 1';
+    $row = safeFetchOne($pdo, $sql, [':plan_id' => $planId]);
 
     if (!$row) {
         return '';
@@ -202,60 +199,190 @@ function dd_plan_name_from_membership(PDO $pdo, $planId)
 
     if ($slugCol !== null && !empty($row[$slugCol])) {
         $slug = strtolower(trim((string) $row[$slugCol]));
-        $catalog = dd_plan_catalog();
+        $catalog = ddPlanCatalog();
+
         if (isset($catalog[$slug])) {
             return $catalog[$slug];
         }
 
-        return ucwords(str_replace(array('_', '-'), ' ', $slug));
+        return ucwords(str_replace(['_', '-'], ' ', $slug));
     }
 
     return '';
 }
 
-function dd_membership_name_for_member(PDO $pdo, $memberId, $fallback = '')
+function ddMembershipNameForMember(PDO $pdo, int $memberId, string $fallback = ''): string
 {
-    if ((int) $memberId <= 0) {
-        return (string) $fallback;
+    if ($memberId <= 0 || !hasTable($pdo, 'member_memberships')) {
+        return $fallback;
     }
 
-    if (!hasTable($pdo, 'member_memberships')) {
-        return (string) $fallback;
-    }
-
-    $memberCol = firstExistingColumn($pdo, 'member_memberships', array('member_id', 'user_id'));
-    $planCol = firstExistingColumn($pdo, 'member_memberships', array('plan_id'));
-    $orderCol = firstExistingColumn($pdo, 'member_memberships', array('created_at', 'updated_at', 'id'));
+    $membershipColumns = getTableColumns($pdo, 'member_memberships');
+    $memberCol = firstExistingColumn($membershipColumns, ['member_id', 'user_id']);
+    $planCol = firstExistingColumn($membershipColumns, ['plan_id']);
+    $orderCol = firstExistingColumn($membershipColumns, ['created_at', 'updated_at', 'id']);
 
     if ($memberCol === null || $planCol === null) {
-        return (string) $fallback;
+        return $fallback;
     }
 
     if ($orderCol === null) {
         $orderCol = 'id';
     }
 
-    $membershipRow = safeFetchOne(
-        $pdo,
-        'SELECT * FROM member_memberships WHERE ' . $memberCol . ' = :member_id ORDER BY ' . $orderCol . ' DESC, id DESC LIMIT 1',
-        array(':member_id' => (int) $memberId)
-    );
+    $sql = '
+        SELECT *
+        FROM ' . quotedIdentifier('member_memberships') . '
+        WHERE ' . quotedIdentifier($memberCol) . ' = :member_id
+        ORDER BY ' . quotedIdentifier($orderCol) . ' DESC, ' . quotedIdentifier('id') . ' DESC
+        LIMIT 1
+    ';
+
+    $membershipRow = safeFetchOne($pdo, $sql, [':member_id' => $memberId]);
 
     if (!$membershipRow) {
-        return (string) $fallback;
+        return $fallback;
     }
 
-    $planName = dd_plan_name_from_membership($pdo, (int) ($membershipRow[$planCol] ?? 0));
-    if ($planName !== '') {
-        return $planName;
-    }
-
-    return (string) $fallback;
+    $planName = ddPlanNameFromMembership($pdo, (int) ($membershipRow[$planCol] ?? 0));
+    return $planName !== '' ? $planName : $fallback;
 }
 
-function fetchMembers(PDO $pdo)
+function buildFullName(array $row): string
 {
-    $possibleTables = array('users', 'members', 'client_profiles');
+    $fullName = trim(valueFromRow($row, ['full_name', 'name', 'client_name', 'member_name']));
+    if ($fullName !== '') {
+        return $fullName;
+    }
+
+    $first = trim(valueFromRow($row, ['first_name']));
+    $last = trim(valueFromRow($row, ['last_name']));
+    $combined = trim($first . ' ' . $last);
+    if ($combined !== '') {
+        return $combined;
+    }
+
+    $username = trim(valueFromRow($row, ['username']));
+    if ($username !== '') {
+        return $username;
+    }
+
+    $email = trim(valueFromRow($row, ['email']));
+    if ($email !== '') {
+        return $email;
+    }
+
+    return 'Member';
+}
+
+function buildAddress(array $row): string
+{
+    $parts = [];
+
+    foreach (['address', 'street_address'] as $key) {
+        $value = trim(valueFromRow($row, [$key]));
+        if ($value !== '') {
+            $parts[] = $value;
+            break;
+        }
+    }
+
+    $city = trim(valueFromRow($row, ['city']));
+    $state = trim(valueFromRow($row, ['state', 'province']));
+    $zip = trim(valueFromRow($row, ['zip_code', 'zip', 'zipcode', 'postal_code', 'apartment_number']));
+
+    $tail = trim(implode(' ', array_filter([$city, $state, $zip], static fn($v) => $v !== '')));
+    if ($tail !== '') {
+        $parts[] = $tail;
+    }
+
+    return trim(implode(', ', $parts));
+}
+
+function fetchMembersFromUsers(PDO $pdo): array
+{
+    if (!hasTable($pdo, 'users')) {
+        return [];
+    }
+
+    $userColumns = getTableColumns($pdo, 'users');
+
+    $idCol = firstExistingColumn($userColumns, ['id', 'user_id']);
+    if ($idCol === null) {
+        return [];
+    }
+
+    $nameCol = firstExistingColumn($userColumns, ['full_name', 'name', 'display_name']);
+    $firstCol = firstExistingColumn($userColumns, ['first_name']);
+    $lastCol = firstExistingColumn($userColumns, ['last_name']);
+    $emailCol = firstExistingColumn($userColumns, ['email']);
+    $phoneCol = firstExistingColumn($userColumns, ['phone', 'phone_number', 'mobile', 'cell_phone']);
+    $usernameCol = firstExistingColumn($userColumns, ['username']);
+    $membershipCol = firstExistingColumn($userColumns, ['membership_type', 'membership', 'plan_type']);
+    $preferredLoginCol = firstExistingColumn($userColumns, ['preferred_login']);
+    $createdCol = firstExistingColumn($userColumns, ['created_at', 'date_created', 'registered_at']);
+    $addressCol = firstExistingColumn($userColumns, ['address', 'street_address']);
+    $cityCol = firstExistingColumn($userColumns, ['city']);
+    $stateCol = firstExistingColumn($userColumns, ['state', 'province']);
+    $zipCol = firstExistingColumn($userColumns, ['zip', 'zipcode', 'postal_code']);
+    $aptCol = firstExistingColumn($userColumns, ['apartment_number', 'apartment', 'apt']);
+    $roleCol = firstExistingColumn($userColumns, ['role', 'user_role', 'account_type']);
+    $isAdminCol = in_array('is_admin', $userColumns, true) ? 'is_admin' : null;
+
+    $select = [
+        quotedIdentifier($idCol) . ' AS member_id',
+        ($nameCol !== null ? quotedIdentifier($nameCol) : "''") . ' AS full_name',
+        ($firstCol !== null ? quotedIdentifier($firstCol) : "''") . ' AS first_name',
+        ($lastCol !== null ? quotedIdentifier($lastCol) : "''") . ' AS last_name',
+        ($emailCol !== null ? quotedIdentifier($emailCol) : "''") . ' AS email',
+        ($phoneCol !== null ? quotedIdentifier($phoneCol) : "''") . ' AS phone',
+        ($usernameCol !== null ? quotedIdentifier($usernameCol) : "''") . ' AS username',
+        ($membershipCol !== null ? quotedIdentifier($membershipCol) : "''") . ' AS membership_type',
+        ($preferredLoginCol !== null ? quotedIdentifier($preferredLoginCol) : "''") . ' AS preferred_login',
+        ($createdCol !== null ? quotedIdentifier($createdCol) : "''") . ' AS created_at',
+        ($addressCol !== null ? quotedIdentifier($addressCol) : "''") . ' AS address',
+        ($cityCol !== null ? quotedIdentifier($cityCol) : "''") . ' AS city',
+        ($stateCol !== null ? quotedIdentifier($stateCol) : "''") . ' AS state',
+        ($zipCol !== null ? quotedIdentifier($zipCol) : "''") . ' AS zip_code',
+        ($aptCol !== null ? quotedIdentifier($aptCol) : "''") . ' AS apartment_number',
+    ];
+
+    $sql = 'SELECT ' . implode(', ', $select) . ' FROM ' . quotedIdentifier('users');
+
+    $conditions = [];
+    if ($roleCol !== null) {
+        $conditions[] = 'LOWER(COALESCE(' . quotedIdentifier($roleCol) . ", 'member')) NOT IN ('admin','administrator','walker','staff','employee','owner','superadmin')";
+    }
+    if ($isAdminCol !== null) {
+        $conditions[] = 'COALESCE(' . quotedIdentifier($isAdminCol) . ', 0) = 0';
+    }
+
+    if (!empty($conditions)) {
+        $sql .= ' WHERE ' . implode(' AND ', $conditions);
+    }
+
+    if ($createdCol !== null) {
+        $sql .= ' ORDER BY ' . quotedIdentifier($createdCol) . ' DESC';
+    } else {
+        $sql .= ' ORDER BY ' . quotedIdentifier($idCol) . ' DESC';
+    }
+
+    $rows = safeFetchAll($pdo, $sql);
+
+    foreach ($rows as &$row) {
+        $row['full_name'] = buildFullName($row);
+        $fallbackMembership = valueFromRow($row, ['membership_type']);
+        $row['membership_type'] = ddMembershipNameForMember($pdo, (int) valueFromRow($row, ['member_id'], '0'), $fallbackMembership);
+        $row['address_display'] = buildAddress($row);
+    }
+    unset($row);
+
+    return $rows;
+}
+
+function fetchMembersFallback(PDO $pdo): array
+{
+    $possibleTables = ['members', 'client_profiles'];
 
     foreach ($possibleTables as $table) {
         if (!hasTable($pdo, $table)) {
@@ -267,79 +394,78 @@ function fetchMembers(PDO $pdo)
             continue;
         }
 
-        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
+        $idCol = firstExistingColumn($columns, ['id', 'user_id', 'member_id', 'client_id']);
         if ($idCol === null) {
             continue;
         }
 
-        $nameCol = firstExistingColumn($pdo, $table, array('full_name', 'name', 'client_name', 'member_name'));
-        $emailCol = firstExistingColumn($pdo, $table, array('email'));
-        $phoneCol = firstExistingColumn($pdo, $table, array('phone', 'phone_number', 'mobile', 'cell_phone'));
-        $usernameCol = firstExistingColumn($pdo, $table, array('username'));
-        $membershipCol = firstExistingColumn($pdo, $table, array('membership_type', 'membership', 'plan_type'));
-        $preferredLoginCol = firstExistingColumn($pdo, $table, array('preferred_login'));
-        $createdCol = firstExistingColumn($pdo, $table, array('created_at', 'date_created', 'registered_at'));
-        $addressCol = firstExistingColumn($pdo, $table, array('address', 'street_address'));
-        $cityCol = firstExistingColumn($pdo, $table, array('city'));
-        $stateCol = firstExistingColumn($pdo, $table, array('state', 'province'));
-        $zipCol = firstExistingColumn($pdo, $table, array('zip', 'zipcode', 'postal_code'));
+        $nameCol = firstExistingColumn($columns, ['full_name', 'name', 'client_name', 'member_name']);
+        $firstCol = firstExistingColumn($columns, ['first_name']);
+        $lastCol = firstExistingColumn($columns, ['last_name']);
+        $emailCol = firstExistingColumn($columns, ['email']);
+        $phoneCol = firstExistingColumn($columns, ['phone', 'phone_number', 'mobile', 'cell_phone']);
+        $usernameCol = firstExistingColumn($columns, ['username']);
+        $membershipCol = firstExistingColumn($columns, ['membership_type', 'membership', 'plan_type']);
+        $preferredLoginCol = firstExistingColumn($columns, ['preferred_login']);
+        $createdCol = firstExistingColumn($columns, ['created_at', 'date_created', 'registered_at']);
+        $addressCol = firstExistingColumn($columns, ['address', 'street_address']);
+        $cityCol = firstExistingColumn($columns, ['city']);
+        $stateCol = firstExistingColumn($columns, ['state', 'province']);
+        $zipCol = firstExistingColumn($columns, ['zip', 'zipcode', 'postal_code']);
+        $aptCol = firstExistingColumn($columns, ['apartment_number', 'apartment', 'apt']);
 
-        $select = array(
-            $idCol . ' AS member_id',
-            ($nameCol !== null ? $nameCol : "''") . ' AS full_name',
-            ($emailCol !== null ? $emailCol : "''") . ' AS email',
-            ($phoneCol !== null ? $phoneCol : "''") . ' AS phone',
-            ($usernameCol !== null ? $usernameCol : "''") . ' AS username',
-            ($membershipCol !== null ? $membershipCol : "''") . ' AS membership_type',
-            ($preferredLoginCol !== null ? $preferredLoginCol : "''") . ' AS preferred_login',
-            ($createdCol !== null ? $createdCol : "''") . ' AS created_at',
-            ($addressCol !== null ? $addressCol : "''") . ' AS address',
-            ($cityCol !== null ? $cityCol : "''") . ' AS city',
-            ($stateCol !== null ? $stateCol : "''") . ' AS state',
-            ($zipCol !== null ? $zipCol : "''") . ' AS zip_code'
-        );
+        $select = [
+            quotedIdentifier($idCol) . ' AS member_id',
+            ($nameCol !== null ? quotedIdentifier($nameCol) : "''") . ' AS full_name',
+            ($firstCol !== null ? quotedIdentifier($firstCol) : "''") . ' AS first_name',
+            ($lastCol !== null ? quotedIdentifier($lastCol) : "''") . ' AS last_name',
+            ($emailCol !== null ? quotedIdentifier($emailCol) : "''") . ' AS email',
+            ($phoneCol !== null ? quotedIdentifier($phoneCol) : "''") . ' AS phone',
+            ($usernameCol !== null ? quotedIdentifier($usernameCol) : "''") . ' AS username',
+            ($membershipCol !== null ? quotedIdentifier($membershipCol) : "''") . ' AS membership_type',
+            ($preferredLoginCol !== null ? quotedIdentifier($preferredLoginCol) : "''") . ' AS preferred_login',
+            ($createdCol !== null ? quotedIdentifier($createdCol) : "''") . ' AS created_at',
+            ($addressCol !== null ? quotedIdentifier($addressCol) : "''") . ' AS address',
+            ($cityCol !== null ? quotedIdentifier($cityCol) : "''") . ' AS city',
+            ($stateCol !== null ? quotedIdentifier($stateCol) : "''") . ' AS state',
+            ($zipCol !== null ? quotedIdentifier($zipCol) : "''") . ' AS zip_code',
+            ($aptCol !== null ? quotedIdentifier($aptCol) : "''") . ' AS apartment_number',
+        ];
 
-        $sql = 'SELECT ' . implode(', ', $select) . ' FROM ' . $table;
-
-        $roleCol = firstExistingColumn($pdo, $table, array('role', 'user_role', 'account_type'));
-        $isAdminCol = in_array('is_admin', $columns, true) ? 'is_admin' : null;
-        $conditions = array();
-
-        if ($roleCol !== null) {
-            $conditions[] = 'LOWER(COALESCE(' . $roleCol . ', "member")) NOT IN ("admin","administrator","walker","staff","employee","owner")';
-        }
-
-        if ($isAdminCol !== null) {
-            $conditions[] = 'COALESCE(' . $isAdminCol . ', 0) = 0';
-        }
-
-        if (!empty($conditions)) {
-            $sql .= ' WHERE ' . implode(' AND ', $conditions);
-        }
+        $sql = 'SELECT ' . implode(', ', $select) . ' FROM ' . quotedIdentifier($table);
 
         if ($createdCol !== null) {
-            $sql .= ' ORDER BY ' . $createdCol . ' DESC';
+            $sql .= ' ORDER BY ' . quotedIdentifier($createdCol) . ' DESC';
         } else {
-            $sql .= ' ORDER BY ' . $idCol . ' DESC';
+            $sql .= ' ORDER BY ' . quotedIdentifier($idCol) . ' DESC';
         }
 
         $rows = safeFetchAll($pdo, $sql);
-        if (!empty($rows)) {
-            foreach ($rows as &$row) {
-                $fallbackMembership = valueFromRow($row, array('membership_type'));
-                $row['membership_type'] = dd_membership_name_for_member(
-                    $pdo,
-                    (int) valueFromRow($row, array('member_id'), '0'),
-                    $fallbackMembership
-                );
-            }
-            unset($row);
 
+        foreach ($rows as &$row) {
+            $row['full_name'] = buildFullName($row);
+            $fallbackMembership = valueFromRow($row, ['membership_type']);
+            $row['membership_type'] = ddMembershipNameForMember($pdo, (int) valueFromRow($row, ['member_id'], '0'), $fallbackMembership);
+            $row['address_display'] = buildAddress($row);
+        }
+        unset($row);
+
+        if (!empty($rows)) {
             return $rows;
         }
     }
 
-    return array();
+    return [];
+}
+
+function fetchMembers(PDO $pdo): array
+{
+    $rows = fetchMembersFromUsers($pdo);
+    if (!empty($rows)) {
+        return $rows;
+    }
+
+    return fetchMembersFallback($pdo);
 }
 
 $members = fetchMembers($pdo);
@@ -348,15 +474,16 @@ $totalMembers = count($members);
 $search = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
 
 if ($search !== '') {
-    $filtered = array();
+    $filtered = [];
 
     foreach ($members as $member) {
         $haystack = strtolower(
-            valueFromRow($member, array('full_name')) . ' ' .
-            valueFromRow($member, array('email')) . ' ' .
-            valueFromRow($member, array('phone')) . ' ' .
-            valueFromRow($member, array('username')) . ' ' .
-            valueFromRow($member, array('membership_type'))
+            valueFromRow($member, ['full_name']) . ' ' .
+            valueFromRow($member, ['email']) . ' ' .
+            valueFromRow($member, ['phone']) . ' ' .
+            valueFromRow($member, ['username']) . ' ' .
+            valueFromRow($member, ['membership_type']) . ' ' .
+            valueFromRow($member, ['address_display'])
         );
 
         if (strpos($haystack, strtolower($search)) !== false) {
@@ -374,17 +501,17 @@ $membersWithMembership = 0;
 $thirtyDaysAgo = strtotime('-30 days');
 
 foreach ($members as $member) {
-    if (trim(valueFromRow($member, array('phone'))) !== '') {
+    if (trim(valueFromRow($member, ['phone'])) !== '') {
         $withPhone++;
     }
-    if (trim(valueFromRow($member, array('email'))) !== '') {
+    if (trim(valueFromRow($member, ['email'])) !== '') {
         $withEmail++;
     }
-    if (trim(valueFromRow($member, array('membership_type'))) !== '') {
+    if (trim(valueFromRow($member, ['membership_type'])) !== '') {
         $membersWithMembership++;
     }
 
-    $createdAt = valueFromRow($member, array('created_at'));
+    $createdAt = valueFromRow($member, ['created_at']);
     $createdTs = strtotime($createdAt);
     if ($createdTs !== false && $createdTs >= $thirtyDaysAgo) {
         $recentSignups++;
@@ -495,7 +622,7 @@ foreach ($members as $member) {
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
+            grid-template-columns: repeat(6, 1fr);
             gap: 15px;
             margin-top: 20px;
         }
@@ -577,7 +704,7 @@ foreach ($members as $member) {
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 1200px;
+            min-width: 1400px;
         }
 
         th, td {
@@ -632,6 +759,24 @@ foreach ($members as $member) {
             margin-top: 24px;
         }
 
+        .actions-col {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .action-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 8px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 800;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.10);
+        }
+
         @media (max-width: 1180px) {
             .hero,
             .grid {
@@ -662,6 +807,7 @@ foreach ($members as $member) {
 
             <div class="nav">
                 <a href="admin-dashboard.php">Dashboard</a>
+                <a href="admin-revenue.php">Revenue</a>
                 <a href="admin-bookings.php">Bookings</a>
                 <a href="admin-members.php">Members</a>
                 <a href="admin-group-walk-applications.php">Group Walks</a>
@@ -674,7 +820,7 @@ foreach ($members as $member) {
                 <div class="eyebrow">Member Directory</div>
                 <h1>Admin Members</h1>
                 <div class="sub">
-                    View everyone who signed up as a member, review their contact details, and keep account visibility centralized inside the admin system.
+                    View everyone who signed up as a member, review their contact details, and open each full member profile from one centralized admin directory.
                 </div>
             </div>
 
@@ -687,7 +833,7 @@ foreach ($members as $member) {
                             type="text"
                             name="q"
                             value="<?php echo h($search); ?>"
-                            placeholder="Search by name, email, phone, username, or membership type"
+                            placeholder="Search by name, email, phone, username, membership, or address"
                         >
                         <button type="submit" class="btn btn-gold">Search</button>
                         <a href="admin-members.php" class="btn btn-light">Reset</a>
@@ -721,6 +867,11 @@ foreach ($members as $member) {
                 <div class="label">With Membership</div>
                 <div class="big"><?php echo (int) $membersWithMembership; ?></div>
             </div>
+
+            <div class="stat-card">
+                <div class="label">New 30 Days</div>
+                <div class="big"><?php echo (int) $recentSignups; ?></div>
+            </div>
         </div>
 
         <?php if (empty($members)): ?>
@@ -738,36 +889,40 @@ foreach ($members as $member) {
                             <th>Preferred Login</th>
                             <th>Address</th>
                             <th>Created</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php foreach ($members as $member): ?>
                             <?php
-                            $fullAddress = trim(
-                                valueFromRow($member, array('address')) . ' ' .
-                                valueFromRow($member, array('city')) . ' ' .
-                                valueFromRow($member, array('state')) . ' ' .
-                                valueFromRow($member, array('zip_code'))
-                            );
+                            $memberId = (int) valueFromRow($member, ['member_id'], '0');
+                            $fullAddress = trim(valueFromRow($member, ['address_display']));
                             ?>
                             <tr>
                                 <td>
-                                    <div class="member-name"><?php echo h(valueFromRow($member, array('full_name'), '—')); ?></div>
-                                    <div class="member-sub">ID #<?php echo h(valueFromRow($member, array('member_id'), '—')); ?></div>
+                                    <div class="member-name"><?php echo h(valueFromRow($member, ['full_name'], '—')); ?></div>
+                                    <div class="member-sub">ID #<?php echo h((string) $memberId); ?></div>
                                 </td>
-                                <td><?php echo h(valueFromRow($member, array('email'), '—')); ?></td>
-                                <td><?php echo h(valueFromRow($member, array('phone'), '—')); ?></td>
-                                <td><?php echo h(valueFromRow($member, array('username'), '—')); ?></td>
+                                <td><?php echo h(valueFromRow($member, ['email'], '—')); ?></td>
+                                <td><?php echo h(valueFromRow($member, ['phone'], '—')); ?></td>
+                                <td><?php echo h(valueFromRow($member, ['username'], '—')); ?></td>
                                 <td>
-                                    <?php if (trim(valueFromRow($member, array('membership_type'))) !== ''): ?>
-                                        <span class="pill"><?php echo h(valueFromRow($member, array('membership_type'))); ?></span>
+                                    <?php if (trim(valueFromRow($member, ['membership_type'])) !== ''): ?>
+                                        <span class="pill"><?php echo h(valueFromRow($member, ['membership_type'])); ?></span>
                                     <?php else: ?>
                                         <span class="muted">—</span>
                                     <?php endif; ?>
                                 </td>
-                                <td><?php echo h(valueFromRow($member, array('preferred_login'), '—')); ?></td>
+                                <td><?php echo h(valueFromRow($member, ['preferred_login'], '—')); ?></td>
                                 <td><?php echo h($fullAddress !== '' ? $fullAddress : '—'); ?></td>
-                                <td><?php echo h(formatDateTimeDisplay(valueFromRow($member, array('created_at'), ''))); ?></td>
+                                <td><?php echo h(formatDateTimeDisplay(valueFromRow($member, ['created_at'], ''))); ?></td>
+                                <td>
+                                    <div class="actions-col">
+                                        <a class="action-link" href="admin-member-view.php?id=<?php echo $memberId; ?>">View</a>
+                                        <a class="action-link" href="admin-add-dog.php?user_id=<?php echo $memberId; ?>">Add Dog</a>
+                                        <a class="action-link" href="admin-create-booking.php?user_id=<?php echo $memberId; ?>">Create Booking</a>
+                                    </div>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>

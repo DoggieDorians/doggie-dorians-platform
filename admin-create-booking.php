@@ -2,129 +2,483 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/database/setup.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/admin-auth.php';
 
-function e(?string $value): string
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    echo 'Database connection is not available.';
+    exit;
+}
+
+function ddAdminCreateBookingE($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function tableExists(PDO $pdo, string $table): bool
+function ddAdminCreateBookingQuoteIdentifier(string $identifier): string
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool) $stmt->fetchColumn();
+    return '"' . str_replace('"', '""', $identifier) . '"';
 }
 
-function getColumns(PDO $pdo, string $table): array
+function ddAdminCreateBookingTableExists(PDO $pdo, string $table): bool
 {
-    $columns = [];
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    if ($stmt) {
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
-            $columns[] = $column['name'];
-        }
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
     }
-    return $columns;
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    }
 }
 
-function hasColumn(array $columns, string $column): bool
+function ddAdminCreateBookingGetColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminCreateBookingTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminCreateBookingQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $columns = array();
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
+            if (!empty($column['name'])) {
+                $columns[] = (string) $column['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function ddAdminCreateBookingHasColumn(array $columns, string $column): bool
 {
     return in_array($column, $columns, true);
 }
 
-if (!tableExists($pdo, 'bookings')) {
-    die('Bookings table not found.');
+function ddAdminCreateBookingFirstExistingColumn(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
 }
 
-$bookingColumns = getColumns($pdo, 'bookings');
-$userColumns = tableExists($pdo, 'users') ? getColumns($pdo, 'users') : [];
-$petColumns = tableExists($pdo, 'pets') ? getColumns($pdo, 'pets') : [];
-$walkerColumns = tableExists($pdo, 'walkers') ? getColumns($pdo, 'walkers') : [];
+function ddAdminCreateBookingSafeFetchAll(PDO $pdo, string $sql, array $params = array()): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return array();
+        }
 
-$userNameSql = 'CAST(id AS TEXT)';
-if ($userColumns) {
-    if (hasColumn($userColumns, 'email')) {
-        $userNameSql = "COALESCE(email, CAST(id AS TEXT))";
-    } elseif (hasColumn($userColumns, 'name')) {
-        $userNameSql = "COALESCE(name, CAST(id AS TEXT))";
-    } elseif (hasColumn($userColumns, 'full_name')) {
-        $userNameSql = "COALESCE(full_name, CAST(id AS TEXT))";
-    } elseif (hasColumn($userColumns, 'username')) {
-        $userNameSql = "COALESCE(username, CAST(id AS TEXT))";
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : array();
+    } catch (Throwable $e) {
+        return array();
     }
 }
 
-$clients = [];
-if (tableExists($pdo, 'users')) {
-    $clientsStmt = $pdo->query("
-        SELECT id, {$userNameSql} AS label
-        FROM users
-        ORDER BY label ASC
-    ");
-    $clients = $clientsStmt ? $clientsStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+function ddAdminCreateBookingSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
 }
 
-$pets = [];
-if (tableExists($pdo, 'pets') && hasColumn($petColumns, 'user_id')) {
-    $petLabelParts = [];
-    if (hasColumn($petColumns, 'pet_name')) {
-        $petLabelParts[] = 'pet_name';
-    }
-    if (hasColumn($petColumns, 'breed')) {
-        $petLabelParts[] = 'breed';
-    }
-    if (hasColumn($petColumns, 'size')) {
-        $petLabelParts[] = 'size';
+function ddAdminCreateBookingCsrfToken(): string
+{
+    if (empty($_SESSION['admin_create_booking_csrf']) || !is_string($_SESSION['admin_create_booking_csrf'])) {
+        $_SESSION['admin_create_booking_csrf'] = bin2hex(random_bytes(32));
     }
 
-    $petsStmt = $pdo->query("
-        SELECT *
-        FROM pets
-        ORDER BY " . (hasColumn($petColumns, 'pet_name') ? 'pet_name ASC, ' : '') . "id ASC
-    ");
-    $pets = $petsStmt ? $petsStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+    return $_SESSION['admin_create_booking_csrf'];
 }
 
-$walkers = [];
-if (tableExists($pdo, 'walkers')) {
-    $walkerWhere = hasColumn($walkerColumns, 'is_active') ? 'WHERE is_active = 1' : '';
-    $walkerNameSql = 'CAST(id AS TEXT)';
-    if (hasColumn($walkerColumns, 'full_name')) {
-        $walkerNameSql = "COALESCE(full_name, CAST(id AS TEXT))";
-    } elseif (hasColumn($walkerColumns, 'name')) {
-        $walkerNameSql = "COALESCE(name, CAST(id AS TEXT))";
+function ddAdminCreateBookingValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_create_booking_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
     }
 
-    $walkerSecondarySql = hasColumn($walkerColumns, 'email') ? 'email' : "''";
-
-    $walkersStmt = $pdo->query("
-        SELECT id, {$walkerNameSql} AS label, {$walkerSecondarySql} AS email
-        FROM walkers
-        {$walkerWhere}
-        ORDER BY label ASC
-    ");
-    $walkers = $walkersStmt ? $walkersStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+    return hash_equals($sessionToken, $submittedToken);
 }
 
-$serviceOptions = [
+function ddAdminCreateBookingBuildPersonLabel(array $row, array $source): string
+{
+    $nameColumn = $source['name_column'] ?? null;
+    if (is_string($nameColumn) && $nameColumn !== '' && !empty($row[$nameColumn])) {
+        return trim((string) $row[$nameColumn]);
+    }
+
+    $firstNameColumn = $source['first_name_column'] ?? null;
+    $lastNameColumn = $source['last_name_column'] ?? null;
+
+    $first = is_string($firstNameColumn) ? trim((string) ($row[$firstNameColumn] ?? '')) : '';
+    $last = is_string($lastNameColumn) ? trim((string) ($row[$lastNameColumn] ?? '')) : '';
+    $full = trim($first . ' ' . $last);
+
+    if ($full !== '') {
+        return $full;
+    }
+
+    $emailColumn = $source['email_column'] ?? null;
+    if (is_string($emailColumn) && $emailColumn !== '' && !empty($row[$emailColumn])) {
+        return trim((string) $row[$emailColumn]);
+    }
+
+    return 'Unknown';
+}
+
+function ddAdminCreateBookingDetectClientSource(PDO $pdo): ?array
+{
+    foreach (array('users', 'members', 'client_profiles') as $table) {
+        if (!ddAdminCreateBookingTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminCreateBookingGetColumns($pdo, $table);
+        $idColumn = ddAdminCreateBookingFirstExistingColumn($columns, array('id', 'user_id', 'member_id', 'client_id'));
+
+        if ($idColumn === null) {
+            continue;
+        }
+
+        return array(
+            'table' => $table,
+            'columns' => $columns,
+            'id_column' => $idColumn,
+            'name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('full_name', 'name', 'client_name', 'username')),
+            'first_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('first_name')),
+            'last_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('last_name')),
+            'email_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('email')),
+            'role_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('role', 'user_role', 'account_type', 'account_role')),
+        );
+    }
+
+    return null;
+}
+
+function ddAdminCreateBookingFetchClients(PDO $pdo, array $source): array
+{
+    $table = $source['table'];
+    $idColumn = $source['id_column'];
+    $roleColumn = $source['role_column'];
+    $nameColumn = $source['name_column'];
+    $firstNameColumn = $source['first_name_column'];
+    $emailColumn = $source['email_column'];
+
+    $sql = 'SELECT * FROM ' . ddAdminCreateBookingQuoteIdentifier($table);
+    $params = array();
+
+    if ($roleColumn !== null) {
+        $sql .= ' WHERE LOWER(COALESCE(' . ddAdminCreateBookingQuoteIdentifier((string) $roleColumn) . ", 'member')) != :admin_role";
+        $params[':admin_role'] = 'admin';
+    }
+
+    if ($nameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $nameColumn) . ' ASC';
+    } elseif ($firstNameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $firstNameColumn) . ' ASC';
+    } elseif ($emailColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $emailColumn) . ' ASC';
+    } else {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $idColumn) . ' ASC';
+    }
+
+    $rows = ddAdminCreateBookingSafeFetchAll($pdo, $sql, $params);
+    $clients = array();
+
+    foreach ($rows as $row) {
+        $clientId = (int) ($row[$idColumn] ?? 0);
+        if ($clientId <= 0) {
+            continue;
+        }
+
+        $clients[] = array(
+            'id' => $clientId,
+            'label' => ddAdminCreateBookingBuildPersonLabel($row, $source),
+            'email' => $emailColumn !== null ? trim((string) ($row[$emailColumn] ?? '')) : '',
+            'row' => $row,
+        );
+    }
+
+    return $clients;
+}
+
+function ddAdminCreateBookingDetectPetSource(PDO $pdo): ?array
+{
+    foreach (array('pets', 'dogs') as $table) {
+        if (!ddAdminCreateBookingTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminCreateBookingGetColumns($pdo, $table);
+        $idColumn = ddAdminCreateBookingFirstExistingColumn($columns, array('id', 'pet_id', 'dog_id'));
+        $ownerColumn = ddAdminCreateBookingFirstExistingColumn($columns, array('user_id', 'member_id', 'client_id', 'owner_id'));
+
+        if ($idColumn === null || $ownerColumn === null) {
+            continue;
+        }
+
+        return array(
+            'table' => $table,
+            'columns' => $columns,
+            'id_column' => $idColumn,
+            'owner_column' => $ownerColumn,
+            'name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('pet_name', 'dog_name', 'name')),
+            'breed_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('breed', 'dog_breed')),
+            'size_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('size')),
+        );
+    }
+
+    return null;
+}
+
+function ddAdminCreateBookingFetchPets(PDO $pdo, array $source): array
+{
+    $table = $source['table'];
+    $idColumn = $source['id_column'];
+    $nameColumn = $source['name_column'];
+
+    $sql = 'SELECT * FROM ' . ddAdminCreateBookingQuoteIdentifier($table);
+
+    if ($nameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $nameColumn) . ' ASC, ' . ddAdminCreateBookingQuoteIdentifier((string) $idColumn) . ' ASC';
+    } else {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $idColumn) . ' ASC';
+    }
+
+    $rows = ddAdminCreateBookingSafeFetchAll($pdo, $sql);
+    $pets = array();
+
+    foreach ($rows as $row) {
+        $petId = (int) ($row[$idColumn] ?? 0);
+        if ($petId <= 0) {
+            continue;
+        }
+
+        $petName = $nameColumn !== null ? trim((string) ($row[$nameColumn] ?? '')) : '';
+        if ($petName === '') {
+            $petName = 'Unnamed Pet';
+        }
+
+        $pets[] = array(
+            'id' => $petId,
+            'owner_id' => (int) ($row[$source['owner_column']] ?? 0),
+            'pet_name' => $petName,
+            'breed' => $source['breed_column'] !== null ? trim((string) ($row[$source['breed_column']] ?? '')) : '',
+            'size' => $source['size_column'] !== null ? trim((string) ($row[$source['size_column']] ?? '')) : '',
+            'row' => $row,
+        );
+    }
+
+    return $pets;
+}
+
+function ddAdminCreateBookingDetectWalkerSource(PDO $pdo): ?array
+{
+    if (ddAdminCreateBookingTableExists($pdo, 'walkers')) {
+        $columns = ddAdminCreateBookingGetColumns($pdo, 'walkers');
+        $idColumn = ddAdminCreateBookingFirstExistingColumn($columns, array('id', 'walker_id', 'worker_id'));
+
+        if ($idColumn !== null) {
+            return array(
+                'table' => 'walkers',
+                'columns' => $columns,
+                'id_column' => $idColumn,
+                'name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('full_name', 'name', 'walker_name', 'worker_name')),
+                'first_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('first_name')),
+                'last_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('last_name')),
+                'email_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('email')),
+                'role_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('role', 'user_role', 'account_type')),
+                'active_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('is_active', 'active', 'enabled')),
+                'status_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('status')),
+                'uses_role_filter' => false,
+            );
+        }
+    }
+
+    if (ddAdminCreateBookingTableExists($pdo, 'workers')) {
+        $columns = ddAdminCreateBookingGetColumns($pdo, 'workers');
+        $idColumn = ddAdminCreateBookingFirstExistingColumn($columns, array('id', 'worker_id', 'walker_id'));
+
+        if ($idColumn !== null) {
+            return array(
+                'table' => 'workers',
+                'columns' => $columns,
+                'id_column' => $idColumn,
+                'name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('full_name', 'name', 'worker_name', 'walker_name')),
+                'first_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('first_name')),
+                'last_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('last_name')),
+                'email_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('email')),
+                'role_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('role', 'user_role', 'account_type')),
+                'active_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('is_active', 'active', 'enabled')),
+                'status_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('status')),
+                'uses_role_filter' => false,
+            );
+        }
+    }
+
+    if (ddAdminCreateBookingTableExists($pdo, 'users')) {
+        $columns = ddAdminCreateBookingGetColumns($pdo, 'users');
+        $idColumn = ddAdminCreateBookingFirstExistingColumn($columns, array('id', 'user_id'));
+
+        if ($idColumn !== null) {
+            return array(
+                'table' => 'users',
+                'columns' => $columns,
+                'id_column' => $idColumn,
+                'name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('full_name', 'name', 'username')),
+                'first_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('first_name')),
+                'last_name_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('last_name')),
+                'email_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('email')),
+                'role_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('role', 'user_role', 'account_type', 'account_role')),
+                'active_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('is_active', 'active', 'enabled')),
+                'status_column' => ddAdminCreateBookingFirstExistingColumn($columns, array('status')),
+                'uses_role_filter' => true,
+            );
+        }
+    }
+
+    return null;
+}
+
+function ddAdminCreateBookingFetchWalkers(PDO $pdo, ?array $source): array
+{
+    if ($source === null) {
+        return array();
+    }
+
+    $table = $source['table'];
+    $idColumn = $source['id_column'];
+    $roleColumn = $source['role_column'];
+    $activeColumn = $source['active_column'];
+    $statusColumn = $source['status_column'];
+    $nameColumn = $source['name_column'];
+    $firstNameColumn = $source['first_name_column'];
+    $emailColumn = $source['email_column'];
+
+    $whereParts = array();
+    $params = array();
+
+    if (($source['uses_role_filter'] ?? false) && $roleColumn !== null) {
+        $whereParts[] = 'LOWER(TRIM(COALESCE(' . ddAdminCreateBookingQuoteIdentifier((string) $roleColumn) . ", ''))) IN ('walker', 'worker', 'staff', 'employee')";
+    }
+
+    if ($activeColumn !== null) {
+        $whereParts[] = 'COALESCE(' . ddAdminCreateBookingQuoteIdentifier((string) $activeColumn) . ', 1) = 1';
+    }
+
+    if ($statusColumn !== null) {
+        $whereParts[] = "LOWER(COALESCE(" . ddAdminCreateBookingQuoteIdentifier((string) $statusColumn) . ", 'active')) NOT IN ('disabled', 'inactive')";
+    }
+
+    $sql = 'SELECT * FROM ' . ddAdminCreateBookingQuoteIdentifier($table);
+
+    if (!empty($whereParts)) {
+        $sql .= ' WHERE ' . implode(' AND ', $whereParts);
+    }
+
+    if ($nameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $nameColumn) . ' ASC';
+    } elseif ($firstNameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $firstNameColumn) . ' ASC';
+    } elseif ($emailColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $emailColumn) . ' ASC';
+    } else {
+        $sql .= ' ORDER BY ' . ddAdminCreateBookingQuoteIdentifier((string) $idColumn) . ' ASC';
+    }
+
+    $rows = ddAdminCreateBookingSafeFetchAll($pdo, $sql, $params);
+    $walkers = array();
+
+    foreach ($rows as $row) {
+        $walkerId = (int) ($row[$idColumn] ?? 0);
+        if ($walkerId <= 0) {
+            continue;
+        }
+
+        $walkers[] = array(
+            'id' => $walkerId,
+            'label' => ddAdminCreateBookingBuildPersonLabel($row, $source),
+            'email' => $emailColumn !== null ? trim((string) ($row[$emailColumn] ?? '')) : '',
+            'row' => $row,
+        );
+    }
+
+    return $walkers;
+}
+
+if (!ddAdminCreateBookingTableExists($pdo, 'bookings')) {
+    http_response_code(500);
+    echo 'Bookings table not found.';
+    exit;
+}
+
+$bookingColumns = ddAdminCreateBookingGetColumns($pdo, 'bookings');
+$clientSource = ddAdminCreateBookingDetectClientSource($pdo);
+$petSource = ddAdminCreateBookingDetectPetSource($pdo);
+$walkerSource = ddAdminCreateBookingDetectWalkerSource($pdo);
+
+$clients = $clientSource !== null ? ddAdminCreateBookingFetchClients($pdo, $clientSource) : array();
+$pets = $petSource !== null ? ddAdminCreateBookingFetchPets($pdo, $petSource) : array();
+$walkers = ddAdminCreateBookingFetchWalkers($pdo, $walkerSource);
+
+$serviceOptions = array(
     'walk' => 'Walk',
     'daycare' => 'Daycare',
     'boarding' => 'Boarding',
     'drop-in' => 'Drop-In',
     'drop-in-walk' => 'Drop-In + Walk',
-];
+);
 
-$statusOptions = [
+$statusOptions = array(
     'pending' => 'Pending',
     'confirmed' => 'Confirmed',
     'in_progress' => 'In Progress',
     'completed' => 'Completed',
     'cancelled' => 'Cancelled',
-];
+);
 
-$form = [
+$form = array(
     'user_id' => '',
     'pet_id' => '',
     'service_type' => 'walk',
@@ -135,13 +489,17 @@ $form = [
     'price' => '',
     'assigned_walker_id' => '',
     'admin_notes' => '',
-];
+);
 
-$errors = [];
+$errors = array();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     foreach ($form as $key => $default) {
         $form[$key] = trim((string) ($_POST[$key] ?? $default));
+    }
+
+    if (!ddAdminCreateBookingValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+        $errors[] = 'Security check failed. Please refresh the page and try again.';
     }
 
     $userId = (int) $form['user_id'];
@@ -194,20 +552,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             break;
         }
     }
-    if (!$selectedClient) {
+
+    if ($selectedClient === null) {
         $errors[] = 'Selected client was not found.';
     }
 
     $selectedPet = null;
     foreach ($pets as $pet) {
-        if ((int) ($pet['id'] ?? 0) === $petId) {
+        if ((int) $pet['id'] === $petId) {
             $selectedPet = $pet;
             break;
         }
     }
-    if (!$selectedPet) {
+
+    if ($selectedPet === null) {
         $errors[] = 'Selected pet was not found.';
-    } elseif ((int) ($selectedPet['user_id'] ?? 0) !== $userId) {
+    } elseif ((int) ($selectedPet['owner_id'] ?? 0) !== $userId) {
         $errors[] = 'That pet does not belong to the selected client.';
     }
 
@@ -219,19 +579,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
             }
         }
-        if (!$selectedWalker) {
+
+        if ($selectedWalker === null) {
             $errors[] = 'Selected walker was not found.';
         }
     }
 
-    if (!$errors) {
+    if (empty($errors)) {
         if ($assignedWalkerId > 0 && $status === 'pending') {
             $status = 'confirmed';
         }
 
-        $insertColumns = [];
-        $insertPlaceholders = [];
-        $insertValues = [];
+        $clientIdColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('user_id', 'member_id', 'client_id', 'owner_id', 'customer_id'));
+        $petIdColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('pet_id', 'dog_id', 'animal_id'));
+        $walkerIdColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('assigned_walker_id', 'assigned_worker_id', 'walker_id', 'worker_id', 'staff_id', 'employee_id', 'assigned_user_id'));
+        $serviceTypeColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('service_type', 'service', 'booking_type', 'type'));
+        $serviceDateColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('service_date', 'booking_date', 'date', 'appointment_date', 'walk_date'));
+        $serviceTimeColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('service_time', 'booking_time', 'time', 'start_time'));
+        $durationColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('duration_minutes', 'duration'));
+        $statusColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('status'));
+        $priceColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('price', 'amount', 'total_price', 'total'));
+        $walkerNameColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('walker_name', 'worker_name', 'assigned_walker_name', 'assigned_worker_name'));
+        $adminNotesColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('admin_notes', 'notes'));
+        $clientNameColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('client_name', 'customer_name', 'member_name', 'owner_name'));
+        $petNameColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('pet_name', 'dog_name', 'animal_name'));
+        $statusUpdatedByColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('status_updated_by', 'updated_by'));
+        $statusUpdatedAtColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('status_updated_at', 'updated_at'));
+        $createdAtColumn = ddAdminCreateBookingFirstExistingColumn($bookingColumns, array('created_at'));
+
+        $insertColumns = array();
+        $insertPlaceholders = array();
+        $insertValues = array();
 
         $addField = function (string $column, string $placeholder, $value) use (&$insertColumns, &$insertPlaceholders, &$insertValues): void {
             $insertColumns[] = $column;
@@ -239,93 +617,120 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $insertValues[$placeholder] = $value;
         };
 
-        if (hasColumn($bookingColumns, 'user_id')) {
-            $addField('user_id', ':user_id', $userId);
+        if ($clientIdColumn !== null) {
+            $addField($clientIdColumn, ':client_id', $userId);
         }
-        if (hasColumn($bookingColumns, 'pet_id')) {
-            $addField('pet_id', ':pet_id', $petId);
+
+        if ($petIdColumn !== null) {
+            $addField($petIdColumn, ':pet_id', $petId);
         }
-        if (hasColumn($bookingColumns, 'assigned_walker_id')) {
-            $addField('assigned_walker_id', ':assigned_walker_id', $assignedWalkerId > 0 ? $assignedWalkerId : null);
+
+        if ($walkerIdColumn !== null) {
+            $addField($walkerIdColumn, ':assigned_walker_id', $assignedWalkerId > 0 ? $assignedWalkerId : null);
         }
-        if (hasColumn($bookingColumns, 'service_type')) {
-            $addField('service_type', ':service_type', $serviceType);
+
+        if ($serviceTypeColumn !== null) {
+            $addField($serviceTypeColumn, ':service_type', $serviceType);
         }
-        if (hasColumn($bookingColumns, 'service_date')) {
-            $addField('service_date', ':service_date', $serviceDate);
+
+        if ($serviceDateColumn !== null) {
+            $addField($serviceDateColumn, ':service_date', $serviceDate);
         }
-        if (hasColumn($bookingColumns, 'service_time')) {
-            $addField('service_time', ':service_time', $serviceTime);
+
+        if ($serviceTimeColumn !== null) {
+            $addField($serviceTimeColumn, ':service_time', $serviceTime);
         }
-        if (hasColumn($bookingColumns, 'duration_minutes')) {
-            $addField('duration_minutes', ':duration_minutes', $durationMinutes);
+
+        if ($durationColumn !== null) {
+            $addField($durationColumn, ':duration_minutes', $durationMinutes);
         }
-        if (hasColumn($bookingColumns, 'status')) {
-            $addField('status', ':status', $status);
+
+        if ($statusColumn !== null) {
+            $addField($statusColumn, ':status', $status);
         }
-        if (hasColumn($bookingColumns, 'price')) {
-            $addField('price', ':price', $price);
+
+        if ($priceColumn !== null) {
+            $addField($priceColumn, ':price', $price);
         }
-        if (hasColumn($bookingColumns, 'walker_name')) {
-            $addField('walker_name', ':walker_name', $selectedWalker['label'] ?? null);
+
+        if ($walkerNameColumn !== null) {
+            $addField($walkerNameColumn, ':walker_name', $selectedWalker !== null ? (string) ($selectedWalker['label'] ?? '') : null);
         }
-        if (hasColumn($bookingColumns, 'admin_notes')) {
-            $addField('admin_notes', ':admin_notes', $adminNotes !== '' ? $adminNotes : null);
+
+        if ($adminNotesColumn !== null) {
+            $addField($adminNotesColumn, ':admin_notes', $adminNotes !== '' ? $adminNotes : null);
         }
-        if (hasColumn($bookingColumns, 'status_updated_by')) {
-            $addField('status_updated_by', ':status_updated_by', 'admin');
+
+        if ($clientNameColumn !== null) {
+            $addField($clientNameColumn, ':client_name', $selectedClient !== null ? (string) ($selectedClient['label'] ?? '') : null);
         }
-        if (hasColumn($bookingColumns, 'status_updated_at')) {
-            $insertColumns[] = 'status_updated_at';
+
+        if ($petNameColumn !== null) {
+            $addField($petNameColumn, ':pet_name', $selectedPet !== null ? (string) ($selectedPet['pet_name'] ?? '') : null);
+        }
+
+        if ($statusUpdatedByColumn !== null) {
+            $addField($statusUpdatedByColumn, ':status_updated_by', 'admin');
+        }
+
+        if ($statusUpdatedAtColumn !== null) {
+            $insertColumns[] = $statusUpdatedAtColumn;
             $insertPlaceholders[] = 'CURRENT_TIMESTAMP';
         }
 
-        if (!$insertColumns) {
+        if ($createdAtColumn !== null && $createdAtColumn !== $statusUpdatedAtColumn) {
+            $insertColumns[] = $createdAtColumn;
+            $insertPlaceholders[] = 'CURRENT_TIMESTAMP';
+        }
+
+        if (empty($insertColumns)) {
             $errors[] = 'No compatible booking columns were found.';
         } else {
-            $sql = "
-                INSERT INTO bookings (" . implode(', ', $insertColumns) . ")
-                VALUES (" . implode(', ', $insertPlaceholders) . ")
-            ";
-
-            $stmt = $pdo->prepare($sql);
-
-            foreach ($insertValues as $placeholder => $value) {
-                if (is_int($value)) {
-                    $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
-                } elseif ($value === null) {
-                    $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
-                } else {
-                    $stmt->bindValue($placeholder, $value);
-                }
+            $quotedColumns = array();
+            foreach ($insertColumns as $column) {
+                $quotedColumns[] = ddAdminCreateBookingQuoteIdentifier($column);
             }
 
-            $stmt->execute();
+            $sql = 'INSERT INTO ' . ddAdminCreateBookingQuoteIdentifier('bookings')
+                . ' (' . implode(', ', $quotedColumns) . ')'
+                . ' VALUES (' . implode(', ', $insertPlaceholders) . ')';
 
-            $newBookingId = (int) $pdo->lastInsertId();
-            header('Location: admin-bookings.php?highlight=' . $newBookingId);
-            exit;
+            try {
+                $stmt = $pdo->prepare($sql);
+
+                foreach ($insertValues as $placeholder => $value) {
+                    if (is_int($value)) {
+                        $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
+                    } elseif ($value === null) {
+                        $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
+                    } elseif (is_float($value)) {
+                        $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+                    } else {
+                        $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+                    }
+                }
+
+                $stmt->execute();
+
+                $newBookingId = (int) $pdo->lastInsertId();
+                header('Location: admin-bookings.php?highlight=' . $newBookingId);
+                exit;
+            } catch (Throwable $e) {
+                $errors[] = 'Booking could not be created.';
+            }
         }
     }
 }
 
-$petsJson = [];
-foreach ($pets as $pet) {
-    $petsJson[] = [
-        'id' => (int) ($pet['id'] ?? 0),
-        'user_id' => (int) ($pet['user_id'] ?? 0),
-        'pet_name' => (string) ($pet['pet_name'] ?? 'Unnamed Pet'),
-        'breed' => (string) ($pet['breed'] ?? ''),
-        'size' => (string) ($pet['size'] ?? ''),
-    ];
-}
+$csrfToken = ddAdminCreateBookingCsrfToken();
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Create Booking | Doggie Dorian’s Admin</title>
+  <title>Admin Create Booking | Doggie Dorian’s</title>
+  <meta name="description" content="Create a booking record in the Doggie Dorian’s admin area.">
   <style>
     * {
       box-sizing: border-box;
@@ -349,6 +754,11 @@ foreach ($pets as $pet) {
         linear-gradient(180deg, #090b13 0%, #05060b 100%);
       color: var(--text);
       font-family: Arial, Helvetica, sans-serif;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
     }
 
     .wrap {
@@ -554,6 +964,7 @@ foreach ($pets as $pet) {
       </div>
 
       <div class="top-actions">
+        <a href="admin-nav.php" class="top-btn">Admin Nav</a>
         <a href="admin-bookings.php" class="top-btn">Back to Bookings</a>
         <a href="admin-dashboard.php" class="top-btn primary">Admin Home</a>
       </div>
@@ -564,12 +975,14 @@ foreach ($pets as $pet) {
         <?php if ($errors): ?>
           <div class="alert error">
             <?php foreach ($errors as $error): ?>
-              <div><?php echo e($error); ?></div>
+              <div><?php echo ddAdminCreateBookingE($error); ?></div>
             <?php endforeach; ?>
           </div>
         <?php endif; ?>
 
         <form method="post" id="admin-create-booking-form">
+          <input type="hidden" name="csrf_token" value="<?php echo ddAdminCreateBookingE($csrfToken); ?>">
+
           <div class="grid">
             <div class="field">
               <label for="user_id">Client</label>
@@ -577,7 +990,7 @@ foreach ($pets as $pet) {
                 <option value="">Select client</option>
                 <?php foreach ($clients as $client): ?>
                   <option value="<?php echo (int) $client['id']; ?>" <?php echo ((string) $client['id'] === $form['user_id']) ? 'selected' : ''; ?>>
-                    <?php echo e($client['label']); ?> (ID <?php echo (int) $client['id']; ?>)
+                    <?php echo ddAdminCreateBookingE((string) $client['label']); ?><?php echo $client['email'] !== '' ? ' (' . ddAdminCreateBookingE((string) $client['email']) . ')' : ''; ?>
                   </option>
                 <?php endforeach; ?>
               </select>
@@ -589,11 +1002,17 @@ foreach ($pets as $pet) {
                 <option value="">Select pet</option>
                 <?php foreach ($pets as $pet): ?>
                   <option
-                    value="<?php echo (int) ($pet['id'] ?? 0); ?>"
-                    data-user-id="<?php echo (int) ($pet['user_id'] ?? 0); ?>"
-                    <?php echo ((string) ($pet['id'] ?? '') === $form['pet_id']) ? 'selected' : ''; ?>
+                    value="<?php echo (int) $pet['id']; ?>"
+                    data-owner-id="<?php echo (int) $pet['owner_id']; ?>"
+                    <?php echo ((string) $pet['id'] === $form['pet_id']) ? 'selected' : ''; ?>
                   >
-                    <?php echo e(($pet['pet_name'] ?? 'Unnamed Pet') . ' (User ID ' . (int) ($pet['user_id'] ?? 0) . ')'); ?>
+                    <?php
+                      $petLabel = (string) $pet['pet_name'];
+                      if ($pet['breed'] !== '') {
+                          $petLabel .= ' — ' . (string) $pet['breed'];
+                      }
+                    ?>
+                    <?php echo ddAdminCreateBookingE($petLabel); ?> (Client ID <?php echo (int) $pet['owner_id']; ?>)
                   </option>
                 <?php endforeach; ?>
               </select>
@@ -604,8 +1023,8 @@ foreach ($pets as $pet) {
               <label for="service_type">Service Type</label>
               <select name="service_type" id="service_type" required>
                 <?php foreach ($serviceOptions as $value => $label): ?>
-                  <option value="<?php echo e($value); ?>" <?php echo $form['service_type'] === $value ? 'selected' : ''; ?>>
-                    <?php echo e($label); ?>
+                  <option value="<?php echo ddAdminCreateBookingE($value); ?>" <?php echo $form['service_type'] === $value ? 'selected' : ''; ?>>
+                    <?php echo ddAdminCreateBookingE($label); ?>
                   </option>
                 <?php endforeach; ?>
               </select>
@@ -613,30 +1032,30 @@ foreach ($pets as $pet) {
 
             <div class="field">
               <label for="duration_minutes">Duration (Minutes)</label>
-              <input type="number" name="duration_minutes" id="duration_minutes" min="1" value="<?php echo e($form['duration_minutes']); ?>" required>
+              <input type="number" name="duration_minutes" id="duration_minutes" min="1" value="<?php echo ddAdminCreateBookingE($form['duration_minutes']); ?>" required>
             </div>
 
             <div class="field">
               <label for="service_date">Service Date</label>
-              <input type="date" name="service_date" id="service_date" value="<?php echo e($form['service_date']); ?>" required>
+              <input type="date" name="service_date" id="service_date" value="<?php echo ddAdminCreateBookingE($form['service_date']); ?>" required>
             </div>
 
             <div class="field">
               <label for="service_time">Service Time</label>
-              <input type="time" name="service_time" id="service_time" value="<?php echo e($form['service_time']); ?>" required>
+              <input type="time" name="service_time" id="service_time" value="<?php echo ddAdminCreateBookingE($form['service_time']); ?>" required>
             </div>
 
             <div class="field">
               <label for="price">Price</label>
-              <input type="number" name="price" id="price" step="0.01" min="0" value="<?php echo e($form['price']); ?>" required>
+              <input type="number" name="price" id="price" step="0.01" min="0" value="<?php echo ddAdminCreateBookingE($form['price']); ?>" required>
             </div>
 
             <div class="field">
               <label for="status">Status</label>
               <select name="status" id="status" required>
                 <?php foreach ($statusOptions as $value => $label): ?>
-                  <option value="<?php echo e($value); ?>" <?php echo $form['status'] === $value ? 'selected' : ''; ?>>
-                    <?php echo e($label); ?>
+                  <option value="<?php echo ddAdminCreateBookingE($value); ?>" <?php echo $form['status'] === $value ? 'selected' : ''; ?>>
+                    <?php echo ddAdminCreateBookingE($label); ?>
                   </option>
                 <?php endforeach; ?>
               </select>
@@ -648,7 +1067,7 @@ foreach ($pets as $pet) {
                 <option value="">No walker assigned yet</option>
                 <?php foreach ($walkers as $walker): ?>
                   <option value="<?php echo (int) $walker['id']; ?>" <?php echo ((string) $walker['id'] === $form['assigned_walker_id']) ? 'selected' : ''; ?>>
-                    <?php echo e($walker['label'] . (!empty($walker['email']) ? ' — ' . $walker['email'] : '')); ?>
+                    <?php echo ddAdminCreateBookingE((string) $walker['label']); ?><?php echo $walker['email'] !== '' ? ' — ' . ddAdminCreateBookingE((string) $walker['email']) : ''; ?>
                   </option>
                 <?php endforeach; ?>
               </select>
@@ -657,7 +1076,7 @@ foreach ($pets as $pet) {
 
             <div class="field full">
               <label for="admin_notes">Admin Notes</label>
-              <textarea name="admin_notes" id="admin_notes" placeholder="Optional internal notes for this booking"><?php echo e($form['admin_notes']); ?></textarea>
+              <textarea name="admin_notes" id="admin_notes" placeholder="Optional internal notes for this booking"><?php echo ddAdminCreateBookingE($form['admin_notes']); ?></textarea>
             </div>
           </div>
 
@@ -675,14 +1094,18 @@ foreach ($pets as $pet) {
       const userSelect = document.getElementById('user_id');
       const petSelect = document.getElementById('pet_id');
 
-      if (!userSelect || !petSelect) return;
+      if (!userSelect || !petSelect) {
+        return;
+      }
 
-      const originalOptions = Array.from(petSelect.options).map(option => ({
-        value: option.value,
-        text: option.text,
-        userId: option.getAttribute('data-user-id') || '',
-        selected: option.selected
-      }));
+      const originalOptions = Array.from(petSelect.options).map(function (option) {
+        return {
+          value: option.value,
+          text: option.text,
+          ownerId: option.getAttribute('data-owner-id') || '',
+          selected: option.selected
+        };
+      });
 
       function rebuildPets() {
         const selectedUserId = userSelect.value;
@@ -695,14 +1118,19 @@ foreach ($pets as $pet) {
         placeholder.textContent = 'Select pet';
         petSelect.appendChild(placeholder);
 
-        originalOptions.forEach(option => {
-          if (option.value === '') return;
-          if (selectedUserId !== '' && option.userId !== selectedUserId) return;
+        originalOptions.forEach(function (option) {
+          if (option.value === '') {
+            return;
+          }
+
+          if (selectedUserId !== '' && option.ownerId !== selectedUserId) {
+            return;
+          }
 
           const el = document.createElement('option');
           el.value = option.value;
           el.textContent = option.text;
-          el.setAttribute('data-user-id', option.userId);
+          el.setAttribute('data-owner-id', option.ownerId);
 
           if (option.value === currentPetId) {
             el.selected = true;

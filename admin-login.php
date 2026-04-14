@@ -2,25 +2,20 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/db.php';
-
-if (session_status() === PHP_SESSION_NONE) {
-}
-
 require_once __DIR__ . '/admin-config.php';
 
-function h(?string $value): string
+function dd_admin_login_h(?string $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirectTo(string $url): never
+function dd_admin_login_redirect(string $url): never
 {
     header('Location: ' . $url);
     exit;
 }
 
-function clearNonAdminSessionKeys(): void
+function dd_admin_login_clear_non_admin_session_keys(): void
 {
     unset(
         $_SESSION['walker_id'],
@@ -28,66 +23,96 @@ function clearNonAdminSessionKeys(): void
         $_SESSION['employee_id'],
         $_SESSION['worker_id'],
         $_SESSION['member_id'],
-        $_SESSION['client_id'],
-        $_SESSION['user_role']
+        $_SESSION['client_id']
     );
 }
 
-function setAdminSession(string $email, string $name): void
+function dd_admin_login_set_session(string $email, string $name): void
 {
-    clearNonAdminSessionKeys();
+    dd_admin_login_clear_non_admin_session_keys();
 
-    /**
-     * Keep admin session keys consistent across all admin pages.
-     * Some pages may check different keys, so we set all common ones.
-     */
     $_SESSION['admin_logged_in'] = true;
     $_SESSION['is_admin'] = true;
     $_SESSION['role'] = 'admin';
     $_SESSION['user_role'] = 'admin';
-
-    // Important: populate these so admin pages that expect them do not fail.
     $_SESSION['admin_id'] = 1;
     $_SESSION['user_id'] = 1;
-
     $_SESSION['admin_email'] = $email;
     $_SESSION['admin_name'] = $name;
+
+    $_SESSION['admin'] = array(
+        'id' => 1,
+        'email' => $email,
+        'name' => $name,
+        'role' => 'admin',
+        'logged_in' => true,
+        'is_admin' => true,
+    );
 
     $_SESSION['admin_login_attempts'] = 0;
     $_SESSION['admin_login_locked_until'] = 0;
 }
 
+function dd_admin_login_is_admin(): bool
+{
+    $role = strtolower(trim((string) ($_SESSION['role'] ?? '')));
+    $userRole = strtolower(trim((string) ($_SESSION['user_role'] ?? '')));
+
+    return (
+        (!empty($_SESSION['is_admin']) && $_SESSION['is_admin'] === true)
+        || (!empty($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true)
+        || $role === 'admin'
+        || $userRole === 'admin'
+        || !empty($_SESSION['admin_id'])
+        || (
+            isset($_SESSION['admin'])
+            && is_array($_SESSION['admin'])
+            && (
+                (!empty($_SESSION['admin']['logged_in']) && $_SESSION['admin']['logged_in'] === true)
+                || (!empty($_SESSION['admin']['is_admin']) && $_SESSION['admin']['is_admin'] === true)
+                || strtolower(trim((string) ($_SESSION['admin']['role'] ?? ''))) === 'admin'
+            )
+        )
+    );
+}
+
+function dd_admin_login_csrf_token(): string
+{
+    if (empty($_SESSION['admin_login_csrf']) || !is_string($_SESSION['admin_login_csrf'])) {
+        $_SESSION['admin_login_csrf'] = bin2hex(random_bytes(32));
+    }
+
+    return $_SESSION['admin_login_csrf'];
+}
+
+function dd_admin_login_validate_csrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_login_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
 $error = '';
 $email = trim((string) ($_POST['email'] ?? ''));
 
-$alreadyLoggedInAsAdmin = (
-    (!empty($_SESSION['is_admin']) && $_SESSION['is_admin'] === true)
-    || ((string) ($_SESSION['role'] ?? '') === 'admin')
-    || (!empty($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true)
-    || (!empty($_SESSION['admin_id']))
-);
+if (dd_admin_login_is_admin()) {
+    $existingEmail = trim((string) ($_SESSION['admin_email'] ?? ($masterAdminEmail ?? '')));
+    $existingName = trim((string) ($_SESSION['admin_name'] ?? ($masterAdminDisplayName ?? 'Doggie Dorian’s Admin')));
 
-if ($alreadyLoggedInAsAdmin) {
-    /**
-     * Normalize the session in case old logins only set partial keys.
-     */
-    $existingEmail = (string) ($_SESSION['admin_email'] ?? ($masterAdminEmail ?? ''));
-    $existingName = (string) ($_SESSION['admin_name'] ?? ($masterAdminDisplayName ?? 'Doggie Dorian’s Admin'));
-
-    if (empty($_SESSION['user_id'])) {
-        $_SESSION['user_id'] = 1;
+    if ($existingEmail === '') {
+        $existingEmail = trim((string) ($masterAdminEmail ?? ''));
     }
-    if (empty($_SESSION['admin_id'])) {
-        $_SESSION['admin_id'] = 1;
-    }
-    $_SESSION['is_admin'] = true;
-    $_SESSION['role'] = 'admin';
-    $_SESSION['user_role'] = 'admin';
-    $_SESSION['admin_logged_in'] = true;
-    $_SESSION['admin_email'] = $existingEmail;
-    $_SESSION['admin_name'] = $existingName;
 
-    redirectTo('admin-dashboard.php');
+    if ($existingName === '') {
+        $existingName = trim((string) ($masterAdminDisplayName ?? 'Doggie Dorian’s Admin'));
+    }
+
+    dd_admin_login_set_session($existingEmail, $existingName);
+    dd_admin_login_redirect('admin-dashboard.php');
 }
 
 if (!isset($_SESSION['admin_login_attempts']) || !is_numeric($_SESSION['admin_login_attempts'])) {
@@ -102,7 +127,9 @@ $now = time();
 $lockedUntil = (int) $_SESSION['admin_login_locked_until'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if ($lockedUntil > $now) {
+    if (!dd_admin_login_validate_csrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+        $error = 'Security check failed. Please refresh the page and try again.';
+    } elseif ($lockedUntil > $now) {
         $remaining = $lockedUntil - $now;
         $error = 'Too many failed login attempts. Please wait ' . $remaining . ' seconds and try again.';
     } else {
@@ -112,7 +139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = 'Please enter both email and password.';
         } else {
             $configuredEmail = trim((string) ($masterAdminEmail ?? ''));
-            $configuredHash = (string) ($masterAdminPasswordHash ?? '');
+            $configuredHash = trim((string) ($masterAdminPasswordHash ?? ''));
             $configuredName = trim((string) ($masterAdminDisplayName ?? 'Doggie Dorian’s Admin'));
 
             if ($configuredEmail === '' || $configuredHash === '') {
@@ -123,10 +150,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($emailMatches && $passwordMatches) {
                     session_regenerate_id(true);
-
-                    setAdminSession($configuredEmail, $configuredName);
-
-                    redirectTo('admin-dashboard.php');
+                    dd_admin_login_set_session($configuredEmail, $configuredName);
+                    dd_admin_login_redirect('admin-dashboard.php');
                 } else {
                     $_SESSION['admin_login_attempts'] = (int) $_SESSION['admin_login_attempts'] + 1;
 
@@ -144,7 +169,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$prefillEmail = h($email);
+$prefillEmail = dd_admin_login_h($email);
+$csrfToken = dd_admin_login_csrf_token();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -375,10 +401,12 @@ $prefillEmail = h($email);
             <div class="card-sub">Enter your secure admin credentials to continue.</div>
 
             <?php if ($error !== ''): ?>
-                <div class="message"><?= h($error) ?></div>
+                <div class="message"><?php echo dd_admin_login_h($error); ?></div>
             <?php endif; ?>
 
             <form method="post" action="admin-login.php" novalidate>
+                <input type="hidden" name="csrf_token" value="<?php echo dd_admin_login_h($csrfToken); ?>">
+
                 <div class="field">
                     <label for="email">Admin Email</label>
                     <input
@@ -386,7 +414,7 @@ $prefillEmail = h($email);
                         id="email"
                         name="email"
                         placeholder="admin@doggiedorians.com"
-                        value="<?= $prefillEmail ?>"
+                        value="<?php echo $prefillEmail; ?>"
                         required
                         autocomplete="username"
                     >

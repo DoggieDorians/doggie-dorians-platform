@@ -32,6 +32,11 @@ function h(mixed $value): string
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+function quotedIdentifier(string $value): string
+{
+    return '"' . str_replace('"', '""', $value) . '"';
+}
+
 function tableExists(PDO $pdo, string $tableName): bool
 {
     try {
@@ -46,7 +51,7 @@ function tableExists(PDO $pdo, string $tableName): bool
 function getTableColumns(PDO $pdo, string $tableName): array
 {
     try {
-        $stmt = $pdo->query("PRAGMA table_info(" . $tableName . ")");
+        $stmt = $pdo->query('PRAGMA table_info(' . quotedIdentifier($tableName) . ')');
         $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
         $columns = [];
 
@@ -69,16 +74,18 @@ function firstExistingColumn(array $columns, array $candidates): ?string
             return $candidate;
         }
     }
+
     return null;
 }
 
-function buildSelectFragment(?string $column, string $alias, string $fallbackSql = 'NULL'): string
+function buildSelectFragment(?string $column, string $alias, string $fallbackSql = 'NULL', string $tableAlias = ''): string
 {
     if ($column === null) {
-        return $fallbackSql . ' AS ' . $alias;
+        return $fallbackSql . ' AS ' . quotedIdentifier($alias);
     }
 
-    return $column . ' AS ' . $alias;
+    $prefix = $tableAlias !== '' ? $tableAlias . '.' : '';
+    return $prefix . quotedIdentifier($column) . ' AS ' . quotedIdentifier($alias);
 }
 
 function fetchAllSafe(PDO $pdo, string $sql, array $params = []): array
@@ -144,28 +151,49 @@ function normalizeStatus(mixed $value): string
     return ucwords(str_replace('_', ' ', strtolower($value)));
 }
 
-$trackingTable = null;
-$trackingCandidates = [
+function chooseExistingTable(PDO $pdo, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (tableExists($pdo, $candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+$trackingTable = chooseExistingTable($pdo, [
     'walk_tracking_points',
     'tracking_points',
     'live_tracking',
     'gps_tracking',
     'walk_gps_points',
     'booking_tracking_points',
-];
+    'walk_tracking',
+]);
 
-foreach ($trackingCandidates as $candidate) {
-    if (tableExists($pdo, $candidate)) {
-        $trackingTable = $candidate;
-        break;
-    }
-}
+$bookingsTable = chooseExistingTable($pdo, [
+    'bookings',
+    'walks',
+]);
 
-$bookingsTable = tableExists($pdo, 'bookings') ? 'bookings' : null;
-$workersTable  = tableExists($pdo, 'workers') ? 'workers' : null;
-$membersTable  = tableExists($pdo, 'members') ? 'members' : null;
-$petsTable     = tableExists($pdo, 'pets') ? 'pets' : null;
-$usersTable    = tableExists($pdo, 'users') ? 'users' : null;
+$workersTable = chooseExistingTable($pdo, [
+    'workers',
+    'walkers',
+]);
+
+$membersTable = chooseExistingTable($pdo, [
+    'members',
+]);
+
+$petsTable = chooseExistingTable($pdo, [
+    'pets',
+    'dogs',
+]);
+
+$usersTable = chooseExistingTable($pdo, [
+    'users',
+]);
 
 $liveJobs = [];
 $trackingPoints = [];
@@ -183,7 +211,7 @@ if ($hasAdminAccess) {
     if ($bookingsTable !== null) {
         $bookingCols = getTableColumns($pdo, $bookingsTable);
 
-        $bookingIdCol      = firstExistingColumn($bookingCols, ['id', 'booking_id']);
+        $bookingIdCol      = firstExistingColumn($bookingCols, ['id', 'booking_id', 'walk_id']);
         $serviceCol        = firstExistingColumn($bookingCols, ['service_type', 'service', 'booking_type', 'type']);
         $statusCol         = firstExistingColumn($bookingCols, ['status', 'booking_status', 'walk_status']);
         $workerIdCol       = firstExistingColumn($bookingCols, ['worker_id', 'walker_id', 'staff_id', 'employee_id']);
@@ -198,13 +226,13 @@ if ($hasAdminAccess) {
         $whereParts = [];
 
         if ($statusCol !== null) {
-            $whereParts[] = "b.$statusCol IN ('active','in_progress','started','live','tracking','en_route')";
+            $whereParts[] = "LOWER(COALESCE(b." . quotedIdentifier($statusCol) . ", '')) IN ('active','in_progress','started','live','tracking','en_route')";
         }
 
         if ($startedAtCol !== null && $completedAtCol !== null) {
-            $whereParts[] = "(b.$startedAtCol IS NOT NULL AND b.$startedAtCol != '' AND (b.$completedAtCol IS NULL OR b.$completedAtCol = ''))";
+            $whereParts[] = "(b." . quotedIdentifier($startedAtCol) . " IS NOT NULL AND b." . quotedIdentifier($startedAtCol) . " != '' AND (b." . quotedIdentifier($completedAtCol) . " IS NULL OR b." . quotedIdentifier($completedAtCol) . " = ''))";
         } elseif ($startedAtCol !== null) {
-            $whereParts[] = "(b.$startedAtCol IS NOT NULL AND b.$startedAtCol != '')";
+            $whereParts[] = "(b." . quotedIdentifier($startedAtCol) . " IS NOT NULL AND b." . quotedIdentifier($startedAtCol) . " != '')";
         }
 
         $whereSql = !empty($whereParts) ? '(' . implode(' OR ', $whereParts) . ')' : '1 = 0';
@@ -220,12 +248,12 @@ if ($hasAdminAccess) {
             $mLastCol = firstExistingColumn($memberCols, ['last_name']);
 
             if ($mIdCol !== null) {
-                $memberJoin = " LEFT JOIN {$membersTable} m ON b.{$memberIdCol} = m.{$mIdCol} ";
+                $memberJoin = ' LEFT JOIN ' . quotedIdentifier($membersTable) . ' m ON b.' . quotedIdentifier($memberIdCol) . ' = m.' . quotedIdentifier($mIdCol) . ' ';
                 if ($mNameCol !== null) {
-                    $memberNameExpr = "COALESCE(NULLIF(m.$mNameCol, ''), '—')";
+                    $memberNameExpr = 'COALESCE(NULLIF(m.' . quotedIdentifier($mNameCol) . ", ''), '—')";
                 } else {
-                    $first = $mFirstCol !== null ? "COALESCE(m.$mFirstCol, '')" : "''";
-                    $last  = $mLastCol !== null ? "COALESCE(m.$mLastCol, '')" : "''";
+                    $first = $mFirstCol !== null ? 'COALESCE(m.' . quotedIdentifier($mFirstCol) . ", '')" : "''";
+                    $last  = $mLastCol !== null ? 'COALESCE(m.' . quotedIdentifier($mLastCol) . ", '')" : "''";
                     $memberNameExpr = "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), '—')";
                 }
             }
@@ -237,12 +265,12 @@ if ($hasAdminAccess) {
             $uLastCol = firstExistingColumn($userCols, ['last_name']);
 
             if ($uIdCol !== null) {
-                $memberJoin = " LEFT JOIN {$usersTable} m ON b.{$memberIdCol} = m.{$uIdCol} ";
+                $memberJoin = ' LEFT JOIN ' . quotedIdentifier($usersTable) . ' m ON b.' . quotedIdentifier($memberIdCol) . ' = m.' . quotedIdentifier($uIdCol) . ' ';
                 if ($uNameCol !== null) {
-                    $memberNameExpr = "COALESCE(NULLIF(m.$uNameCol, ''), '—')";
+                    $memberNameExpr = 'COALESCE(NULLIF(m.' . quotedIdentifier($uNameCol) . ", ''), '—')";
                 } else {
-                    $first = $uFirstCol !== null ? "COALESCE(m.$uFirstCol, '')" : "''";
-                    $last  = $uLastCol !== null ? "COALESCE(m.$uLastCol, '')" : "''";
+                    $first = $uFirstCol !== null ? 'COALESCE(m.' . quotedIdentifier($uFirstCol) . ", '')" : "''";
+                    $last  = $uLastCol !== null ? 'COALESCE(m.' . quotedIdentifier($uLastCol) . ", '')" : "''";
                     $memberNameExpr = "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), '—')";
                 }
             }
@@ -253,18 +281,18 @@ if ($hasAdminAccess) {
 
         if ($workerIdCol !== null && $workersTable !== null) {
             $workerCols = getTableColumns($pdo, $workersTable);
-            $wIdCol = firstExistingColumn($workerCols, ['id', 'worker_id', 'user_id']);
-            $wNameCol = firstExistingColumn($workerCols, ['full_name', 'name', 'worker_name']);
+            $wIdCol = firstExistingColumn($workerCols, ['id', 'worker_id', 'user_id', 'walker_id']);
+            $wNameCol = firstExistingColumn($workerCols, ['full_name', 'name', 'worker_name', 'walker_name']);
             $wFirstCol = firstExistingColumn($workerCols, ['first_name']);
             $wLastCol = firstExistingColumn($workerCols, ['last_name']);
 
             if ($wIdCol !== null) {
-                $workerJoin = " LEFT JOIN {$workersTable} w ON b.{$workerIdCol} = w.{$wIdCol} ";
+                $workerJoin = ' LEFT JOIN ' . quotedIdentifier($workersTable) . ' w ON b.' . quotedIdentifier($workerIdCol) . ' = w.' . quotedIdentifier($wIdCol) . ' ';
                 if ($wNameCol !== null) {
-                    $workerNameExpr = "COALESCE(NULLIF(w.$wNameCol, ''), '—')";
+                    $workerNameExpr = 'COALESCE(NULLIF(w.' . quotedIdentifier($wNameCol) . ", ''), '—')";
                 } else {
-                    $first = $wFirstCol !== null ? "COALESCE(w.$wFirstCol, '')" : "''";
-                    $last  = $wLastCol !== null ? "COALESCE(w.$wLastCol, '')" : "''";
+                    $first = $wFirstCol !== null ? 'COALESCE(w.' . quotedIdentifier($wFirstCol) . ", '')" : "''";
+                    $last  = $wLastCol !== null ? 'COALESCE(w.' . quotedIdentifier($wLastCol) . ", '')" : "''";
                     $workerNameExpr = "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), '—')";
                 }
             }
@@ -276,12 +304,12 @@ if ($hasAdminAccess) {
             $uLastCol = firstExistingColumn($userCols, ['last_name']);
 
             if ($uIdCol !== null) {
-                $workerJoin = " LEFT JOIN {$usersTable} w ON b.{$workerIdCol} = w.{$uIdCol} ";
+                $workerJoin = ' LEFT JOIN ' . quotedIdentifier($usersTable) . ' w ON b.' . quotedIdentifier($workerIdCol) . ' = w.' . quotedIdentifier($uIdCol) . ' ';
                 if ($uNameCol !== null) {
-                    $workerNameExpr = "COALESCE(NULLIF(w.$uNameCol, ''), '—')";
+                    $workerNameExpr = 'COALESCE(NULLIF(w.' . quotedIdentifier($uNameCol) . ", ''), '—')";
                 } else {
-                    $first = $uFirstCol !== null ? "COALESCE(w.$uFirstCol, '')" : "''";
-                    $last  = $uLastCol !== null ? "COALESCE(w.$uLastCol, '')" : "''";
+                    $first = $uFirstCol !== null ? 'COALESCE(w.' . quotedIdentifier($uFirstCol) . ", '')" : "''";
+                    $last  = $uLastCol !== null ? 'COALESCE(w.' . quotedIdentifier($uLastCol) . ", '')" : "''";
                     $workerNameExpr = "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), '—')";
                 }
             }
@@ -292,41 +320,41 @@ if ($hasAdminAccess) {
 
         if ($petIdCol !== null && $petsTable !== null) {
             $petCols = getTableColumns($pdo, $petsTable);
-            $pIdCol = firstExistingColumn($petCols, ['id', 'pet_id']);
+            $pIdCol = firstExistingColumn($petCols, ['id', 'pet_id', 'dog_id']);
             $pNameCol = firstExistingColumn($petCols, ['name', 'pet_name', 'dog_name']);
 
             if ($pIdCol !== null && $pNameCol !== null) {
-                $petJoin = " LEFT JOIN {$petsTable} p ON b.{$petIdCol} = p.{$pIdCol} ";
-                $petNameExpr = "COALESCE(NULLIF(p.$pNameCol, ''), '—')";
+                $petJoin = ' LEFT JOIN ' . quotedIdentifier($petsTable) . ' p ON b.' . quotedIdentifier($petIdCol) . ' = p.' . quotedIdentifier($pIdCol) . ' ';
+                $petNameExpr = 'COALESCE(NULLIF(p.' . quotedIdentifier($pNameCol) . ", ''), '—')";
             }
         }
 
         $liveSql = "
             SELECT
-                " . buildSelectFragment($bookingIdCol, 'booking_id') . ",
-                " . buildSelectFragment($serviceCol, 'service_type', "'Service'") . ",
-                " . buildSelectFragment($statusCol, 'status', "'active'") . ",
-                " . buildSelectFragment($workerIdCol, 'worker_id') . ",
-                " . buildSelectFragment($memberIdCol, 'member_id') . ",
-                " . buildSelectFragment($petIdCol, 'pet_id') . ",
-                " . buildSelectFragment($scheduledStartCol, 'scheduled_start') . ",
-                " . buildSelectFragment($scheduledEndCol, 'scheduled_end') . ",
-                " . buildSelectFragment($startedAtCol, 'started_at') . ",
-                " . buildSelectFragment($completedAtCol, 'completed_at') . ",
-                " . buildSelectFragment($createdAtCol, 'created_at') . ",
-                {$memberNameExpr} AS member_name,
-                {$workerNameExpr} AS worker_name,
-                {$petNameExpr} AS pet_name
-            FROM {$bookingsTable} b
+                " . buildSelectFragment($bookingIdCol, 'booking_id', 'NULL', 'b') . ",
+                " . buildSelectFragment($serviceCol, 'service_type', "'Service'", 'b') . ",
+                " . buildSelectFragment($statusCol, 'status', "'active'", 'b') . ",
+                " . buildSelectFragment($workerIdCol, 'worker_id', 'NULL', 'b') . ",
+                " . buildSelectFragment($memberIdCol, 'member_id', 'NULL', 'b') . ",
+                " . buildSelectFragment($petIdCol, 'pet_id', 'NULL', 'b') . ",
+                " . buildSelectFragment($scheduledStartCol, 'scheduled_start', 'NULL', 'b') . ",
+                " . buildSelectFragment($scheduledEndCol, 'scheduled_end', 'NULL', 'b') . ",
+                " . buildSelectFragment($startedAtCol, 'started_at', 'NULL', 'b') . ",
+                " . buildSelectFragment($completedAtCol, 'completed_at', 'NULL', 'b') . ",
+                " . buildSelectFragment($createdAtCol, 'created_at', 'NULL', 'b') . ",
+                {$memberNameExpr} AS " . quotedIdentifier('member_name') . ",
+                {$workerNameExpr} AS " . quotedIdentifier('worker_name') . ",
+                {$petNameExpr} AS " . quotedIdentifier('pet_name') . "
+            FROM " . quotedIdentifier($bookingsTable) . " b
             {$memberJoin}
             {$workerJoin}
             {$petJoin}
             WHERE {$whereSql}
             ORDER BY
-                CASE WHEN started_at IS NULL OR started_at = '' THEN 1 ELSE 0 END,
-                started_at DESC,
-                scheduled_start DESC,
-                created_at DESC
+                CASE WHEN " . quotedIdentifier('started_at') . " IS NULL OR " . quotedIdentifier('started_at') . " = '' THEN 1 ELSE 0 END,
+                " . quotedIdentifier('started_at') . " DESC,
+                " . quotedIdentifier('scheduled_start') . " DESC,
+                " . quotedIdentifier('created_at') . " DESC
             LIMIT 100
         ";
 
@@ -335,7 +363,7 @@ if ($hasAdminAccess) {
 
         $uniqueWorkers = [];
         foreach ($liveJobs as $job) {
-            $id = (string) ($job['worker_id'] ?? '');
+            $id = trim((string) ($job['worker_id'] ?? ''));
             if ($id !== '') {
                 $uniqueWorkers[$id] = true;
             }
@@ -361,18 +389,18 @@ if ($hasAdminAccess) {
 
         if ($tpWorkerIdCol !== null && $workersTable !== null) {
             $workerCols = getTableColumns($pdo, $workersTable);
-            $wIdCol = firstExistingColumn($workerCols, ['id', 'worker_id', 'user_id']);
-            $wNameCol = firstExistingColumn($workerCols, ['full_name', 'name', 'worker_name']);
+            $wIdCol = firstExistingColumn($workerCols, ['id', 'worker_id', 'user_id', 'walker_id']);
+            $wNameCol = firstExistingColumn($workerCols, ['full_name', 'name', 'worker_name', 'walker_name']);
             $wFirstCol = firstExistingColumn($workerCols, ['first_name']);
             $wLastCol = firstExistingColumn($workerCols, ['last_name']);
 
             if ($wIdCol !== null) {
-                $tpWorkerJoin = " LEFT JOIN {$workersTable} w ON t.{$tpWorkerIdCol} = w.{$wIdCol} ";
+                $tpWorkerJoin = ' LEFT JOIN ' . quotedIdentifier($workersTable) . ' w ON t.' . quotedIdentifier($tpWorkerIdCol) . ' = w.' . quotedIdentifier($wIdCol) . ' ';
                 if ($wNameCol !== null) {
-                    $tpWorkerNameExpr = "COALESCE(NULLIF(w.$wNameCol, ''), '—')";
+                    $tpWorkerNameExpr = 'COALESCE(NULLIF(w.' . quotedIdentifier($wNameCol) . ", ''), '—')";
                 } else {
-                    $first = $wFirstCol !== null ? "COALESCE(w.$wFirstCol, '')" : "''";
-                    $last  = $wLastCol !== null ? "COALESCE(w.$wLastCol, '')" : "''";
+                    $first = $wFirstCol !== null ? 'COALESCE(w.' . quotedIdentifier($wFirstCol) . ", '')" : "''";
+                    $last  = $wLastCol !== null ? 'COALESCE(w.' . quotedIdentifier($wLastCol) . ", '')" : "''";
                     $tpWorkerNameExpr = "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), '—')";
                 }
             }
@@ -384,12 +412,12 @@ if ($hasAdminAccess) {
             $uLastCol = firstExistingColumn($userCols, ['last_name']);
 
             if ($uIdCol !== null) {
-                $tpWorkerJoin = " LEFT JOIN {$usersTable} w ON t.{$tpWorkerIdCol} = w.{$uIdCol} ";
+                $tpWorkerJoin = ' LEFT JOIN ' . quotedIdentifier($usersTable) . ' w ON t.' . quotedIdentifier($tpWorkerIdCol) . ' = w.' . quotedIdentifier($uIdCol) . ' ';
                 if ($uNameCol !== null) {
-                    $tpWorkerNameExpr = "COALESCE(NULLIF(w.$uNameCol, ''), '—')";
+                    $tpWorkerNameExpr = 'COALESCE(NULLIF(w.' . quotedIdentifier($uNameCol) . ", ''), '—')";
                 } else {
-                    $first = $uFirstCol !== null ? "COALESCE(w.$uFirstCol, '')" : "''";
-                    $last  = $uLastCol !== null ? "COALESCE(w.$uLastCol, '')" : "''";
+                    $first = $uFirstCol !== null ? 'COALESCE(w.' . quotedIdentifier($uFirstCol) . ", '')" : "''";
+                    $last  = $uLastCol !== null ? 'COALESCE(w.' . quotedIdentifier($uLastCol) . ", '')" : "''";
                     $tpWorkerNameExpr = "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), '—')";
                 }
             }
@@ -397,19 +425,19 @@ if ($hasAdminAccess) {
 
         $trackingSql = "
             SELECT
-                " . buildSelectFragment($tpIdCol, 'point_id') . ",
-                " . buildSelectFragment($tpBookingIdCol, 'booking_id') . ",
-                " . buildSelectFragment($tpWorkerIdCol, 'worker_id') . ",
-                " . buildSelectFragment($tpLatCol, 'latitude') . ",
-                " . buildSelectFragment($tpLngCol, 'longitude') . ",
-                " . buildSelectFragment($tpAccCol, 'accuracy') . ",
-                " . buildSelectFragment($tpSpeedCol, 'speed') . ",
-                " . buildSelectFragment($tpHeadingCol, 'heading') . ",
-                " . buildSelectFragment($tpCreatedAtCol, 'created_at') . ",
-                {$tpWorkerNameExpr} AS worker_name
-            FROM {$trackingTable} t
+                " . buildSelectFragment($tpIdCol, 'point_id', 'NULL', 't') . ",
+                " . buildSelectFragment($tpBookingIdCol, 'booking_id', 'NULL', 't') . ",
+                " . buildSelectFragment($tpWorkerIdCol, 'worker_id', 'NULL', 't') . ",
+                " . buildSelectFragment($tpLatCol, 'latitude', 'NULL', 't') . ",
+                " . buildSelectFragment($tpLngCol, 'longitude', 'NULL', 't') . ",
+                " . buildSelectFragment($tpAccCol, 'accuracy', 'NULL', 't') . ",
+                " . buildSelectFragment($tpSpeedCol, 'speed', 'NULL', 't') . ",
+                " . buildSelectFragment($tpHeadingCol, 'heading', 'NULL', 't') . ",
+                " . buildSelectFragment($tpCreatedAtCol, 'created_at', 'NULL', 't') . ",
+                {$tpWorkerNameExpr} AS " . quotedIdentifier('worker_name') . "
+            FROM " . quotedIdentifier($trackingTable) . " t
             {$tpWorkerJoin}
-            ORDER BY created_at DESC
+            ORDER BY " . quotedIdentifier('created_at') . " DESC
             LIMIT 200
         ";
 
@@ -432,6 +460,8 @@ $systemNotes[] = 'Session admin_id: ' . ($adminId > 0 ? (string) $adminId : '0')
 $systemNotes[] = 'Session is_admin: ' . ($isAdmin ? 'true' : 'false');
 $systemNotes[] = $bookingsTable !== null ? "Bookings table detected: {$bookingsTable}" : 'Bookings table not found';
 $systemNotes[] = $trackingTable !== null ? "Tracking table detected: {$trackingTable}" : 'Tracking table not found';
+$systemNotes[] = $workersTable !== null ? "Worker table detected: {$workersTable}" : 'Worker table not found';
+$systemNotes[] = $petsTable !== null ? "Pet table detected: {$petsTable}" : 'Pet table not found';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -808,6 +838,7 @@ $systemNotes[] = $trackingTable !== null ? "Tracking table detected: {$trackingT
 
             <div class="top-actions">
                 <a class="btn" href="admin-dashboard.php">Back to Dashboard</a>
+                <a class="btn" href="admin-revenue.php">Revenue</a>
                 <a class="btn" href="admin-bookings.php">Bookings</a>
                 <a class="btn btn-primary" href="admin-live-tracking.php">Refresh</a>
             </div>

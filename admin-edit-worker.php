@@ -3,93 +3,70 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
-
-/**
- * Doggie Dorian's
- * admin-edit-worker.php
- *
- * Stable admin-only worker edit page.
- */
+require_once __DIR__ . '/admin-auth.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     exit('Database connection not available.');
 }
 
-function h(mixed $value): string
+function ddAdminEditWorkerH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirect_to(string $url): never
+function ddAdminEditWorkerRedirect(string $url): void
 {
     header('Location: ' . $url);
     exit;
 }
 
-function is_admin_session(): bool
+function ddAdminEditWorkerQuoteIdentifier(string $identifier): string
 {
-    $roleCandidates = [
-        $_SESSION['role'] ?? null,
-        $_SESSION['user_role'] ?? null,
-        $_SESSION['account_role'] ?? null,
-        $_SESSION['account_type'] ?? null,
-    ];
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
 
-    foreach ($roleCandidates as $role) {
-        if (is_string($role) && strtolower(trim($role)) === 'admin') {
-            return true;
+function ddAdminEditWorkerTableExists(PDO $pdo, string $table): bool
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    }
+}
+
+function ddAdminEditWorkerGetColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminEditWorkerTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminEditWorkerQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
         }
-    }
 
-    if (!empty($_SESSION['is_admin']) || !empty($_SESSION['admin_logged_in'])) {
-        return true;
-    }
-
-    return false;
-}
-
-if (!isset($_SESSION['user_id']) && empty($_SESSION['admin_logged_in'])) {
-    redirect_to('admin-login.php');
-}
-
-if (!is_admin_session()) {
-    redirect_to('login.php');
-}
-
-function table_exists(PDO $pdo, string $table): bool
-{
-    static $cache = [];
-
-    if (array_key_exists($table, $cache)) {
-        return $cache[$table];
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-        $stmt->execute([':table' => $table]);
-        return $cache[$table] = (bool) $stmt->fetchColumn();
-    } catch (Throwable) {
-        return $cache[$table] = false;
-    }
-}
-
-function get_columns(PDO $pdo, string $table): array
-{
-    static $cache = [];
-
-    if (array_key_exists($table, $cache)) {
-        return $cache[$table];
-    }
-
-    if (!table_exists($pdo, $table)) {
-        return $cache[$table] = [];
-    }
-
-    try {
-        $stmt = $pdo->query("PRAGMA table_info($table)");
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        $columns = [];
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $columns = array();
 
         foreach ($rows as $row) {
             if (!empty($row['name'])) {
@@ -97,13 +74,15 @@ function get_columns(PDO $pdo, string $table): array
             }
         }
 
-        return $cache[$table] = $columns;
-    } catch (Throwable) {
-        return $cache[$table] = [];
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 }
 
-function first_existing_column(array $columns, array $candidates): ?string
+function ddAdminEditWorkerFirstExistingColumn(array $columns, array $candidates): ?string
 {
     foreach ($candidates as $candidate) {
         if (in_array($candidate, $columns, true)) {
@@ -114,7 +93,7 @@ function first_existing_column(array $columns, array $candidates): ?string
     return null;
 }
 
-function value_from_row(array $row, array $candidates, mixed $default = null): mixed
+function ddAdminEditWorkerValueFromRow(array $row, array $candidates, $default = null)
 {
     foreach ($candidates as $candidate) {
         if (array_key_exists($candidate, $row) && $row[$candidate] !== null) {
@@ -125,14 +104,16 @@ function value_from_row(array $row, array $candidates, mixed $default = null): m
     return $default;
 }
 
-function build_name(array $row): string
+function ddAdminEditWorkerBuildName(array $row): string
 {
-    $full = trim((string) value_from_row($row, [
+    $full = trim((string) ddAdminEditWorkerValueFromRow($row, array(
         'full_name',
         'name',
         'display_name',
         'username',
-    ], ''));
+        'walker_name',
+        'worker_name',
+    ), ''));
 
     if ($full !== '') {
         return $full;
@@ -140,57 +121,185 @@ function build_name(array $row): string
 
     $first = trim((string) ($row['first_name'] ?? ''));
     $last = trim((string) ($row['last_name'] ?? ''));
-
     $combined = trim($first . ' ' . $last);
+
     return $combined !== '' ? $combined : 'Unknown';
 }
 
-if (!table_exists($pdo, 'users')) {
-    exit('Users table not found.');
+function ddAdminEditWorkerSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
 }
 
-$userColumns = get_columns($pdo, 'users');
+function ddAdminEditWorkerCsrfToken(): string
+{
+    if (empty($_SESSION['admin_edit_worker_csrf']) || !is_string($_SESSION['admin_edit_worker_csrf'])) {
+        $_SESSION['admin_edit_worker_csrf'] = bin2hex(random_bytes(32));
+    }
 
-$userIdCol = first_existing_column($userColumns, ['id', 'user_id']);
-$roleCol = first_existing_column($userColumns, ['role', 'user_role', 'account_role', 'account_type']);
+    return $_SESSION['admin_edit_worker_csrf'];
+}
 
-if ($userIdCol === null) {
-    exit('Users table is missing a usable ID column.');
+function ddAdminEditWorkerValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_edit_worker_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
+function ddAdminEditWorkerDetectSources(PDO $pdo): array
+{
+    $sources = array();
+
+    foreach (array('users', 'walkers', 'workers') as $table) {
+        if (!ddAdminEditWorkerTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminEditWorkerGetColumns($pdo, $table);
+        $idColumn = ddAdminEditWorkerFirstExistingColumn($columns, array('id', 'user_id', 'walker_id', 'worker_id'));
+
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $sources[] = array(
+            'table' => $table,
+            'columns' => $columns,
+            'id_column' => $idColumn,
+            'role_column' => ddAdminEditWorkerFirstExistingColumn($columns, array('role', 'user_role', 'account_role', 'account_type')),
+            'email_column' => ddAdminEditWorkerFirstExistingColumn($columns, array('email')),
+        );
+    }
+
+    return $sources;
+}
+
+function ddAdminEditWorkerLoadRecordFromTable(PDO $pdo, string $table, int $workerId, array $sources): ?array
+{
+    foreach ($sources as $source) {
+        if ((string) $source['table'] !== $table) {
+            continue;
+        }
+
+        $row = ddAdminEditWorkerSafeFetchOne(
+            $pdo,
+            'SELECT * FROM ' . ddAdminEditWorkerQuoteIdentifier((string) $source['table']) .
+            ' WHERE ' . ddAdminEditWorkerQuoteIdentifier((string) $source['id_column']) . ' = :id LIMIT 1',
+            array(':id' => $workerId)
+        );
+
+        if (!is_array($row) || empty($row)) {
+            return null;
+        }
+
+        if ($table === 'users') {
+            $roleColumn = $source['role_column'] ?? null;
+            if (is_string($roleColumn) && $roleColumn !== '') {
+                $role = strtolower(trim((string) ($row[$roleColumn] ?? '')));
+                if (!in_array($role, array('walker', 'worker', 'staff', 'employee'), true)) {
+                    return null;
+                }
+            }
+        }
+
+        $source['row'] = $row;
+        return $source;
+    }
+
+    return null;
+}
+
+function ddAdminEditWorkerLoadRecord(PDO $pdo, int $workerId, array $sources, string $preferredSource = ''): ?array
+{
+    $validSources = array('users', 'walkers', 'workers');
+
+    if ($preferredSource !== '' && in_array($preferredSource, $validSources, true)) {
+        $preferred = ddAdminEditWorkerLoadRecordFromTable($pdo, $preferredSource, $workerId, $sources);
+        if ($preferred !== null) {
+            return $preferred;
+        }
+    }
+
+    foreach ($validSources as $table) {
+        if ($table === $preferredSource) {
+            continue;
+        }
+
+        $loaded = ddAdminEditWorkerLoadRecordFromTable($pdo, $table, $workerId, $sources);
+        if ($loaded !== null) {
+            return $loaded;
+        }
+    }
+
+    return null;
+}
+
+$sources = ddAdminEditWorkerDetectSources($pdo);
+if (empty($sources)) {
+    exit('No supported worker tables were found.');
 }
 
 $workerId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 if ($workerId <= 0) {
-    exit('Invalid worker ID.');
+    $workerId = isset($_GET['worker_id']) ? (int) $_GET['worker_id'] : 0;
+}
+if ($workerId <= 0) {
+    $workerId = isset($_POST['worker_id']) ? (int) $_POST['worker_id'] : 0;
 }
 
-try {
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE {$userIdCol} = :id LIMIT 1");
-    $stmt->execute([':id' => $workerId]);
-    $worker = $stmt->fetch(PDO::FETCH_ASSOC);
-} catch (Throwable $e) {
-    exit('Could not load worker: ' . h($e->getMessage()));
+$workerSource = strtolower(trim((string) ($_GET['source'] ?? $_POST['source'] ?? '')));
+if (!in_array($workerSource, array('users', 'walkers', 'workers'), true)) {
+    $workerSource = '';
 }
 
-if (!$worker) {
-    exit('Worker not found.');
+if ($workerId <= 0) {
+    ddAdminEditWorkerRedirect('admin-walker-management.php');
 }
 
-$success = '';
+$loaded = ddAdminEditWorkerLoadRecord($pdo, $workerId, $sources, $workerSource);
+if ($loaded === null) {
+    ddAdminEditWorkerRedirect('admin-walker-management.php');
+}
+
+$workerTable = (string) $loaded['table'];
+$userColumns = (array) $loaded['columns'];
+$userIdCol = (string) $loaded['id_column'];
+$roleCol = $loaded['role_column'];
+$worker = (array) $loaded['row'];
+
+$resolvedWorkerSource = $workerTable;
+$sourceParam = urlencode($resolvedWorkerSource);
+
 $error = '';
 
-$currentFullName = trim((string) value_from_row($worker, ['full_name', 'name'], ''));
-$currentFirstName = trim((string) value_from_row($worker, ['first_name'], ''));
-$currentLastName = trim((string) value_from_row($worker, ['last_name'], ''));
-$currentUsername = trim((string) value_from_row($worker, ['username'], ''));
-$currentEmail = trim((string) value_from_row($worker, ['email'], ''));
-$currentPhone = trim((string) value_from_row($worker, ['phone', 'phone_number', 'mobile'], ''));
-$currentRole = strtolower(trim((string) value_from_row($worker, ['role', 'user_role', 'account_role', 'account_type'], 'walker')));
-$currentStatus = strtolower(trim((string) value_from_row($worker, ['status', 'account_status', 'worker_status'], '')));
-$currentAvailability = trim((string) value_from_row($worker, ['availability', 'worker_availability', 'schedule'], ''));
-$currentBio = trim((string) value_from_row($worker, ['bio', 'about', 'about_me', 'notes', 'worker_bio'], ''));
+$currentFullName = trim((string) ddAdminEditWorkerValueFromRow($worker, array('full_name', 'name'), ''));
+$currentFirstName = trim((string) ddAdminEditWorkerValueFromRow($worker, array('first_name'), ''));
+$currentLastName = trim((string) ddAdminEditWorkerValueFromRow($worker, array('last_name'), ''));
+$currentUsername = trim((string) ddAdminEditWorkerValueFromRow($worker, array('username'), ''));
+$currentEmail = trim((string) ddAdminEditWorkerValueFromRow($worker, array('email'), ''));
+$currentPhone = trim((string) ddAdminEditWorkerValueFromRow($worker, array('phone', 'phone_number', 'mobile'), ''));
+$currentRole = strtolower(trim((string) ddAdminEditWorkerValueFromRow($worker, array('role', 'user_role', 'account_role', 'account_type'), 'walker')));
+$currentStatus = strtolower(trim((string) ddAdminEditWorkerValueFromRow($worker, array('status', 'account_status', 'worker_status'), '')));
+$currentAvailability = trim((string) ddAdminEditWorkerValueFromRow($worker, array('availability', 'worker_availability', 'schedule'), ''));
+$currentBio = trim((string) ddAdminEditWorkerValueFromRow($worker, array('bio', 'about', 'about_me', 'notes', 'worker_bio'), ''));
 
 if ($currentStatus === '') {
-    $activeGuess = value_from_row($worker, ['is_active', 'active', 'enabled'], null);
+    $activeGuess = ddAdminEditWorkerValueFromRow($worker, array('is_active', 'active', 'enabled'), null);
     if ($activeGuess !== null) {
         $currentStatus = ((int) $activeGuess === 1) ? 'active' : 'disabled';
     } elseif (array_key_exists('disabled', $worker)) {
@@ -200,18 +309,18 @@ if ($currentStatus === '') {
     }
 }
 
-$form = [
+$form = array(
     'full_name' => $currentFullName,
     'first_name' => $currentFirstName,
     'last_name' => $currentLastName,
     'username' => $currentUsername,
     'email' => $currentEmail,
     'phone' => $currentPhone,
-    'role' => in_array($currentRole, ['walker', 'worker', 'staff', 'employee'], true) ? $currentRole : 'walker',
-    'status' => in_array($currentStatus, ['active', 'disabled'], true) ? $currentStatus : 'active',
+    'role' => in_array($currentRole, array('walker', 'worker', 'staff', 'employee'), true) ? $currentRole : 'walker',
+    'status' => in_array($currentStatus, array('active', 'disabled'), true) ? $currentStatus : 'active',
     'availability' => $currentAvailability,
     'bio' => $currentBio,
-];
+);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $form['full_name'] = trim((string) ($_POST['full_name'] ?? ''));
@@ -226,163 +335,203 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $form['bio'] = trim((string) ($_POST['bio'] ?? ''));
     $password = (string) ($_POST['password'] ?? '');
 
-    $allowedRoles = ['walker', 'worker', 'staff', 'employee'];
-    if (!in_array($form['role'], $allowedRoles, true)) {
-        $form['role'] = 'walker';
-    }
-
-    if (!in_array($form['status'], ['active', 'disabled'], true)) {
-        $form['status'] = 'active';
-    }
-
-    $displayName = $form['full_name'] !== ''
-        ? $form['full_name']
-        : trim($form['first_name'] . ' ' . $form['last_name']);
-
-    if ($displayName === '' && $form['username'] === '') {
-        $error = 'Please enter a worker name or username.';
-    } elseif ($form['email'] === '') {
-        $error = 'Please enter an email address.';
-    } elseif (!filter_var($form['email'], FILTER_VALIDATE_EMAIL)) {
-        $error = 'Please enter a valid email address.';
+    if (!ddAdminEditWorkerValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+        $error = 'Security check failed. Please refresh the page and try again.';
     } else {
-        try {
-            $emailStmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE email = :email AND {$userIdCol} != :id");
-            $emailStmt->execute([
-                ':email' => $form['email'],
-                ':id' => $workerId,
-            ]);
+        $allowedRoles = array('walker', 'worker', 'staff', 'employee');
+        if (!in_array($form['role'], $allowedRoles, true)) {
+            $form['role'] = 'walker';
+        }
 
-            if ((int) $emailStmt->fetchColumn() > 0) {
-                $error = 'That email is already in use by another account.';
-            } else {
-                $updates = [];
-                $params = [':id' => $workerId];
+        if (!in_array($form['status'], array('active', 'disabled'), true)) {
+            $form['status'] = 'active';
+        }
 
-                if (in_array('full_name', $userColumns, true)) {
-                    $updates[] = 'full_name = :full_name';
-                    $params[':full_name'] = $displayName;
-                } elseif (in_array('name', $userColumns, true)) {
-                    $updates[] = 'name = :name';
-                    $params[':name'] = $displayName;
-                }
+        $displayName = $form['full_name'] !== ''
+            ? $form['full_name']
+            : trim($form['first_name'] . ' ' . $form['last_name']);
 
-                if (in_array('first_name', $userColumns, true)) {
-                    $updates[] = 'first_name = :first_name';
-                    $params[':first_name'] = $form['first_name'];
-                }
+        if ($displayName === '' && $form['username'] === '') {
+            $error = 'Please enter a worker name or username.';
+        } elseif ($form['email'] === '') {
+            $error = 'Please enter an email address.';
+        } elseif (!filter_var($form['email'], FILTER_VALIDATE_EMAIL)) {
+            $error = 'Please enter a valid email address.';
+        } else {
+            try {
+                $emailColumn = ddAdminEditWorkerFirstExistingColumn($userColumns, array('email'));
+                if ($emailColumn !== null) {
+                    $emailStmt = $pdo->prepare(
+                        'SELECT COUNT(*) FROM ' . ddAdminEditWorkerQuoteIdentifier($workerTable) .
+                        ' WHERE LOWER(' . ddAdminEditWorkerQuoteIdentifier($emailColumn) . ') = LOWER(:email)' .
+                        ' AND ' . ddAdminEditWorkerQuoteIdentifier($userIdCol) . ' != :id'
+                    );
+                    $emailStmt->execute(array(
+                        ':email' => $form['email'],
+                        ':id' => $workerId,
+                    ));
 
-                if (in_array('last_name', $userColumns, true)) {
-                    $updates[] = 'last_name = :last_name';
-                    $params[':last_name'] = $form['last_name'];
-                }
-
-                if (in_array('username', $userColumns, true)) {
-                    $updates[] = 'username = :username';
-                    $params[':username'] = $form['username'] !== '' ? $form['username'] : strtolower(str_replace(' ', '', $displayName));
-                }
-
-                if (in_array('email', $userColumns, true)) {
-                    $updates[] = 'email = :email';
-                    $params[':email'] = $form['email'];
-                }
-
-                if ($roleCol !== null) {
-                    $updates[] = "{$roleCol} = :role";
-                    $params[':role'] = $form['role'];
-                }
-
-                if (in_array('phone', $userColumns, true)) {
-                    $updates[] = 'phone = :phone';
-                    $params[':phone'] = $form['phone'];
-                } elseif (in_array('phone_number', $userColumns, true)) {
-                    $updates[] = 'phone_number = :phone_number';
-                    $params[':phone_number'] = $form['phone'];
-                } elseif (in_array('mobile', $userColumns, true)) {
-                    $updates[] = 'mobile = :mobile';
-                    $params[':mobile'] = $form['phone'];
-                }
-
-                if (in_array('status', $userColumns, true)) {
-                    $updates[] = 'status = :status';
-                    $params[':status'] = $form['status'];
-                } elseif (in_array('account_status', $userColumns, true)) {
-                    $updates[] = 'account_status = :account_status';
-                    $params[':account_status'] = $form['status'];
-                } elseif (in_array('worker_status', $userColumns, true)) {
-                    $updates[] = 'worker_status = :worker_status';
-                    $params[':worker_status'] = $form['status'];
-                }
-
-                if (in_array('is_active', $userColumns, true)) {
-                    $updates[] = 'is_active = :is_active';
-                    $params[':is_active'] = $form['status'] === 'active' ? 1 : 0;
-                } elseif (in_array('active', $userColumns, true)) {
-                    $updates[] = 'active = :active';
-                    $params[':active'] = $form['status'] === 'active' ? 1 : 0;
-                } elseif (in_array('enabled', $userColumns, true)) {
-                    $updates[] = 'enabled = :enabled';
-                    $params[':enabled'] = $form['status'] === 'active' ? 1 : 0;
-                } elseif (in_array('disabled', $userColumns, true)) {
-                    $updates[] = 'disabled = :disabled';
-                    $params[':disabled'] = $form['status'] === 'active' ? 0 : 1;
-                }
-
-                if (in_array('availability', $userColumns, true)) {
-                    $updates[] = 'availability = :availability';
-                    $params[':availability'] = $form['availability'];
-                } elseif (in_array('worker_availability', $userColumns, true)) {
-                    $updates[] = 'worker_availability = :worker_availability';
-                    $params[':worker_availability'] = $form['availability'];
-                } elseif (in_array('schedule', $userColumns, true)) {
-                    $updates[] = 'schedule = :schedule';
-                    $params[':schedule'] = $form['availability'];
-                }
-
-                if (in_array('bio', $userColumns, true)) {
-                    $updates[] = 'bio = :bio';
-                    $params[':bio'] = $form['bio'];
-                } elseif (in_array('about', $userColumns, true)) {
-                    $updates[] = 'about = :about';
-                    $params[':about'] = $form['bio'];
-                } elseif (in_array('about_me', $userColumns, true)) {
-                    $updates[] = 'about_me = :about_me';
-                    $params[':about_me'] = $form['bio'];
-                } elseif (in_array('notes', $userColumns, true)) {
-                    $updates[] = 'notes = :notes';
-                    $params[':notes'] = $form['bio'];
-                } elseif (in_array('worker_bio', $userColumns, true)) {
-                    $updates[] = 'worker_bio = :worker_bio';
-                    $params[':worker_bio'] = $form['bio'];
-                }
-
-                if ($password !== '') {
-                    if (in_array('password_hash', $userColumns, true)) {
-                        $updates[] = 'password_hash = :password_hash';
-                        $params[':password_hash'] = password_hash($password, PASSWORD_DEFAULT);
-                    } elseif (in_array('password', $userColumns, true)) {
-                        $updates[] = 'password = :password';
-                        $params[':password'] = password_hash($password, PASSWORD_DEFAULT);
+                    if ((int) $emailStmt->fetchColumn() > 0) {
+                        $error = 'That email is already in use by another account.';
                     }
                 }
 
-                if ($updates === []) {
-                    $error = 'No editable columns were found in the users table.';
-                } else {
-                    $sql = "UPDATE users SET " . implode(', ', $updates) . " WHERE {$userIdCol} = :id";
-                    $stmt = $pdo->prepare($sql);
-                    $stmt->execute($params);
+                if ($error === '') {
+                    $updates = array();
+                    $params = array(':id' => $workerId);
 
-                    redirect_to('admin-worker-view.php?id=' . $workerId);
+                    if (in_array('full_name', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('full_name') . ' = :full_name';
+                        $params[':full_name'] = $displayName;
+                    } elseif (in_array('name', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('name') . ' = :name';
+                        $params[':name'] = $displayName;
+                    }
+
+                    if (in_array('first_name', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('first_name') . ' = :first_name';
+                        $params[':first_name'] = $form['first_name'];
+                    }
+
+                    if (in_array('last_name', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('last_name') . ' = :last_name';
+                        $params[':last_name'] = $form['last_name'];
+                    }
+
+                    if (in_array('username', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('username') . ' = :username';
+                        $params[':username'] = $form['username'] !== '' ? $form['username'] : strtolower((string) preg_replace('/\s+/', '', $displayName));
+                    }
+
+                    if ($emailColumn !== null) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier($emailColumn) . ' = :email';
+                        $params[':email'] = $form['email'];
+                    }
+
+                    if ($roleCol !== null) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier((string) $roleCol) . ' = :role';
+                        $params[':role'] = $form['role'];
+                    }
+
+                    if (in_array('phone', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('phone') . ' = :phone';
+                        $params[':phone'] = $form['phone'];
+                    } elseif (in_array('phone_number', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('phone_number') . ' = :phone_number';
+                        $params[':phone_number'] = $form['phone'];
+                    } elseif (in_array('mobile', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('mobile') . ' = :mobile';
+                        $params[':mobile'] = $form['phone'];
+                    }
+
+                    if (in_array('status', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('status') . ' = :status';
+                        $params[':status'] = $form['status'];
+                    } elseif (in_array('account_status', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('account_status') . ' = :account_status';
+                        $params[':account_status'] = $form['status'];
+                    } elseif (in_array('worker_status', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('worker_status') . ' = :worker_status';
+                        $params[':worker_status'] = $form['status'];
+                    }
+
+                    if (in_array('is_active', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('is_active') . ' = :is_active';
+                        $params[':is_active'] = $form['status'] === 'active' ? 1 : 0;
+                    } elseif (in_array('active', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('active') . ' = :active';
+                        $params[':active'] = $form['status'] === 'active' ? 1 : 0;
+                    } elseif (in_array('enabled', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('enabled') . ' = :enabled';
+                        $params[':enabled'] = $form['status'] === 'active' ? 1 : 0;
+                    } elseif (in_array('disabled', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('disabled') . ' = :disabled';
+                        $params[':disabled'] = $form['status'] === 'active' ? 0 : 1;
+                    }
+
+                    if (in_array('availability', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('availability') . ' = :availability';
+                        $params[':availability'] = $form['availability'];
+                    } elseif (in_array('worker_availability', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('worker_availability') . ' = :worker_availability';
+                        $params[':worker_availability'] = $form['availability'];
+                    } elseif (in_array('schedule', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('schedule') . ' = :schedule';
+                        $params[':schedule'] = $form['availability'];
+                    }
+
+                    if (in_array('bio', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('bio') . ' = :bio';
+                        $params[':bio'] = $form['bio'];
+                    } elseif (in_array('about', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('about') . ' = :about';
+                        $params[':about'] = $form['bio'];
+                    } elseif (in_array('about_me', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('about_me') . ' = :about_me';
+                        $params[':about_me'] = $form['bio'];
+                    } elseif (in_array('notes', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('notes') . ' = :notes';
+                        $params[':notes'] = $form['bio'];
+                    } elseif (in_array('worker_bio', $userColumns, true)) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier('worker_bio') . ' = :worker_bio';
+                        $params[':worker_bio'] = $form['bio'];
+                    }
+
+                    if ($password !== '') {
+                        if (in_array('password_hash', $userColumns, true)) {
+                            $updates[] = ddAdminEditWorkerQuoteIdentifier('password_hash') . ' = :password_hash';
+                            $params[':password_hash'] = password_hash($password, PASSWORD_DEFAULT);
+                        } elseif (in_array('password', $userColumns, true)) {
+                            $updates[] = ddAdminEditWorkerQuoteIdentifier('password') . ' = :password';
+                            $params[':password'] = password_hash($password, PASSWORD_DEFAULT);
+                        }
+                    }
+
+                    $updatedByColumn = ddAdminEditWorkerFirstExistingColumn($userColumns, array('updated_by', 'status_updated_by'));
+                    $updatedAtColumn = ddAdminEditWorkerFirstExistingColumn($userColumns, array('updated_at', 'status_updated_at'));
+
+                    if ($updatedByColumn !== null) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier($updatedByColumn) . ' = :updated_by';
+                        $params[':updated_by'] = 'admin';
+                    }
+
+                    if ($updatedAtColumn !== null) {
+                        $updates[] = ddAdminEditWorkerQuoteIdentifier($updatedAtColumn) . ' = CURRENT_TIMESTAMP';
+                    }
+
+                    if ($updates === array()) {
+                        $error = 'No editable columns were found in the worker table.';
+                    } else {
+                        $sql = 'UPDATE ' . ddAdminEditWorkerQuoteIdentifier($workerTable)
+                            . ' SET ' . implode(', ', $updates)
+                            . ' WHERE ' . ddAdminEditWorkerQuoteIdentifier($userIdCol) . ' = :id';
+
+                        $stmt = $pdo->prepare($sql);
+
+                        foreach ($params as $placeholder => $value) {
+                            if (is_int($value)) {
+                                $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
+                            } elseif ($value === null) {
+                                $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
+                            } else {
+                                $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+                            }
+                        }
+
+                        $stmt->execute();
+
+                        ddAdminEditWorkerRedirect('admin-worker-view.php?id=' . $workerId . '&source=' . urlencode($resolvedWorkerSource));
+                    }
                 }
+            } catch (Throwable $e) {
+                $error = 'Could not update worker.';
             }
-        } catch (Throwable $e) {
-            $error = 'Could not update worker: ' . $e->getMessage();
         }
     }
 }
 
-$displayWorkerName = build_name($worker);
+$displayWorkerName = ddAdminEditWorkerBuildName($worker);
+$csrfToken = ddAdminEditWorkerCsrfToken();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -598,9 +747,10 @@ $displayWorkerName = build_name($worker);
             <div class="brand">Doggie Dorian’s</div>
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
                 <a class="top-link" href="admin-walker-management.php">Workers</a>
-                <a class="top-link" href="admin-worker-view.php?id=<?= $workerId ?>">Worker View</a>
+                <a class="top-link" href="admin-worker-view.php?id=<?php echo (int) $workerId; ?>&source=<?php echo $sourceParam; ?>">Worker View</a>
             </div>
         </div>
 
@@ -610,45 +760,51 @@ $displayWorkerName = build_name($worker);
             <div class="sub">
                 Update this worker account’s profile, role, contact details, availability, notes, and password.
                 <br><br>
-                Editing: <strong><?= h($displayWorkerName) ?></strong>
+                Editing: <strong><?php echo ddAdminEditWorkerH($displayWorkerName); ?></strong>
+                <br>
+                Source: <strong><?php echo ddAdminEditWorkerH($resolvedWorkerSource); ?></strong>
             </div>
         </section>
 
         <section class="panel">
             <?php if ($error !== ''): ?>
-                <div class="alert alert-error"><?= h($error) ?></div>
+                <div class="alert alert-error"><?php echo ddAdminEditWorkerH($error); ?></div>
             <?php endif; ?>
 
             <form method="post" action="">
+                <input type="hidden" name="csrf_token" value="<?php echo ddAdminEditWorkerH($csrfToken); ?>">
+                <input type="hidden" name="worker_id" value="<?php echo (int) $workerId; ?>">
+                <input type="hidden" name="source" value="<?php echo ddAdminEditWorkerH($resolvedWorkerSource); ?>">
+
                 <div class="form-grid">
                     <div class="field">
                         <label for="full_name">Full Name</label>
-                        <input id="full_name" name="full_name" type="text" value="<?= h($form['full_name']) ?>" placeholder="Worker full name">
+                        <input id="full_name" name="full_name" type="text" value="<?php echo ddAdminEditWorkerH($form['full_name']); ?>" placeholder="Worker full name">
                     </div>
 
                     <div class="field">
                         <label for="username">Username</label>
-                        <input id="username" name="username" type="text" value="<?= h($form['username']) ?>" placeholder="worker username">
+                        <input id="username" name="username" type="text" value="<?php echo ddAdminEditWorkerH($form['username']); ?>" placeholder="worker username">
                     </div>
 
                     <div class="field">
                         <label for="first_name">First Name</label>
-                        <input id="first_name" name="first_name" type="text" value="<?= h($form['first_name']) ?>" placeholder="First name">
+                        <input id="first_name" name="first_name" type="text" value="<?php echo ddAdminEditWorkerH($form['first_name']); ?>" placeholder="First name">
                     </div>
 
                     <div class="field">
                         <label for="last_name">Last Name</label>
-                        <input id="last_name" name="last_name" type="text" value="<?= h($form['last_name']) ?>" placeholder="Last name">
+                        <input id="last_name" name="last_name" type="text" value="<?php echo ddAdminEditWorkerH($form['last_name']); ?>" placeholder="Last name">
                     </div>
 
                     <div class="field">
                         <label for="email">Email</label>
-                        <input id="email" name="email" type="email" value="<?= h($form['email']) ?>" placeholder="worker@email.com" required>
+                        <input id="email" name="email" type="email" value="<?php echo ddAdminEditWorkerH($form['email']); ?>" placeholder="worker@email.com" required>
                     </div>
 
                     <div class="field">
                         <label for="phone">Phone</label>
-                        <input id="phone" name="phone" type="text" value="<?= h($form['phone']) ?>" placeholder="Phone number">
+                        <input id="phone" name="phone" type="text" value="<?php echo ddAdminEditWorkerH($form['phone']); ?>" placeholder="Phone number">
                     </div>
 
                     <div class="field">
@@ -659,35 +815,35 @@ $displayWorkerName = build_name($worker);
                     <div class="field">
                         <label for="role">Role</label>
                         <select id="role" name="role">
-                            <option value="walker" <?= $form['role'] === 'walker' ? 'selected' : '' ?>>Walker</option>
-                            <option value="worker" <?= $form['role'] === 'worker' ? 'selected' : '' ?>>Worker</option>
-                            <option value="staff" <?= $form['role'] === 'staff' ? 'selected' : '' ?>>Staff</option>
-                            <option value="employee" <?= $form['role'] === 'employee' ? 'selected' : '' ?>>Employee</option>
+                            <option value="walker" <?php echo $form['role'] === 'walker' ? 'selected' : ''; ?>>Walker</option>
+                            <option value="worker" <?php echo $form['role'] === 'worker' ? 'selected' : ''; ?>>Worker</option>
+                            <option value="staff" <?php echo $form['role'] === 'staff' ? 'selected' : ''; ?>>Staff</option>
+                            <option value="employee" <?php echo $form['role'] === 'employee' ? 'selected' : ''; ?>>Employee</option>
                         </select>
                     </div>
 
                     <div class="field">
                         <label for="status">Status</label>
                         <select id="status" name="status">
-                            <option value="active" <?= $form['status'] === 'active' ? 'selected' : '' ?>>Active</option>
-                            <option value="disabled" <?= $form['status'] === 'disabled' ? 'selected' : '' ?>>Disabled</option>
+                            <option value="active" <?php echo $form['status'] === 'active' ? 'selected' : ''; ?>>Active</option>
+                            <option value="disabled" <?php echo $form['status'] === 'disabled' ? 'selected' : ''; ?>>Disabled</option>
                         </select>
                     </div>
 
                     <div class="field full">
                         <label for="availability">Availability</label>
-                        <input id="availability" name="availability" type="text" value="<?= h($form['availability']) ?>" placeholder="Example: Mon-Fri mornings, weekends flexible">
+                        <input id="availability" name="availability" type="text" value="<?php echo ddAdminEditWorkerH($form['availability']); ?>" placeholder="Example: Mon-Fri mornings, weekends flexible">
                     </div>
 
                     <div class="field full">
                         <label for="bio">Bio / Notes</label>
-                        <textarea id="bio" name="bio" placeholder="Worker notes, specialties, experience, or admin notes..."><?= h($form['bio']) ?></textarea>
+                        <textarea id="bio" name="bio" placeholder="Worker notes, specialties, experience, or admin notes..."><?php echo ddAdminEditWorkerH($form['bio']); ?></textarea>
                     </div>
                 </div>
 
                 <div class="actions">
                     <button class="btn btn-primary" type="submit">Save Changes</button>
-                    <a class="btn btn-secondary" href="admin-worker-view.php?id=<?= $workerId ?>">Back to Worker View</a>
+                    <a class="btn btn-secondary" href="admin-worker-view.php?id=<?php echo (int) $workerId; ?>&source=<?php echo $sourceParam; ?>">Back to Worker View</a>
                 </div>
             </form>
         </section>

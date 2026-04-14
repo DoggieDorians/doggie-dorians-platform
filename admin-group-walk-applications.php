@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/admin-auth.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
@@ -10,105 +11,194 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
-function h($value)
+function ddAdminGroupWalksH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirectTo($url)
+function ddAdminGroupWalksRedirect(string $url): void
 {
     header('Location: ' . $url);
     exit;
 }
 
-function currentUserRole()
+function ddAdminGroupWalksQuoteIdentifier(string $identifier): string
 {
-    $role = isset($_SESSION['role']) ? (string) $_SESSION['role'] : '';
-
-    if ($role !== '') {
-        return strtolower($role);
-    }
-
-    if (!empty($_SESSION['is_admin'])) {
-        return 'admin';
-    }
-
-    return 'member';
+    return '"' . str_replace('"', '""', $identifier) . '"';
 }
 
-function isAdmin()
-{
-    if (!empty($_SESSION['is_admin'])) {
-        return true;
-    }
-
-    return currentUserRole() === 'admin';
-}
-
-if (!isAdmin()) {
-    redirectTo('admin-login.php');
-}
-
-function safe_execute(PDO $pdo, $sql, array $params = array())
+function ddAdminGroupWalksSafeExecute(PDO $pdo, string $sql, array $params = array()): bool
 {
     try {
         $stmt = $pdo->prepare($sql);
         return $stmt->execute($params);
     } catch (Throwable $e) {
         return false;
-    } catch (Exception $e) {
-        return false;
     }
 }
 
-function safe_fetch_all(PDO $pdo, $sql, array $params = array())
+function ddAdminGroupWalksSafeFetchAll(PDO $pdo, string $sql, array $params = array()): array
 {
     try {
         $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
+        if (!$stmt->execute($params)) {
+            return array();
+        }
+
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         return is_array($rows) ? $rows : array();
     } catch (Throwable $e) {
         return array();
-    } catch (Exception $e) {
-        return array();
     }
 }
 
-function safe_fetch_one(PDO $pdo, $sql, array $params = array())
+function ddAdminGroupWalksSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
 {
     try {
         $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $row !== false ? $row : null;
+        return is_array($row) ? $row : null;
     } catch (Throwable $e) {
-        return null;
-    } catch (Exception $e) {
         return null;
     }
 }
 
-function table_exists(PDO $pdo, $table)
+function ddAdminGroupWalksTableExists(PDO $pdo, string $table): bool
 {
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
     try {
-        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
         $stmt->execute(array(':table' => $table));
-        return (bool) $stmt->fetchColumn();
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
     } catch (Throwable $e) {
-        return false;
-    } catch (Exception $e) {
+        $cache[$table] = false;
         return false;
     }
 }
 
-function create_group_walks_table_if_needed(PDO $pdo)
+function ddAdminGroupWalksGetColumns(PDO $pdo, string $table): array
 {
-    if (table_exists($pdo, 'group_walk_applications')) {
+    static $cache = array();
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminGroupWalksTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminGroupWalksQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $columns = array();
+
+        foreach ($rows as $row) {
+            if (isset($row['name']) && $row['name'] !== '') {
+                $columns[] = (string) $row['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function ddAdminGroupWalksColumnExists(array $columns, string $column): bool
+{
+    return in_array($column, $columns, true);
+}
+
+function ddAdminGroupWalksNormalizeStatus($status): string
+{
+    $status = strtolower(trim((string) $status));
+    $allowed = array('new', 'reviewed', 'approved', 'declined');
+
+    if (in_array($status, $allowed, true)) {
+        return $status;
+    }
+
+    return 'new';
+}
+
+function ddAdminGroupWalksFormatDateTimeDisplay($value): string
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '—';
+    }
+
+    $ts = strtotime($value);
+    if ($ts === false) {
+        return $value;
+    }
+
+    return date('F j, Y \a\t g:i A', $ts);
+}
+
+function ddAdminGroupWalksStatusBadgeClass(string $status): string
+{
+    $status = ddAdminGroupWalksNormalizeStatus($status);
+
+    if ($status === 'approved') {
+        return 'badge-approved';
+    }
+    if ($status === 'declined') {
+        return 'badge-declined';
+    }
+    if ($status === 'reviewed') {
+        return 'badge-reviewed';
+    }
+
+    return 'badge-new';
+}
+
+function ddAdminGroupWalksCsrfToken(): string
+{
+    if (empty($_SESSION['admin_group_walks_csrf']) || !is_string($_SESSION['admin_group_walks_csrf'])) {
+        $_SESSION['admin_group_walks_csrf'] = bin2hex(random_bytes(32));
+    }
+
+    return $_SESSION['admin_group_walks_csrf'];
+}
+
+function ddAdminGroupWalksValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_group_walks_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
+function ddAdminGroupWalksCreateTableIfNeeded(PDO $pdo): bool
+{
+    if (ddAdminGroupWalksTableExists($pdo, 'group_walk_applications')) {
         return true;
     }
 
-    $sql = "
+    $sql = '
         CREATE TABLE IF NOT EXISTS group_walk_applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_name TEXT NOT NULL,
@@ -124,112 +214,49 @@ function create_group_walks_table_if_needed(PDO $pdo)
             preferred_days TEXT NOT NULL,
             preferred_time TEXT NOT NULL,
             prior_group_experience TEXT NOT NULL,
-            notes TEXT DEFAULT '',
-            admin_notes TEXT DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'new',
+            notes TEXT DEFAULT \'\',
+            admin_notes TEXT DEFAULT \'\',
+            status TEXT NOT NULL DEFAULT \'new\',
             created_at TEXT NOT NULL
         )
-    ";
+    ';
 
-    return safe_execute($pdo, $sql);
+    return ddAdminGroupWalksSafeExecute($pdo, $sql);
 }
 
-function get_table_columns(PDO $pdo, $table)
+function ddAdminGroupWalksEnsureOptionalColumns(PDO $pdo): void
 {
-    try {
-        $safeTable = str_replace('"', '""', $table);
-        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : array();
-        $columns = array();
+    if (!ddAdminGroupWalksTableExists($pdo, 'group_walk_applications')) {
+        return;
+    }
 
-        foreach ($rows as $row) {
-            if (isset($row['name']) && $row['name'] !== '') {
-                $columns[] = (string) $row['name'];
-            }
+    $columns = ddAdminGroupWalksGetColumns($pdo, 'group_walk_applications');
+
+    $optionalColumns = array(
+        'admin_notes' => 'ALTER TABLE group_walk_applications ADD COLUMN admin_notes TEXT DEFAULT \'\'',
+        'reviewed_at' => 'ALTER TABLE group_walk_applications ADD COLUMN reviewed_at TEXT DEFAULT NULL',
+        'updated_at' => 'ALTER TABLE group_walk_applications ADD COLUMN updated_at TEXT DEFAULT NULL',
+    );
+
+    foreach ($optionalColumns as $column => $sql) {
+        if (ddAdminGroupWalksColumnExists($columns, $column)) {
+            continue;
         }
 
-        return $columns;
-    } catch (Throwable $e) {
-        return array();
-    } catch (Exception $e) {
-        return array();
+        try {
+            $pdo->exec($sql);
+        } catch (Throwable $e) {
+        }
     }
 }
 
-function column_exists(array $columns, $column)
+function ddAdminGroupWalksCreateNotificationIfPossible(PDO $pdo, string $title, string $message): void
 {
-    return in_array($column, $columns, true);
-}
-
-function ensure_admin_notes_column(PDO $pdo)
-{
-    if (!table_exists($pdo, 'group_walk_applications')) {
+    if (!ddAdminGroupWalksTableExists($pdo, 'notifications')) {
         return;
     }
 
-    $columns = get_table_columns($pdo, 'group_walk_applications');
-    if (column_exists($columns, 'admin_notes')) {
-        return;
-    }
-
-    try {
-        $pdo->exec('ALTER TABLE group_walk_applications ADD COLUMN admin_notes TEXT DEFAULT ""');
-    } catch (Throwable $e) {
-    } catch (Exception $e) {
-    }
-}
-
-function normalize_status($status)
-{
-    $status = strtolower(trim((string) $status));
-    $allowed = array('new', 'reviewed', 'approved', 'declined');
-
-    if (in_array($status, $allowed, true)) {
-        return $status;
-    }
-
-    return 'new';
-}
-
-function format_datetime_display($value)
-{
-    $value = trim((string) $value);
-    if ($value === '') {
-        return '—';
-    }
-
-    $ts = strtotime($value);
-    if ($ts === false) {
-        return $value;
-    }
-
-    return date('F j, Y \a\t g:i A', $ts);
-}
-
-function status_badge_class($status)
-{
-    $status = normalize_status($status);
-
-    if ($status === 'approved') {
-        return 'badge-approved';
-    }
-    if ($status === 'declined') {
-        return 'badge-declined';
-    }
-    if ($status === 'reviewed') {
-        return 'badge-reviewed';
-    }
-
-    return 'badge-new';
-}
-
-function create_notification_if_possible(PDO $pdo, $title, $message)
-{
-    if (!table_exists($pdo, 'notifications')) {
-        return;
-    }
-
-    $columns = get_table_columns($pdo, 'notifications');
+    $columns = ddAdminGroupWalksGetColumns($pdo, 'notifications');
     if (empty($columns)) {
         return;
     }
@@ -249,71 +276,105 @@ function create_notification_if_possible(PDO $pdo, $title, $message)
     $params = array();
 
     foreach ($data as $column => $value) {
-        if (in_array($column, $columns, true)) {
-            $insertCols[] = $column;
-            $placeholders[] = ':' . $column;
-            $params[':' . $column] = $value;
+        if (!ddAdminGroupWalksColumnExists($columns, $column)) {
+            continue;
         }
+
+        $insertCols[] = ddAdminGroupWalksQuoteIdentifier($column);
+        $placeholders[] = ':' . $column;
+        $params[':' . $column] = $value;
     }
 
     if (empty($insertCols)) {
         return;
     }
 
-    $sql = 'INSERT INTO notifications (' . implode(', ', $insertCols) . ') VALUES (' . implode(', ', $placeholders) . ')';
-    safe_execute($pdo, $sql, $params);
+    $sql = 'INSERT INTO ' . ddAdminGroupWalksQuoteIdentifier('notifications')
+        . ' (' . implode(', ', $insertCols) . ') VALUES (' . implode(', ', $placeholders) . ')';
+
+    ddAdminGroupWalksSafeExecute($pdo, $sql, $params);
 }
 
-if (!create_group_walks_table_if_needed($pdo)) {
+if (!ddAdminGroupWalksCreateTableIfNeeded($pdo)) {
     http_response_code(500);
     echo 'Could not prepare the group walk applications table.';
     exit;
 }
 
-ensure_admin_notes_column($pdo);
+ddAdminGroupWalksEnsureOptionalColumns($pdo);
 
 $flash = isset($_SESSION['admin_group_walks_flash']) ? (string) $_SESSION['admin_group_walks_flash'] : '';
 $flashType = isset($_SESSION['admin_group_walks_flash_type']) ? (string) $_SESSION['admin_group_walks_flash_type'] : '';
 unset($_SESSION['admin_group_walks_flash'], $_SESSION['admin_group_walks_flash_type']);
 
+$applicationColumns = ddAdminGroupWalksGetColumns($pdo, 'group_walk_applications');
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!ddAdminGroupWalksValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+        $_SESSION['admin_group_walks_flash_type'] = 'error';
+        $_SESSION['admin_group_walks_flash'] = 'Security check failed. Please refresh the page and try again.';
+        ddAdminGroupWalksRedirect('admin-group-walk-applications.php');
+    }
+
     $action = isset($_POST['action']) ? (string) $_POST['action'] : '';
 
     if ($action === 'update_application') {
         $applicationId = (int) (isset($_POST['application_id']) ? $_POST['application_id'] : 0);
-        $newStatus = normalize_status(isset($_POST['status']) ? $_POST['status'] : 'new');
+        $newStatus = ddAdminGroupWalksNormalizeStatus(isset($_POST['status']) ? $_POST['status'] : 'new');
         $adminNotes = trim((string) (isset($_POST['admin_notes']) ? $_POST['admin_notes'] : ''));
 
         if ($applicationId <= 0) {
             $_SESSION['admin_group_walks_flash_type'] = 'error';
             $_SESSION['admin_group_walks_flash'] = 'Invalid application selected.';
-            redirectTo('admin-group-walk-applications.php');
+            ddAdminGroupWalksRedirect('admin-group-walk-applications.php');
         }
 
-        $existing = safe_fetch_one(
+        $existing = ddAdminGroupWalksSafeFetchOne(
             $pdo,
-            'SELECT * FROM group_walk_applications WHERE id = :id LIMIT 1',
+            'SELECT * FROM ' . ddAdminGroupWalksQuoteIdentifier('group_walk_applications')
+            . ' WHERE ' . ddAdminGroupWalksQuoteIdentifier('id') . ' = :id LIMIT 1',
             array(':id' => $applicationId)
         );
 
         if ($existing === null) {
             $_SESSION['admin_group_walks_flash_type'] = 'error';
             $_SESSION['admin_group_walks_flash'] = 'Application not found.';
-            redirectTo('admin-group-walk-applications.php');
+            ddAdminGroupWalksRedirect('admin-group-walk-applications.php');
         }
 
-        $updated = safe_execute(
+        $updateParts = array(
+            ddAdminGroupWalksQuoteIdentifier('status') . ' = :status',
+        );
+        $params = array(
+            ':status' => $newStatus,
+            ':id' => $applicationId,
+        );
+
+        if (ddAdminGroupWalksColumnExists($applicationColumns, 'admin_notes')) {
+            $updateParts[] = ddAdminGroupWalksQuoteIdentifier('admin_notes') . ' = :admin_notes';
+            $params[':admin_notes'] = $adminNotes;
+        }
+
+        if (ddAdminGroupWalksColumnExists($applicationColumns, 'reviewed_at')) {
+            $updateParts[] = ddAdminGroupWalksQuoteIdentifier('reviewed_at') . ' = :reviewed_at';
+            $params[':reviewed_at'] = date('Y-m-d H:i:s');
+        }
+
+        if (ddAdminGroupWalksColumnExists($applicationColumns, 'updated_at')) {
+            $updateParts[] = ddAdminGroupWalksQuoteIdentifier('updated_at') . ' = :updated_at';
+            $params[':updated_at'] = date('Y-m-d H:i:s');
+        }
+
+        $updated = ddAdminGroupWalksSafeExecute(
             $pdo,
-            'UPDATE group_walk_applications SET status = :status, admin_notes = :admin_notes WHERE id = :id',
-            array(
-                ':status' => $newStatus,
-                ':admin_notes' => $adminNotes,
-                ':id' => $applicationId,
-            )
+            'UPDATE ' . ddAdminGroupWalksQuoteIdentifier('group_walk_applications')
+            . ' SET ' . implode(', ', $updateParts)
+            . ' WHERE ' . ddAdminGroupWalksQuoteIdentifier('id') . ' = :id',
+            $params
         );
 
         if ($updated) {
-            create_notification_if_possible(
+            ddAdminGroupWalksCreateNotificationIfPossible(
                 $pdo,
                 'Group Walk Application Updated',
                 'Application #' . $applicationId . ' was updated to status: ' . strtoupper($newStatus) . '.'
@@ -326,42 +387,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['admin_group_walks_flash'] = 'Could not update the application.';
         }
 
-        redirectTo('admin-group-walk-applications.php');
+        ddAdminGroupWalksRedirect('admin-group-walk-applications.php');
     }
 }
 
-$statusFilter = normalize_status(isset($_GET['status']) ? $_GET['status'] : 'new');
-$showAll = isset($_GET['status']) && (string) $_GET['status'] === 'all';
+$statusFilterRaw = isset($_GET['status']) ? (string) $_GET['status'] : 'new';
+$showAll = $statusFilterRaw === 'all';
+$statusFilter = $showAll ? 'all' : ddAdminGroupWalksNormalizeStatus($statusFilterRaw);
 
 if ($showAll) {
-    $applications = safe_fetch_all(
+    $applications = ddAdminGroupWalksSafeFetchAll(
         $pdo,
-        'SELECT * FROM group_walk_applications ORDER BY created_at DESC, id DESC'
+        'SELECT * FROM ' . ddAdminGroupWalksQuoteIdentifier('group_walk_applications')
+        . ' ORDER BY ' . ddAdminGroupWalksQuoteIdentifier('created_at') . ' DESC, '
+        . ddAdminGroupWalksQuoteIdentifier('id') . ' DESC'
     );
 } else {
-    $applications = safe_fetch_all(
+    $applications = ddAdminGroupWalksSafeFetchAll(
         $pdo,
-        'SELECT * FROM group_walk_applications WHERE status = :status ORDER BY created_at DESC, id DESC',
+        'SELECT * FROM ' . ddAdminGroupWalksQuoteIdentifier('group_walk_applications')
+        . ' WHERE ' . ddAdminGroupWalksQuoteIdentifier('status') . ' = :status'
+        . ' ORDER BY ' . ddAdminGroupWalksQuoteIdentifier('created_at') . ' DESC, '
+        . ddAdminGroupWalksQuoteIdentifier('id') . ' DESC',
         array(':status' => $statusFilter)
     );
 }
 
-$countsRow = safe_fetch_one(
+$countsRow = ddAdminGroupWalksSafeFetchOne(
     $pdo,
-    "SELECT
+    'SELECT
         COUNT(*) AS total_count,
-        SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS new_count,
-        SUM(CASE WHEN status = 'reviewed' THEN 1 ELSE 0 END) AS reviewed_count,
-        SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
-        SUM(CASE WHEN status = 'declined' THEN 1 ELSE 0 END) AS declined_count
-     FROM group_walk_applications"
+        SUM(CASE WHEN status = \'new\' THEN 1 ELSE 0 END) AS new_count,
+        SUM(CASE WHEN status = \'reviewed\' THEN 1 ELSE 0 END) AS reviewed_count,
+        SUM(CASE WHEN status = \'approved\' THEN 1 ELSE 0 END) AS approved_count,
+        SUM(CASE WHEN status = \'declined\' THEN 1 ELSE 0 END) AS declined_count
+     FROM ' . ddAdminGroupWalksQuoteIdentifier('group_walk_applications')
 );
 
-$totalCount = (int) (isset($countsRow['total_count']) ? $countsRow['total_count'] : 0);
-$newCount = (int) (isset($countsRow['new_count']) ? $countsRow['new_count'] : 0);
-$reviewedCount = (int) (isset($countsRow['reviewed_count']) ? $countsRow['reviewed_count'] : 0);
-$approvedCount = (int) (isset($countsRow['approved_count']) ? $countsRow['approved_count'] : 0);
-$declinedCount = (int) (isset($countsRow['declined_count']) ? $countsRow['declined_count'] : 0);
+$totalCount = (int) ($countsRow['total_count'] ?? 0);
+$newCount = (int) ($countsRow['new_count'] ?? 0);
+$reviewedCount = (int) ($countsRow['reviewed_count'] ?? 0);
+$approvedCount = (int) ($countsRow['approved_count'] ?? 0);
+$declinedCount = (int) ($countsRow['declined_count'] ?? 0);
+
+$csrfToken = ddAdminGroupWalksCsrfToken();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -772,6 +841,7 @@ $declinedCount = (int) (isset($countsRow['declined_count']) ? $countsRow['declin
 
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
                 <a class="top-link" href="admin-group-walk-applications.php">Group Walk Applications</a>
                 <a class="top-link" href="logout.php">Logout</a>
@@ -780,7 +850,7 @@ $declinedCount = (int) (isset($countsRow['declined_count']) ? $countsRow['declin
 
         <?php if ($flash !== ''): ?>
             <div class="<?php echo $flashType === 'success' ? 'flash-success' : 'flash-error'; ?>">
-                <?php echo h($flash); ?>
+                <?php echo ddAdminGroupWalksH($flash); ?>
             </div>
         <?php endif; ?>
 
@@ -841,83 +911,84 @@ $declinedCount = (int) (isset($countsRow['declined_count']) ? $countsRow['declin
             <?php else: ?>
                 <?php foreach ($applications as $app): ?>
                     <?php
-                    $appId = (int) (isset($app['id']) ? $app['id'] : 0);
-                    $status = normalize_status(isset($app['status']) ? $app['status'] : 'new');
+                    $appId = (int) ($app['id'] ?? 0);
+                    $status = ddAdminGroupWalksNormalizeStatus($app['status'] ?? 'new');
                     ?>
                     <div class="card application-card">
                         <div class="app-top">
                             <div class="app-title">
-                                #<?php echo $appId; ?> · <?php echo h(isset($app['owner_name']) ? $app['owner_name'] : 'Applicant'); ?> · <?php echo h(isset($app['dog_name']) ? $app['dog_name'] : 'Dog'); ?>
+                                #<?php echo $appId; ?> · <?php echo ddAdminGroupWalksH($app['owner_name'] ?? 'Applicant'); ?> · <?php echo ddAdminGroupWalksH($app['dog_name'] ?? 'Dog'); ?>
                             </div>
-                            <span class="badge <?php echo h(status_badge_class($status)); ?>">
-                                <?php echo h($status); ?>
+                            <span class="badge <?php echo ddAdminGroupWalksH(ddAdminGroupWalksStatusBadgeClass($status)); ?>">
+                                <?php echo ddAdminGroupWalksH($status); ?>
                             </span>
                         </div>
 
                         <div class="meta-grid">
                             <div class="meta-box">
                                 <div class="meta-label">Email</div>
-                                <div class="meta-value"><?php echo h(isset($app['email']) ? $app['email'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['email'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Phone</div>
-                                <div class="meta-value"><?php echo h(isset($app['phone']) ? $app['phone'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['phone'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Neighborhood</div>
-                                <div class="meta-value"><?php echo h(isset($app['neighborhood']) ? $app['neighborhood'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['neighborhood'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Submitted</div>
-                                <div class="meta-value"><?php echo h(format_datetime_display(isset($app['created_at']) ? $app['created_at'] : '')); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH(ddAdminGroupWalksFormatDateTimeDisplay($app['created_at'] ?? '')); ?></div>
                             </div>
 
                             <div class="meta-box">
                                 <div class="meta-label">Breed</div>
-                                <div class="meta-value"><?php echo h(isset($app['breed']) ? $app['breed'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['breed'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Size</div>
-                                <div class="meta-value"><?php echo h(isset($app['size']) ? $app['size'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['size'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Age</div>
-                                <div class="meta-value"><?php echo h(isset($app['age']) ? $app['age'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['age'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Group Experience</div>
-                                <div class="meta-value"><?php echo h(isset($app['prior_group_experience']) ? $app['prior_group_experience'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['prior_group_experience'] ?? '—'); ?></div>
                             </div>
 
                             <div class="meta-box">
                                 <div class="meta-label">Preferred Days</div>
-                                <div class="meta-value"><?php echo h(isset($app['preferred_days']) ? $app['preferred_days'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['preferred_days'] ?? '—'); ?></div>
                             </div>
                             <div class="meta-box">
                                 <div class="meta-label">Preferred Time</div>
-                                <div class="meta-value"><?php echo h(isset($app['preferred_time']) ? $app['preferred_time'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo ddAdminGroupWalksH($app['preferred_time'] ?? '—'); ?></div>
                             </div>
                         </div>
 
                         <div class="detail-grid">
                             <div class="detail-box">
                                 <strong>Temperament / Social Behavior</strong>
-                                <div class="detail-copy"><?php echo h(isset($app['temperament']) ? $app['temperament'] : '—'); ?></div>
+                                <div class="detail-copy"><?php echo ddAdminGroupWalksH($app['temperament'] ?? '—'); ?></div>
                             </div>
 
                             <div class="detail-box">
                                 <strong>Leash Behavior</strong>
-                                <div class="detail-copy"><?php echo h(isset($app['leash_behavior']) ? $app['leash_behavior'] : '—'); ?></div>
+                                <div class="detail-copy"><?php echo ddAdminGroupWalksH($app['leash_behavior'] ?? '—'); ?></div>
                             </div>
 
                             <div class="detail-box">
                                 <strong>Applicant Notes</strong>
-                                <div class="detail-copy"><?php echo h((isset($app['notes']) && trim((string) $app['notes']) !== '') ? $app['notes'] : '—'); ?></div>
+                                <div class="detail-copy"><?php echo ddAdminGroupWalksH((isset($app['notes']) && trim((string) $app['notes']) !== '') ? $app['notes'] : '—'); ?></div>
                             </div>
 
                             <div class="detail-box">
                                 <strong>Admin Update</strong>
                                 <form method="post" action="admin-group-walk-applications.php">
+                                    <input type="hidden" name="csrf_token" value="<?php echo ddAdminGroupWalksH($csrfToken); ?>">
                                     <input type="hidden" name="action" value="update_application">
                                     <input type="hidden" name="application_id" value="<?php echo $appId; ?>">
 
@@ -934,13 +1005,13 @@ $declinedCount = (int) (isset($countsRow['declined_count']) ? $countsRow['declin
 
                                         <div>
                                             <label for="admin_notes_<?php echo $appId; ?>">Admin Notes</label>
-                                            <textarea id="admin_notes_<?php echo $appId; ?>" name="admin_notes"><?php echo h(isset($app['admin_notes']) ? $app['admin_notes'] : ''); ?></textarea>
+                                            <textarea id="admin_notes_<?php echo $appId; ?>" name="admin_notes"><?php echo ddAdminGroupWalksH($app['admin_notes'] ?? ''); ?></textarea>
                                         </div>
                                     </div>
 
                                     <div class="btn-row">
                                         <button type="submit" class="btn btn-gold">Save Update</button>
-                                        <a class="btn btn-light" href="mailto:<?php echo h(isset($app['email']) ? $app['email'] : ''); ?>">Email Applicant</a>
+                                        <a class="btn btn-light" href="mailto:<?php echo ddAdminGroupWalksH($app['email'] ?? ''); ?>">Email Applicant</a>
                                     </div>
                                 </form>
                             </div>

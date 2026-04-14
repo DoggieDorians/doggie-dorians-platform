@@ -2,56 +2,155 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/database/setup.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/admin-auth.php';
 
-function redirectBack(string $query = ''): void
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    echo 'Database connection is not available.';
+    exit;
+}
+
+function ddAdminBookingUpdateRedirectBack(string $query = ''): void
 {
     header('Location: admin-bookings.php' . $query);
     exit;
 }
 
-function tableExists(PDO $pdo, string $table): bool
+function ddAdminBookingUpdateQuoteIdentifier(string $identifier): string
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool) $stmt->fetchColumn();
+    return '"' . str_replace('"', '""', $identifier) . '"';
 }
 
-function getColumns(PDO $pdo, string $table): array
+function ddAdminBookingUpdateTableExists(PDO $pdo, string $table): bool
 {
-    $columns = [];
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    if ($stmt) {
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
-            $columns[] = $column['name'];
-        }
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
     }
-    return $columns;
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    }
 }
 
-function hasColumn(array $columns, string $column): bool
+function ddAdminBookingUpdateGetColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminBookingUpdateTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $sql = 'PRAGMA table_info(' . ddAdminBookingUpdateQuoteIdentifier($table) . ')';
+        $stmt = $pdo->query($sql);
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $columns = array();
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
+            if (!empty($column['name'])) {
+                $columns[] = (string) $column['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function ddAdminBookingUpdateHasColumn(array $columns, string $column): bool
 {
     return in_array($column, $columns, true);
 }
 
+function ddAdminBookingUpdateFirstExistingColumn(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function ddAdminBookingUpdateSessionCsrfToken(): string
+{
+    $candidates = array(
+        'admin_dashboard_csrf',
+        'admin_csrf',
+        'csrf_token',
+    );
+
+    foreach ($candidates as $key) {
+        if (!empty($_SESSION[$key]) && is_string($_SESSION[$key])) {
+            return $_SESSION[$key];
+        }
+    }
+
+    return '';
+}
+
+function ddAdminBookingUpdateValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = ddAdminBookingUpdateSessionCsrfToken();
+
+    if ($sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    redirectBack('?error=1');
+    ddAdminBookingUpdateRedirectBack('?error=1');
 }
 
-if (!tableExists($pdo, 'bookings')) {
-    redirectBack('?error=1');
+if (!ddAdminBookingUpdateValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+    ddAdminBookingUpdateRedirectBack('?error=csrf');
 }
 
-$bookingColumns = getColumns($pdo, 'bookings');
+if (!ddAdminBookingUpdateTableExists($pdo, 'bookings')) {
+    ddAdminBookingUpdateRedirectBack('?error=1');
+}
+
+$bookingColumns = ddAdminBookingUpdateGetColumns($pdo, 'bookings');
+if (empty($bookingColumns)) {
+    ddAdminBookingUpdateRedirectBack('?error=1');
+}
+
+$idColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('id', 'booking_id'));
+if ($idColumn === null) {
+    ddAdminBookingUpdateRedirectBack('?error=1');
+}
 
 $bookingId = (int) ($_POST['booking_id'] ?? 0);
 if ($bookingId <= 0) {
-    redirectBack('?error=1');
+    ddAdminBookingUpdateRedirectBack('?error=1');
 }
 
-$allowedStatuses = ['pending', 'confirmed', 'in_progress', 'completed', 'cancelled'];
-$status = trim((string) ($_POST['status'] ?? ''));
+$allowedStatuses = array('pending', 'confirmed', 'in_progress', 'completed', 'cancelled');
+
+$status = strtolower(trim((string) ($_POST['status'] ?? '')));
 $serviceType = trim((string) ($_POST['service_type'] ?? ''));
 $serviceDate = trim((string) ($_POST['service_date'] ?? ''));
 $serviceTime = trim((string) ($_POST['service_time'] ?? ''));
@@ -61,97 +160,113 @@ $adminNotes = trim((string) ($_POST['admin_notes'] ?? ''));
 $assignedWalkerIdRaw = trim((string) ($_POST['assigned_walker_id'] ?? ''));
 $walkerName = trim((string) ($_POST['walker_name'] ?? ''));
 
-$updateParts = [];
-$params = ['id' => $bookingId];
+$updateParts = array();
+$params = array(':booking_id' => $bookingId);
 
 $addUpdate = function (string $column, string $placeholder, $value) use (&$updateParts, &$params): void {
-    $updateParts[] = $column . ' = ' . $placeholder;
-    $params[ltrim($placeholder, ':')] = $value;
+    $updateParts[] = ddAdminBookingUpdateQuoteIdentifier($column) . ' = ' . $placeholder;
+    $params[$placeholder] = $value;
 };
 
-if ($status !== '' && in_array($status, $allowedStatuses, true) && hasColumn($bookingColumns, 'status')) {
-    $addUpdate('status', ':status', $status);
+$statusColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('status'));
+$serviceTypeColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('service_type', 'service'));
+$serviceDateColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('service_date', 'booking_date', 'date'));
+$serviceTimeColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('service_time', 'booking_time', 'time', 'start_time'));
+$durationColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('duration_minutes', 'duration'));
+$priceColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('price', 'amount', 'total_price', 'total'));
+$adminNotesColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('admin_notes', 'notes'));
+$assignedWalkerIdColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('assigned_walker_id', 'walker_id', 'worker_id', 'assigned_worker_id'));
+$walkerNameColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('walker_name', 'worker_name', 'assigned_walker_name', 'assigned_worker_name'));
+$statusUpdatedByColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('status_updated_by'));
+$statusUpdatedAtColumn = ddAdminBookingUpdateFirstExistingColumn($bookingColumns, array('status_updated_at', 'updated_at'));
+
+if ($status !== '' && in_array($status, $allowedStatuses, true) && $statusColumn !== null) {
+    $addUpdate($statusColumn, ':status', $status);
 }
 
-if ($serviceType !== '' && hasColumn($bookingColumns, 'service_type')) {
-    $addUpdate('service_type', ':service_type', $serviceType);
+if ($serviceType !== '' && $serviceTypeColumn !== null) {
+    $addUpdate($serviceTypeColumn, ':service_type', $serviceType);
 }
 
-if ($serviceDate !== '' && hasColumn($bookingColumns, 'service_date')) {
-    $addUpdate('service_date', ':service_date', $serviceDate);
+if ($serviceDate !== '' && $serviceDateColumn !== null) {
+    $addUpdate($serviceDateColumn, ':service_date', $serviceDate);
 }
 
-if ($serviceTime !== '' && hasColumn($bookingColumns, 'service_time')) {
-    $addUpdate('service_time', ':service_time', $serviceTime);
+if ($serviceTime !== '' && $serviceTimeColumn !== null) {
+    $addUpdate($serviceTimeColumn, ':service_time', $serviceTime);
 }
 
-if ($durationMinutes !== '' && hasColumn($bookingColumns, 'duration_minutes')) {
+if ($durationMinutes !== '' && $durationColumn !== null) {
     $durationValue = (int) $durationMinutes;
     if ($durationValue > 0) {
-        $addUpdate('duration_minutes', ':duration_minutes', $durationValue);
+        $addUpdate($durationColumn, ':duration_minutes', $durationValue);
     }
 }
 
-if ($price !== '' && hasColumn($bookingColumns, 'price')) {
+if ($price !== '' && $priceColumn !== null) {
     $priceValue = (float) $price;
     if ($priceValue >= 0) {
-        $addUpdate('price', ':price', $priceValue);
+        $addUpdate($priceColumn, ':price', $priceValue);
     }
 }
 
-if (hasColumn($bookingColumns, 'admin_notes')) {
-    $addUpdate('admin_notes', ':admin_notes', $adminNotes !== '' ? $adminNotes : null);
+if ($adminNotesColumn !== null) {
+    $addUpdate($adminNotesColumn, ':admin_notes', $adminNotes !== '' ? $adminNotes : null);
 }
 
-if (hasColumn($bookingColumns, 'assigned_walker_id')) {
+if ($assignedWalkerIdColumn !== null) {
     if ($assignedWalkerIdRaw !== '') {
         $assignedWalkerId = (int) $assignedWalkerIdRaw;
-        $addUpdate('assigned_walker_id', ':assigned_walker_id', $assignedWalkerId > 0 ? $assignedWalkerId : null);
-    } elseif (isset($_POST['assigned_walker_id'])) {
-        $addUpdate('assigned_walker_id', ':assigned_walker_id', null);
+        $addUpdate($assignedWalkerIdColumn, ':assigned_walker_id', $assignedWalkerId > 0 ? $assignedWalkerId : null);
+    } elseif (array_key_exists('assigned_walker_id', $_POST)) {
+        $addUpdate($assignedWalkerIdColumn, ':assigned_walker_id', null);
     }
 }
 
-if (hasColumn($bookingColumns, 'walker_name')) {
+if ($walkerNameColumn !== null) {
     if ($walkerName !== '') {
-        $addUpdate('walker_name', ':walker_name', $walkerName);
-    } elseif (isset($_POST['walker_name'])) {
-        $addUpdate('walker_name', ':walker_name', null);
+        $addUpdate($walkerNameColumn, ':walker_name', $walkerName);
+    } elseif (array_key_exists('walker_name', $_POST)) {
+        $addUpdate($walkerNameColumn, ':walker_name', null);
     }
 }
 
-if (hasColumn($bookingColumns, 'status_updated_by')) {
-    $addUpdate('status_updated_by', ':status_updated_by', 'admin');
+if ($statusUpdatedByColumn !== null) {
+    $addUpdate($statusUpdatedByColumn, ':status_updated_by', 'admin');
 }
 
-if (hasColumn($bookingColumns, 'status_updated_at')) {
-    $updateParts[] = 'status_updated_at = CURRENT_TIMESTAMP';
+if ($statusUpdatedAtColumn !== null) {
+    $updateParts[] = ddAdminBookingUpdateQuoteIdentifier($statusUpdatedAtColumn) . ' = CURRENT_TIMESTAMP';
 }
 
-if (!$updateParts) {
-    redirectBack('?error=1');
+if (empty($updateParts)) {
+    ddAdminBookingUpdateRedirectBack('?error=1');
 }
 
-$sql = "
-    UPDATE bookings
-    SET " . implode(', ', $updateParts) . "
-    WHERE id = :id
-";
+$sql = '
+    UPDATE ' . ddAdminBookingUpdateQuoteIdentifier('bookings') . '
+    SET ' . implode(', ', $updateParts) . '
+    WHERE ' . ddAdminBookingUpdateQuoteIdentifier($idColumn) . ' = :booking_id
+';
 
-$stmt = $pdo->prepare($sql);
+try {
+    $stmt = $pdo->prepare($sql);
 
-foreach ($params as $key => $value) {
-    $placeholder = ':' . $key;
-
-    if (is_int($value)) {
-        $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
-    } elseif ($value === null) {
-        $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
-    } else {
-        $stmt->bindValue($placeholder, $value);
+    foreach ($params as $placeholder => $value) {
+        if (is_int($value)) {
+            $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
+        } elseif (is_float($value)) {
+            $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+        } elseif ($value === null) {
+            $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
+        } else {
+            $stmt->bindValue($placeholder, $value, PDO::PARAM_STR);
+        }
     }
+
+    $stmt->execute();
+} catch (Throwable $e) {
+    ddAdminBookingUpdateRedirectBack('?error=1');
 }
 
-$stmt->execute();
-
-redirectBack('?updated=1&highlight=' . $bookingId);
+ddAdminBookingUpdateRedirectBack('?updated=1&highlight=' . $bookingId);

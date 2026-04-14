@@ -20,23 +20,40 @@ require_once __DIR__ . '/db.php';
    ACCESS CONTROL
    ========================================================================== */
 
-if (!isset($_SESSION['user_id'], $_SESSION['role'])) {
-    header('Location: admin-login.php');
+function dd_an_redirect(string $url): never
+{
+    header('Location: ' . $url);
     exit;
 }
 
-$currentRole = strtolower(trim((string)($_SESSION['role'] ?? '')));
-if ($currentRole !== 'admin') {
-    header('Location: login.php');
-    exit;
+function dd_an_is_admin_session(): bool
+{
+    if (!empty($_SESSION['is_admin'])) {
+        return true;
+    }
+
+    if (!empty($_SESSION['admin_id'])) {
+        return true;
+    }
+
+    $role = strtolower(trim((string) ($_SESSION['role'] ?? '')));
+    return in_array($role, ['admin', 'superadmin', 'owner'], true);
+}
+
+if (empty($_SESSION['user_id']) && empty($_SESSION['admin_id']) && empty($_SESSION['is_admin'])) {
+    dd_an_redirect('admin-login.php');
+}
+
+if (!dd_an_is_admin_session()) {
+    dd_an_redirect('admin-dashboard.php');
 }
 
 /* ==========================================================================
    FLASH
    ========================================================================== */
 
-$flashType = $_SESSION['admin_flash_type'] ?? '';
-$flashMessage = $_SESSION['admin_flash_message'] ?? '';
+$flashType = (string) ($_SESSION['admin_flash_type'] ?? '');
+$flashMessage = (string) ($_SESSION['admin_flash_message'] ?? '');
 unset($_SESSION['admin_flash_type'], $_SESSION['admin_flash_message']);
 
 /* ==========================================================================
@@ -45,9 +62,8 @@ unset($_SESSION['admin_flash_type'], $_SESSION['admin_flash_message']);
 
 $ADMIN_NOTIFICATIONS_TABLE = 'admin_notifications';
 $BOOKINGS_TABLE = 'bookings';
-$USERS_TABLE = 'users';
-$USER_ID_COL = 'id';
 
+$notificationPossibleIdCols = ['id', 'notification_id'];
 $notificationPossibleTitleCols = ['title', 'subject'];
 $notificationPossibleMessageCols = ['message', 'body', 'content'];
 $notificationPossibleTypeCols = ['type', 'category', 'notification_type'];
@@ -55,18 +71,20 @@ $notificationPossibleCreatedCols = ['created_at', 'created_on', 'timestamp'];
 $notificationPossibleReadCols = ['is_read', 'read_flag', 'seen'];
 $notificationPossibleLinkCols = ['link_url', 'url', 'action_url'];
 
-$possibleUserNameCols = ['name', 'full_name', 'display_name'];
-$possibleUserEmailCols = ['email'];
+$workerSourceTables = ['workers', 'walkers', 'users'];
+$possibleWorkerIdCols = ['id', 'worker_id', 'walker_id', 'user_id'];
+$possibleWorkerNameCols = ['name', 'full_name', 'display_name', 'worker_name', 'walker_name'];
+$possibleWorkerEmailCols = ['email'];
 
-$possibleWalkerIdColumns = ['walker_id', 'staff_id', 'employee_id'];
-$possibleServiceColumns  = ['service_type', 'booking_type', 'service'];
-$possibleStatusColumns   = ['status', 'booking_status'];
-$possibleDateColumns     = ['scheduled_date', 'service_date', 'booking_date', 'start_date'];
-$possibleTimeColumns     = ['scheduled_time', 'service_time', 'booking_time'];
+$possibleWalkerIdColumns = ['walker_id', 'staff_id', 'employee_id', 'worker_id', 'assigned_to', 'assigned_worker_id'];
+$possibleServiceColumns  = ['service_type', 'booking_type', 'service', 'type'];
+$possibleStatusColumns   = ['status', 'booking_status', 'walk_status'];
+$possibleDateColumns     = ['scheduled_date', 'service_date', 'booking_date', 'start_date', 'date'];
+$possibleTimeColumns     = ['scheduled_time', 'service_time', 'booking_time', 'time', 'start_time'];
 $possibleCreatedColumns  = ['created_at', 'created_on'];
 $possiblePetColumns      = ['pet_name', 'dog_name'];
 $possibleAddressColumns  = ['address', 'service_address', 'location'];
-$possibleClientColumns   = ['member_id', 'user_id', 'customer_id'];
+$possibleClientColumns   = ['client_name', 'owner_name', 'member_name', 'full_name', 'customer_name', 'member_id', 'user_id', 'customer_id', 'client_id'];
 
 $openStatuses = ['pending', 'open', 'unassigned', 'approved'];
 $assignedStatuses = ['assigned', 'accepted', 'confirmed', 'scheduled'];
@@ -79,7 +97,12 @@ $completedStatuses = ['completed', 'done'];
 
 function h(mixed $value): string
 {
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function dd_an_qi(string $value): string
+{
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
 function tableExists(PDO $pdo, string $table): bool
@@ -87,7 +110,7 @@ function tableExists(PDO $pdo, string $table): bool
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
         $stmt->execute([':table' => $table]);
-        return (bool)$stmt->fetchColumn();
+        return (bool) $stmt->fetchColumn();
     } catch (Throwable $e) {
         return false;
     }
@@ -96,13 +119,13 @@ function tableExists(PDO $pdo, string $table): bool
 function getTableColumns(PDO $pdo, string $table): array
 {
     try {
-        $stmt = $pdo->query("PRAGMA table_info($table)");
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $stmt = $pdo->query('PRAGMA table_info(' . dd_an_qi($table) . ')');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
         $columns = [];
 
         foreach ($rows as $row) {
             if (!empty($row['name'])) {
-                $columns[] = (string)$row['name'];
+                $columns[] = (string) $row['name'];
             }
         }
 
@@ -122,23 +145,9 @@ function firstExistingColumn(array $preferred, array $existing): ?string
     return null;
 }
 
-function buildInClause(array $values, string $prefix = 'p'): array
-{
-    $placeholders = [];
-    $params = [];
-
-    foreach (array_values($values) as $i => $value) {
-        $key = ':' . $prefix . $i;
-        $placeholders[] = $key;
-        $params[$key] = $value;
-    }
-
-    return [$placeholders, $params];
-}
-
 function niceService(?string $service): string
 {
-    $service = trim((string)$service);
+    $service = trim((string) $service);
     if ($service === '') {
         return 'Service';
     }
@@ -148,7 +157,7 @@ function niceService(?string $service): string
 
 function niceStatus(?string $status): string
 {
-    $status = trim((string)$status);
+    $status = trim((string) $status);
     if ($status === '') {
         return 'Update';
     }
@@ -158,8 +167,8 @@ function niceStatus(?string $status): string
 
 function formatJobDate(?string $date, ?string $time = null): string
 {
-    $date = trim((string)$date);
-    $time = trim((string)$time);
+    $date = trim((string) $date);
+    $time = trim((string) $time);
 
     if ($date === '' && $time === '') {
         return 'Scheduling details pending';
@@ -181,7 +190,7 @@ function formatJobDate(?string $date, ?string $time = null): string
 
 function formatNotificationTime(?string $value): string
 {
-    $value = trim((string)$value);
+    $value = trim((string) $value);
     if ($value === '') {
         return 'Recent';
     }
@@ -194,6 +203,30 @@ function formatNotificationTime(?string $value): string
     return date('M j, Y g:i A', $ts);
 }
 
+function safeFetchAll(PDO $pdo, string $sql, array $params = []): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : [];
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function safeFetchOne(PDO $pdo, string $sql, array $params = []): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
 function workerDisplay(array $workerLookup, int $workerId): string
 {
     $worker = $workerLookup[$workerId] ?? null;
@@ -201,10 +234,70 @@ function workerDisplay(array $workerLookup, int $workerId): string
         return 'Worker #' . $workerId;
     }
 
-    $name = trim((string)($worker['worker_name'] ?? ''));
-    $email = trim((string)($worker['worker_email'] ?? ''));
+    $name = trim((string) ($worker['worker_name'] ?? ''));
+    $email = trim((string) ($worker['worker_email'] ?? ''));
 
     return $name !== '' ? $name : ($email !== '' ? $email : 'Worker #' . $workerId);
+}
+
+function loadWorkerLookup(PDO $pdo, array $sourceTables, array $idCandidates, array $nameCandidates, array $emailCandidates): array
+{
+    $lookup = [];
+
+    foreach ($sourceTables as $table) {
+        if (!tableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = getTableColumns($pdo, $table);
+        if ($columns === []) {
+            continue;
+        }
+
+        $idCol = firstExistingColumn($idCandidates, $columns);
+        if ($idCol === null) {
+            continue;
+        }
+
+        $nameCol = firstExistingColumn($nameCandidates, $columns);
+        $emailCol = firstExistingColumn($emailCandidates, $columns);
+
+        $selectParts = [
+            dd_an_qi($idCol) . ' AS worker_id',
+            $nameCol !== null ? dd_an_qi($nameCol) . " AS worker_name" : "'' AS worker_name",
+            $emailCol !== null ? dd_an_qi($emailCol) . " AS worker_email" : "'' AS worker_email",
+        ];
+
+        $sql = "
+            SELECT
+                " . implode(",\n                ", $selectParts) . "
+            FROM " . dd_an_qi($table);
+
+        $rows = safeFetchAll($pdo, $sql);
+
+        foreach ($rows as $row) {
+            $workerId = (int) ($row['worker_id'] ?? 0);
+            if ($workerId <= 0) {
+                continue;
+            }
+
+            $existing = $lookup[$workerId] ?? ['worker_name' => '', 'worker_email' => ''];
+
+            $newName = trim((string) ($row['worker_name'] ?? ''));
+            $newEmail = trim((string) ($row['worker_email'] ?? ''));
+
+            if ($existing['worker_name'] === '' && $newName !== '') {
+                $existing['worker_name'] = $newName;
+            }
+            if ($existing['worker_email'] === '' && $newEmail !== '') {
+                $existing['worker_email'] = $newEmail;
+            }
+
+            $lookup[$workerId] = $existing;
+        }
+    }
+
+    return $lookup;
 }
 
 /* ==========================================================================
@@ -225,32 +318,13 @@ $stats = [
 $workerLookup = [];
 
 try {
-    if (tableExists($pdo, $USERS_TABLE)) {
-        $userColumns = getTableColumns($pdo, $USERS_TABLE);
-        if (in_array($USER_ID_COL, $userColumns, true)) {
-            $userNameCol = firstExistingColumn($possibleUserNameCols, $userColumns);
-            $userEmailCol = firstExistingColumn($possibleUserEmailCols, $userColumns);
-
-            $selectParts = [
-                $USER_ID_COL . ' AS worker_id'
-            ];
-            $selectParts[] = $userNameCol ? "$userNameCol AS worker_name" : "'' AS worker_name";
-            $selectParts[] = $userEmailCol ? "$userEmailCol AS worker_email" : "'' AS worker_email";
-
-            $sqlUsers = "
-                SELECT
-                    " . implode(",\n                    ", $selectParts) . "
-                FROM $USERS_TABLE
-            ";
-
-            $stmtUsers = $pdo->query($sqlUsers);
-            $userRows = $stmtUsers ? ($stmtUsers->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
-
-            foreach ($userRows as $row) {
-                $workerLookup[(int)$row['worker_id']] = $row;
-            }
-        }
-    }
+    $workerLookup = loadWorkerLookup(
+        $pdo,
+        $workerSourceTables,
+        $possibleWorkerIdCols,
+        $possibleWorkerNameCols,
+        $possibleWorkerEmailCols
+    );
 
     /* ----------------------------------------------------------------------
        MODE A: Dedicated admin_notifications table
@@ -258,6 +332,7 @@ try {
     if (tableExists($pdo, $ADMIN_NOTIFICATIONS_TABLE)) {
         $notifColumns = getTableColumns($pdo, $ADMIN_NOTIFICATIONS_TABLE);
 
+        $notifIdCol = firstExistingColumn($notificationPossibleIdCols, $notifColumns);
         $titleCol = firstExistingColumn($notificationPossibleTitleCols, $notifColumns);
         $messageCol = firstExistingColumn($notificationPossibleMessageCols, $notifColumns);
         $typeCol = firstExistingColumn($notificationPossibleTypeCols, $notifColumns);
@@ -265,39 +340,42 @@ try {
         $readCol = firstExistingColumn($notificationPossibleReadCols, $notifColumns);
         $linkCol = firstExistingColumn($notificationPossibleLinkCols, $notifColumns);
 
-        $selectParts = ['id'];
-        $selectParts[] = $titleCol ? "$titleCol AS notif_title" : "'' AS notif_title";
-        $selectParts[] = $messageCol ? "$messageCol AS notif_message" : "'' AS notif_message";
-        $selectParts[] = $typeCol ? "$typeCol AS notif_type" : "'' AS notif_type";
-        $selectParts[] = $createdCol ? "$createdCol AS notif_created" : "'' AS notif_created";
-        $selectParts[] = $readCol ? "$readCol AS notif_read" : "0 AS notif_read";
-        $selectParts[] = $linkCol ? "$linkCol AS notif_link" : "'' AS notif_link";
-
-        $orderCol = $createdCol ?? 'id';
-
-        $sql = "
-            SELECT
-                " . implode(",\n                ", $selectParts) . "
-            FROM $ADMIN_NOTIFICATIONS_TABLE
-            ORDER BY $orderCol DESC, id DESC
-            LIMIT 75
-        ";
-
-        $stmt = $pdo->query($sql);
-        $rows = $stmt ? ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
-
-        foreach ($rows as $row) {
-            $notifications[] = [
-                'title' => trim((string)($row['notif_title'] ?? 'Notification')),
-                'message' => trim((string)($row['notif_message'] ?? '')),
-                'type' => trim((string)($row['notif_type'] ?? 'update')),
-                'time' => trim((string)($row['notif_created'] ?? '')),
-                'is_read' => (int)($row['notif_read'] ?? 0) === 1,
-                'link' => trim((string)($row['notif_link'] ?? '')),
+        if ($notifIdCol !== null) {
+            $selectParts = [
+                dd_an_qi($notifIdCol) . ' AS notif_id',
+                $titleCol ? dd_an_qi($titleCol) . ' AS notif_title' : "'' AS notif_title",
+                $messageCol ? dd_an_qi($messageCol) . ' AS notif_message' : "'' AS notif_message",
+                $typeCol ? dd_an_qi($typeCol) . ' AS notif_type' : "'' AS notif_type",
+                $createdCol ? dd_an_qi($createdCol) . ' AS notif_created' : "'' AS notif_created",
+                $readCol ? dd_an_qi($readCol) . ' AS notif_read' : "0 AS notif_read",
+                $linkCol ? dd_an_qi($linkCol) . ' AS notif_link' : "'' AS notif_link",
             ];
-        }
 
-        $usedDedicatedNotificationsTable = true;
+            $orderCol = $createdCol !== null ? dd_an_qi($createdCol) : dd_an_qi($notifIdCol);
+
+            $sql = "
+                SELECT
+                    " . implode(",\n                    ", $selectParts) . "
+                FROM " . dd_an_qi($ADMIN_NOTIFICATIONS_TABLE) . "
+                ORDER BY {$orderCol} DESC, " . dd_an_qi($notifIdCol) . " DESC
+                LIMIT 75
+            ";
+
+            $rows = safeFetchAll($pdo, $sql);
+
+            foreach ($rows as $row) {
+                $notifications[] = [
+                    'title' => trim((string) ($row['notif_title'] ?? 'Notification')),
+                    'message' => trim((string) ($row['notif_message'] ?? '')),
+                    'type' => trim((string) ($row['notif_type'] ?? 'update')),
+                    'time' => trim((string) ($row['notif_created'] ?? '')),
+                    'is_read' => (int) ($row['notif_read'] ?? 0) === 1,
+                    'link' => trim((string) ($row['notif_link'] ?? '')),
+                ];
+            }
+
+            $usedDedicatedNotificationsTable = true;
+        }
     }
 
     /* ----------------------------------------------------------------------
@@ -319,64 +397,64 @@ try {
             $addressCol  = firstExistingColumn($possibleAddressColumns, $bookingColumns);
             $clientCol   = firstExistingColumn($possibleClientColumns, $bookingColumns);
 
-            if ($walkerIdCol === null || $statusCol === null) {
-                $error = 'Bookings table is missing required worker/status columns.';
+            if ($statusCol === null) {
+                $error = 'Bookings table is missing a usable status column.';
             } else {
                 $selectParts = ['id'];
-                $selectParts[] = "$walkerIdCol AS assigned_worker_id";
-                $selectParts[] = "$statusCol AS status_name";
-                $selectParts[] = $serviceCol ? "$serviceCol AS service_name" : "'' AS service_name";
-                $selectParts[] = $dateCol ? "$dateCol AS date_value" : "'' AS date_value";
-                $selectParts[] = $timeCol ? "$timeCol AS time_value" : "'' AS time_value";
-                $selectParts[] = $createdCol ? "$createdCol AS created_value" : "'' AS created_value";
-                $selectParts[] = $petCol ? "$petCol AS pet_name_value" : "'' AS pet_name_value";
-                $selectParts[] = $addressCol ? "$addressCol AS address_value" : "'' AS address_value";
-                $selectParts[] = $clientCol ? "$clientCol AS client_value" : "'' AS client_value";
+
+                $selectParts[] = $walkerIdCol ? dd_an_qi($walkerIdCol) . ' AS assigned_worker_id' : '0 AS assigned_worker_id';
+                $selectParts[] = dd_an_qi($statusCol) . ' AS status_name';
+                $selectParts[] = $serviceCol ? dd_an_qi($serviceCol) . ' AS service_name' : "'' AS service_name";
+                $selectParts[] = $dateCol ? dd_an_qi($dateCol) . ' AS date_value' : "'' AS date_value";
+                $selectParts[] = $timeCol ? dd_an_qi($timeCol) . ' AS time_value' : "'' AS time_value";
+                $selectParts[] = $createdCol ? dd_an_qi($createdCol) . ' AS created_value' : "'' AS created_value";
+                $selectParts[] = $petCol ? dd_an_qi($petCol) . ' AS pet_name_value' : "'' AS pet_name_value";
+                $selectParts[] = $addressCol ? dd_an_qi($addressCol) . ' AS address_value' : "'' AS address_value";
+                $selectParts[] = $clientCol ? dd_an_qi($clientCol) . ' AS client_value' : "'' AS client_value";
 
                 $baseSelect = implode(",\n                    ", $selectParts);
-                $orderCol = $createdCol ?? $dateCol ?? 'id';
+                $orderCol = $createdCol !== null ? dd_an_qi($createdCol) : 'id';
 
                 $sql = "
                     SELECT
-                        $baseSelect
-                    FROM $BOOKINGS_TABLE
-                    ORDER BY $orderCol DESC, id DESC
+                        {$baseSelect}
+                    FROM " . dd_an_qi($BOOKINGS_TABLE) . "
+                    ORDER BY {$orderCol} DESC, id DESC
                     LIMIT 80
                 ";
 
-                $stmt = $pdo->query($sql);
-                $rows = $stmt ? ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
+                $rows = safeFetchAll($pdo, $sql);
 
                 foreach ($rows as $row) {
-                    $statusRaw = strtolower(trim((string)($row['status_name'] ?? '')));
-                    $service = niceService((string)($row['service_name'] ?? 'Service'));
-                    $petName = trim((string)($row['pet_name_value'] ?? ''));
-                    $clientRef = trim((string)($row['client_value'] ?? ''));
+                    $statusRaw = strtolower(trim((string) ($row['status_name'] ?? '')));
+                    $service = niceService((string) ($row['service_name'] ?? 'Service'));
+                    $petName = trim((string) ($row['pet_name_value'] ?? ''));
+                    $clientRef = trim((string) ($row['client_value'] ?? ''));
                     $schedule = formatJobDate(
-                        (string)($row['date_value'] ?? ''),
-                        (string)($row['time_value'] ?? '')
+                        (string) ($row['date_value'] ?? ''),
+                        (string) ($row['time_value'] ?? '')
                     );
-                    $assignedWorkerId = (int)($row['assigned_worker_id'] ?? 0);
+                    $assignedWorkerId = (int) ($row['assigned_worker_id'] ?? 0);
                     $workerName = $assignedWorkerId > 0 ? workerDisplay($workerLookup, $assignedWorkerId) : 'Unassigned';
 
-                    $title = $service . ' #' . (string)$row['id'];
+                    $title = $service . ' #' . (string) $row['id'];
                     $message = '';
                     $type = 'update';
-                    $link = 'admin-walker-management.php';
+                    $link = 'admin-bookings.php';
 
                     if (in_array($statusRaw, $openStatuses, true)) {
-                        $title = 'Open Job: ' . $service . ' #' . (string)$row['id'];
+                        $title = 'Open Job: ' . $service . ' #' . (string) $row['id'];
                         $message = 'Needs assignment. ';
                         $message .= 'Scheduled: ' . $schedule . '. ';
                         $message .= 'Worker: Unassigned.';
                         $type = 'open_job';
                         $stats['open_jobs']++;
-                        $link = 'admin-assign-walker.php?id=' . urlencode((string)$row['id']);
+                        $link = 'admin-assign-walker.php?id=' . urlencode((string) $row['id']);
                     } elseif (in_array($statusRaw, $assignedStatuses, true)) {
                         $message = 'Assigned to ' . $workerName . '. ';
                         $message .= 'Scheduled: ' . $schedule . '.';
                         $type = 'assigned';
-                        $link = 'admin-worker-view.php?id=' . urlencode((string)$assignedWorkerId);
+                        $link = 'admin-bookings.php';
                     } elseif (in_array($statusRaw, $inProgressStatuses, true)) {
                         $message = 'Currently in progress with ' . $workerName . '. ';
                         $message .= 'Scheduled: ' . $schedule . '.';
@@ -387,9 +465,9 @@ try {
                         $message = 'Completed by ' . $workerName . '. ';
                         $message .= 'Scheduled: ' . $schedule . '.';
                         $type = 'completed';
-                        $link = 'admin-worker-view.php?id=' . urlencode((string)$assignedWorkerId);
+                        $link = 'admin-bookings.php';
                     } else {
-                        $message = 'Status: ' . niceStatus((string)$row['status_name'] ?? 'Update') . '. ';
+                        $message = 'Status: ' . niceStatus((string) ($row['status_name'] ?? 'Update')) . '. ';
                         $message .= 'Scheduled: ' . $schedule . '. ';
                         $message .= 'Worker: ' . $workerName . '.';
                     }
@@ -405,7 +483,7 @@ try {
                         'title' => $title,
                         'message' => $message,
                         'type' => $type,
-                        'time' => trim((string)($row['created_value'] ?? $row['date_value'] ?? '')),
+                        'time' => trim((string) ($row['created_value'] ?? $row['date_value'] ?? '')),
                         'is_read' => false,
                         'link' => $link,
                     ];
@@ -790,7 +868,9 @@ try {
             </div>
 
             <div class="top-actions">
-                <a class="btn-secondary" href="admin.php">Admin Dashboard</a>
+                <a class="btn-secondary" href="admin-dashboard.php">Admin Dashboard</a>
+                <a class="btn-secondary" href="admin-revenue.php">Revenue</a>
+                <a class="btn-secondary" href="admin-bookings.php">Bookings</a>
                 <a class="btn-secondary" href="admin-walker-management.php">Walker Management</a>
             </div>
         </div>
@@ -815,25 +895,25 @@ try {
             <div class="hero-grid">
                 <div class="stat">
                     <div class="stat-label">Total Alerts</div>
-                    <div class="stat-value"><?= h((string)$stats['total']) ?></div>
+                    <div class="stat-value"><?= h((string) $stats['total']) ?></div>
                     <div class="stat-note">Notifications currently shown</div>
                 </div>
 
                 <div class="stat">
                     <div class="stat-label">Unread Style</div>
-                    <div class="stat-value"><?= h((string)$stats['unread']) ?></div>
+                    <div class="stat-value"><?= h((string) $stats['unread']) ?></div>
                     <div class="stat-note">Fallback mode treats alerts as fresh</div>
                 </div>
 
                 <div class="stat">
                     <div class="stat-label">Open Jobs</div>
-                    <div class="stat-value"><?= h((string)$stats['open_jobs']) ?></div>
+                    <div class="stat-value"><?= h((string) $stats['open_jobs']) ?></div>
                     <div class="stat-note">Jobs still needing assignment</div>
                 </div>
 
                 <div class="stat">
                     <div class="stat-label">Active Jobs</div>
-                    <div class="stat-value"><?= h((string)$stats['active_jobs']) ?></div>
+                    <div class="stat-value"><?= h((string) $stats['active_jobs']) ?></div>
                     <div class="stat-note">Jobs currently in progress</div>
                 </div>
             </div>
@@ -849,7 +929,7 @@ try {
                             : 'Generated from booking activity because no dedicated admin notifications table was found.' ?>
                     </p>
                 </div>
-                <div class="badge"><?= h((string)$stats['total']) ?> Alerts</div>
+                <div class="badge"><?= h((string) $stats['total']) ?> Alerts</div>
             </div>
 
             <?php if (empty($notifications)): ?>
@@ -860,7 +940,7 @@ try {
                 <div class="notif-list">
                     <?php foreach ($notifications as $notification): ?>
                         <?php
-                        $type = strtolower(trim((string)($notification['type'] ?? 'update')));
+                        $type = strtolower(trim((string) ($notification['type'] ?? 'update')));
                         $pillClass = 'pill-update';
 
                         if ($type === 'assigned') {
@@ -876,22 +956,22 @@ try {
                         <article class="notif-card">
                             <div class="notif-top">
                                 <div>
-                                    <h3 class="notif-title"><?= h((string)($notification['title'] ?? 'Notification')) ?></h3>
+                                    <h3 class="notif-title"><?= h((string) ($notification['title'] ?? 'Notification')) ?></h3>
                                 </div>
-                                <div class="notif-time"><?= h(formatNotificationTime((string)($notification['time'] ?? ''))) ?></div>
+                                <div class="notif-time"><?= h(formatNotificationTime((string) ($notification['time'] ?? ''))) ?></div>
                             </div>
 
                             <div class="notif-message">
-                                <?= h((string)($notification['message'] ?? '')) ?>
+                                <?= h((string) ($notification['message'] ?? '')) ?>
                             </div>
 
                             <div class="notif-footer">
                                 <div class="pill <?= h($pillClass) ?>">
-                                    <?= h(niceStatus((string)($notification['type'] ?? 'update'))) ?>
+                                    <?= h(niceStatus((string) ($notification['type'] ?? 'update'))) ?>
                                 </div>
 
-                                <?php if (trim((string)($notification['link'] ?? '')) !== ''): ?>
-                                    <a class="notif-link" href="<?= h((string)$notification['link']) ?>">Open</a>
+                                <?php if (trim((string) ($notification['link'] ?? '')) !== ''): ?>
+                                    <a class="notif-link" href="<?= h((string) $notification['link']) ?>">Open</a>
                                 <?php endif; ?>
                             </div>
                         </article>

@@ -2,41 +2,233 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/database/setup.php';
-require_once __DIR__ . '/admin-auth.php';
+require_once __DIR__ . '/db.php';
 
-function e(?string $value): string
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    exit('Database connection not available.');
+}
+
+/* ==========================================================================
+   ACCESS CONTROL
+   ========================================================================== */
+
+function dd_walks_redirect(string $url): never
+{
+    header('Location: ' . $url);
+    exit;
+}
+
+function dd_walks_is_admin_session(): bool
+{
+    if (!empty($_SESSION['is_admin'])) {
+        return true;
+    }
+
+    if (!empty($_SESSION['admin_id'])) {
+        return true;
+    }
+
+    if (!empty($_SESSION['admin_logged_in'])) {
+        return true;
+    }
+
+    $roleCandidates = [
+        $_SESSION['role'] ?? null,
+        $_SESSION['user_role'] ?? null,
+        $_SESSION['account_role'] ?? null,
+        $_SESSION['account_type'] ?? null,
+    ];
+
+    foreach ($roleCandidates as $role) {
+        if (!is_string($role)) {
+            continue;
+        }
+
+        $normalized = strtolower(trim($role));
+        if (in_array($normalized, ['admin', 'superadmin', 'owner'], true)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+if (empty($_SESSION['user_id']) && empty($_SESSION['admin_id']) && empty($_SESSION['is_admin']) && empty($_SESSION['admin_logged_in'])) {
+    dd_walks_redirect('admin-login.php');
+}
+
+if (!dd_walks_is_admin_session()) {
+    dd_walks_redirect('admin-dashboard.php');
+}
+
+/* ==========================================================================
+   CSRF
+   ========================================================================== */
+
+if (empty($_SESSION['admin_walks_csrf']) || !is_string($_SESSION['admin_walks_csrf'])) {
+    $_SESSION['admin_walks_csrf'] = bin2hex(random_bytes(32));
+}
+$csrfToken = (string) $_SESSION['admin_walks_csrf'];
+
+/* ==========================================================================
+   HELPERS
+   ========================================================================== */
+
+function e(mixed $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function tableExists(PDO $pdo, string $table): bool
+function dd_walks_qi(string $value): string
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool) $stmt->fetchColumn();
+    return '"' . str_replace('"', '""', $value) . '"';
 }
 
-function getColumns(PDO $pdo, string $table): array
+function dd_walks_table_exists(PDO $pdo, string $table): bool
 {
-    $columns = [];
-    $stmt = $pdo->query("PRAGMA table_info($table)");
-    if ($stmt) {
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
-            $columns[] = $column['name'];
-        }
+    static $cache = [];
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
     }
-    return $columns;
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
+        $stmt->execute([':table' => $table]);
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    }
 }
 
-function hasColumn(array $columns, string $column): bool
+function dd_walks_get_columns(PDO $pdo, string $table): array
+{
+    static $cache = [];
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    if (!dd_walks_table_exists($pdo, $table)) {
+        $cache[$table] = [];
+        return [];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . dd_walks_qi($table) . ')');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        $columns = [];
+
+        foreach ($rows as $row) {
+            if (!empty($row['name'])) {
+                $columns[] = (string) $row['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $columns;
+    } catch (Throwable $e) {
+        $cache[$table] = [];
+        return [];
+    }
+}
+
+function dd_walks_has_column(array $columns, string $column): bool
 {
     return in_array($column, $columns, true);
 }
 
+function dd_walks_first_existing_column(array $columns, array $candidates): ?string
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function dd_walks_safe_fetch_all(PDO $pdo, string $sql, array $params = []): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : [];
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function dd_walks_safe_execute(PDOStatement $stmt, array $params = []): bool
+{
+    try {
+        return $stmt->execute($params);
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function dd_walks_value_from_row(array $row, array $keys, mixed $default = null): mixed
+{
+    foreach ($keys as $key) {
+        if (array_key_exists($key, $row) && $row[$key] !== null && $row[$key] !== '') {
+            return $row[$key];
+        }
+    }
+
+    return $default;
+}
+
+function dd_walks_build_name(array $row): string
+{
+    $full = trim((string) dd_walks_value_from_row($row, [
+        'full_name',
+        'name',
+        'display_name',
+        'client_name',
+        'member_name',
+        'worker_name',
+        'walker_name',
+        'pet_name',
+        'dog_name',
+        'username',
+        'email',
+    ], ''));
+
+    if ($full !== '') {
+        return $full;
+    }
+
+    $first = trim((string) ($row['first_name'] ?? ''));
+    $last = trim((string) ($row['last_name'] ?? ''));
+
+    $combined = trim($first . ' ' . $last);
+    return $combined !== '' ? $combined : 'Unknown';
+}
+
+function dd_walks_normalize_status(string $status): string
+{
+    $normalized = strtolower(trim($status));
+    $normalized = str_replace([' ', '-'], '_', $normalized);
+
+    return match ($normalized) {
+        '' => 'pending',
+        'confirmed' => 'confirmed',
+        'in_progress', 'inprogress', 'active', 'started' => 'in_progress',
+        'completed', 'done' => 'completed',
+        'cancelled', 'canceled' => 'cancelled',
+        default => $normalized,
+    };
+}
+
 function walkStatusClass(string $status): string
 {
-    return match ($status) {
+    return match (dd_walks_normalize_status($status)) {
         'confirmed'   => 'status confirmed',
         'in_progress' => 'status in-progress',
         'completed'   => 'status completed',
@@ -45,57 +237,249 @@ function walkStatusClass(string $status): string
     };
 }
 
-if (!tableExists($pdo, 'bookings')) {
+function dd_walks_human_status(string $status): string
+{
+    return match (dd_walks_normalize_status($status)) {
+        'confirmed'   => 'Confirmed',
+        'in_progress' => 'In Progress',
+        'completed'   => 'Completed',
+        'cancelled'   => 'Cancelled',
+        default       => 'Pending',
+    };
+}
+
+function dd_walks_format_date(?string $value): string
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return e($value);
+    }
+
+    return date('F j, Y', $timestamp);
+}
+
+function dd_walks_format_datetime(?string $value): string
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return e($value);
+    }
+
+    return date('F j, Y g:i A', $timestamp);
+}
+
+function dd_walks_format_money(mixed $amount): string
+{
+    if ($amount === null || $amount === '') {
+        return '—';
+    }
+
+    if (!is_numeric($amount)) {
+        return e((string) $amount);
+    }
+
+    return '$' . number_format((float) $amount, 2);
+}
+
+function dd_walks_is_walk_service(string $serviceType): bool
+{
+    $normalized = strtolower(trim($serviceType));
+    if ($normalized === '') {
+        return true;
+    }
+
+    return str_contains($normalized, 'walk');
+}
+
+/* ==========================================================================
+   LOOKUPS
+   ========================================================================== */
+
+function dd_walks_build_lookup(PDO $pdo, array $sourceTables, array $idCandidates, array $nameCandidates, array $extraCandidates = []): array
+{
+    $lookup = [];
+
+    foreach ($sourceTables as $table) {
+        if (!dd_walks_table_exists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = dd_walks_get_columns($pdo, $table);
+        if ($columns === []) {
+            continue;
+        }
+
+        $idCol = dd_walks_first_existing_column($columns, $idCandidates);
+        if ($idCol === null) {
+            continue;
+        }
+
+        $orderCol = dd_walks_first_existing_column($columns, ['created_at', 'joined_at', 'date_created', $idCol]) ?? $idCol;
+        $rows = dd_walks_safe_fetch_all(
+            $pdo,
+            'SELECT * FROM ' . dd_walks_qi($table) . ' ORDER BY ' . dd_walks_qi($orderCol) . ' DESC'
+        );
+
+        foreach ($rows as $row) {
+            $id = (int) ($row[$idCol] ?? 0);
+            if ($id <= 0) {
+                continue;
+            }
+
+            if (isset($lookup[$id]) && trim((string) $lookup[$id]['label']) !== '') {
+                continue;
+            }
+
+            $label = '';
+            foreach ($nameCandidates as $candidate) {
+                if (isset($row[$candidate]) && trim((string) $row[$candidate]) !== '') {
+                    $label = trim((string) $row[$candidate]);
+                    break;
+                }
+            }
+
+            if ($label === '') {
+                $label = dd_walks_build_name($row);
+            }
+
+            $extra = [];
+            foreach ($extraCandidates as $extraKey => $candidateList) {
+                $extra[$extraKey] = dd_walks_value_from_row($row, $candidateList, '');
+            }
+
+            $lookup[$id] = [
+                'label' => $label !== '' ? $label : 'Unknown',
+                'extra' => $extra,
+            ];
+        }
+    }
+
+    return $lookup;
+}
+
+function dd_walks_build_worker_lookup(PDO $pdo): array
+{
+    $lookup = [];
+
+    foreach (['workers', 'walkers', 'users'] as $table) {
+        if (!dd_walks_table_exists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = dd_walks_get_columns($pdo, $table);
+        if ($columns === []) {
+            continue;
+        }
+
+        $idCol = dd_walks_first_existing_column($columns, ['id', 'worker_id', 'walker_id', 'user_id']);
+        if ($idCol === null) {
+            continue;
+        }
+
+        $rows = dd_walks_safe_fetch_all(
+            $pdo,
+            'SELECT * FROM ' . dd_walks_qi($table) . ' ORDER BY ' . dd_walks_qi($idCol) . ' DESC'
+        );
+
+        foreach ($rows as $row) {
+            if ($table === 'users') {
+                $role = strtolower(trim((string) dd_walks_value_from_row($row, ['role', 'user_role', 'account_role', 'account_type'], '')));
+                if (!in_array($role, ['walker', 'worker', 'staff', 'employee'], true)) {
+                    continue;
+                }
+            }
+
+            $id = (int) ($row[$idCol] ?? 0);
+            if ($id <= 0 || isset($lookup[$id])) {
+                continue;
+            }
+
+            $lookup[$id] = [
+                'label' => dd_walks_build_name($row),
+                'email' => (string) dd_walks_value_from_row($row, ['email'], ''),
+            ];
+        }
+    }
+
+    return $lookup;
+}
+
+$clientLookup = dd_walks_build_lookup(
+    $pdo,
+    ['users', 'members', 'client_profiles'],
+    ['id', 'user_id', 'member_id', 'client_id'],
+    ['full_name', 'name', 'client_name', 'member_name', 'username', 'email'],
+    ['email' => ['email']]
+);
+
+$petLookup = dd_walks_build_lookup(
+    $pdo,
+    ['dogs', 'pets'],
+    ['id', 'dog_id', 'pet_id'],
+    ['dog_name', 'pet_name', 'name'],
+    [
+        'breed' => ['breed'],
+        'size' => ['size', 'dog_size', 'pet_size'],
+    ]
+);
+
+$workerLookup = dd_walks_build_worker_lookup($pdo);
+
+/* ==========================================================================
+   BOOKINGS SCHEMA
+   ========================================================================== */
+
+if (!dd_walks_table_exists($pdo, 'bookings')) {
     die('Bookings table not found.');
 }
 
-$bookingColumns = getColumns($pdo, 'bookings');
-$userColumns = tableExists($pdo, 'users') ? getColumns($pdo, 'users') : [];
-$petColumns = tableExists($pdo, 'pets') ? getColumns($pdo, 'pets') : [];
+$bookingColumns = dd_walks_get_columns($pdo, 'bookings');
+
+$idCol = dd_walks_first_existing_column($bookingColumns, ['id', 'booking_id']);
+$statusCol = dd_walks_first_existing_column($bookingColumns, ['status', 'booking_status', 'walk_status']);
+$serviceTypeCol = dd_walks_first_existing_column($bookingColumns, ['service_type', 'service', 'booking_type', 'type']);
+$serviceDateCol = dd_walks_first_existing_column($bookingColumns, ['service_date', 'walk_date', 'booking_date', 'date']);
+$serviceTimeCol = dd_walks_first_existing_column($bookingColumns, ['service_time', 'walk_time', 'booking_time', 'time']);
+$durationCol = dd_walks_first_existing_column($bookingColumns, ['duration_minutes', 'walk_duration', 'duration']);
+$priceCol = dd_walks_first_existing_column($bookingColumns, ['price', 'estimated_price', 'total_price', 'amount']);
+$walkerNameCol = dd_walks_first_existing_column($bookingColumns, ['walker_name', 'assigned_walker_name', 'staff_name', 'employee_name']);
+$walkerIdCol = dd_walks_first_existing_column($bookingColumns, ['assigned_walker_id', 'walker_id', 'staff_id', 'employee_id', 'worker_id', 'assigned_to']);
+$clientIdCol = dd_walks_first_existing_column($bookingColumns, ['user_id', 'member_id', 'client_id', 'owner_id']);
+$clientNameCol = dd_walks_first_existing_column($bookingColumns, ['client_name', 'member_name', 'owner_name', 'customer_name']);
+$petIdCol = dd_walks_first_existing_column($bookingColumns, ['pet_id', 'dog_id']);
+$petNameCol = dd_walks_first_existing_column($bookingColumns, ['pet_name', 'dog_name']);
+$createdAtCol = dd_walks_first_existing_column($bookingColumns, ['created_at', 'created_on', 'date_created']);
+$statusUpdatedByCol = dd_walks_first_existing_column($bookingColumns, ['status_updated_by']);
+$statusUpdatedAtCol = dd_walks_first_existing_column($bookingColumns, ['status_updated_at']);
+$updatedAtCol = dd_walks_first_existing_column($bookingColumns, ['updated_at', 'modified_at']);
+
+if ($idCol === null) {
+    die('Bookings table is missing an ID column.');
+}
+
+/* ==========================================================================
+   FILTERS
+   ========================================================================== */
 
 $allowedFilters = ['all', 'pending', 'confirmed', 'in_progress', 'completed', 'cancelled', 'unassigned'];
-$currentFilter = $_GET['status'] ?? 'all';
+$currentFilter = isset($_GET['status']) ? strtolower(trim((string) $_GET['status'])) : 'all';
+
 if (!in_array($currentFilter, $allowedFilters, true)) {
     $currentFilter = 'all';
 }
 
 $flashMessage = '';
 $flashType = 'success';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $bookingId = (int) ($_POST['booking_id'] ?? 0);
-    $newStatus = trim((string) ($_POST['new_status'] ?? ''));
-
-    if ($bookingId > 0 && in_array($newStatus, ['pending', 'confirmed', 'in_progress', 'completed', 'cancelled'], true) && hasColumn($bookingColumns, 'status')) {
-        $updateParts = ['status = :status'];
-        $params = [
-            'status' => $newStatus,
-            'id' => $bookingId,
-        ];
-
-        if (hasColumn($bookingColumns, 'status_updated_by')) {
-            $updateParts[] = 'status_updated_by = :status_updated_by';
-            $params['status_updated_by'] = 'admin';
-        }
-
-        if (hasColumn($bookingColumns, 'status_updated_at')) {
-            $updateParts[] = 'status_updated_at = CURRENT_TIMESTAMP';
-        }
-
-        $stmt = $pdo->prepare("
-            UPDATE bookings
-            SET " . implode(', ', $updateParts) . "
-            WHERE id = :id
-        ");
-        $stmt->execute($params);
-
-        header('Location: admin-walks.php?updated=1&status=' . urlencode($currentFilter) . '&highlight=' . $bookingId);
-        exit;
-    }
-
-    header('Location: admin-walks.php?error=1&status=' . urlencode($currentFilter));
-    exit;
-}
 
 if (isset($_GET['updated'])) {
     $flashMessage = 'Walk status updated successfully.';
@@ -106,91 +490,82 @@ if (isset($_GET['updated'])) {
 
 $highlightId = isset($_GET['highlight']) ? (int) $_GET['highlight'] : 0;
 
-$whereClauses = [];
-$params = [];
+/* ==========================================================================
+   POST STATUS UPDATE
+   ========================================================================== */
 
-if (hasColumn($bookingColumns, 'service_type')) {
-    $whereClauses[] = "b.service_type = 'walk'";
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $postedCsrf = (string) ($_POST['csrf_token'] ?? '');
+    $bookingId = (int) ($_POST['booking_id'] ?? 0);
+    $newStatus = trim((string) ($_POST['new_status'] ?? ''));
+
+    if ($postedCsrf === '' || !hash_equals($csrfToken, $postedCsrf)) {
+        header('Location: admin-walks.php?error=1&status=' . urlencode($currentFilter));
+        exit;
+    }
+
+    if (
+        $bookingId > 0 &&
+        in_array($newStatus, ['pending', 'confirmed', 'in_progress', 'completed', 'cancelled'], true) &&
+        $statusCol !== null
+    ) {
+        $updateParts = [
+            dd_walks_qi($statusCol) . ' = :status',
+        ];
+
+        $params = [
+            ':status' => $newStatus,
+            ':id' => $bookingId,
+        ];
+
+        if ($statusUpdatedByCol !== null) {
+            $adminName = trim((string) (
+                $_SESSION['admin_name']
+                ?? $_SESSION['full_name']
+                ?? $_SESSION['email']
+                ?? 'admin'
+            ));
+            $updateParts[] = dd_walks_qi($statusUpdatedByCol) . ' = :status_updated_by';
+            $params[':status_updated_by'] = $adminName !== '' ? $adminName : 'admin';
+        }
+
+        if ($statusUpdatedAtCol !== null) {
+            $updateParts[] = dd_walks_qi($statusUpdatedAtCol) . ' = CURRENT_TIMESTAMP';
+        }
+
+        if ($updatedAtCol !== null) {
+            $updateParts[] = dd_walks_qi($updatedAtCol) . ' = CURRENT_TIMESTAMP';
+        }
+
+        $stmt = $pdo->prepare(
+            'UPDATE ' . dd_walks_qi('bookings') . '
+             SET ' . implode(', ', $updateParts) . '
+             WHERE ' . dd_walks_qi($idCol) . ' = :id'
+        );
+
+        if (dd_walks_safe_execute($stmt, $params)) {
+            header('Location: admin-walks.php?updated=1&status=' . urlencode($currentFilter) . '&highlight=' . $bookingId);
+            exit;
+        }
+    }
+
+    header('Location: admin-walks.php?error=1&status=' . urlencode($currentFilter));
+    exit;
 }
 
-if ($currentFilter === 'unassigned') {
-    if (hasColumn($bookingColumns, 'assigned_walker_id')) {
-        $whereClauses[] = '(b.assigned_walker_id IS NULL OR b.assigned_walker_id = 0)';
-    } elseif (hasColumn($bookingColumns, 'walker_name')) {
-        $whereClauses[] = "(b.walker_name IS NULL OR b.walker_name = '')";
-    }
-} elseif ($currentFilter !== 'all' && hasColumn($bookingColumns, 'status')) {
-    $whereClauses[] = 'b.status = :status_filter';
-    $params['status_filter'] = $currentFilter;
-}
+/* ==========================================================================
+   LOAD BOOKINGS
+   ========================================================================== */
 
-$whereSql = $whereClauses ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
+$orderCol = $serviceDateCol ?? $createdAtCol ?? $idCol;
 
-$userLabelSql = "'Unknown client'";
-if ($userColumns) {
-    if (hasColumn($userColumns, 'email')) {
-        $userLabelSql = "COALESCE(u.email, 'Unknown client')";
-    } elseif (hasColumn($userColumns, 'name')) {
-        $userLabelSql = "COALESCE(u.name, 'Unknown client')";
-    } elseif (hasColumn($userColumns, 'full_name')) {
-        $userLabelSql = "COALESCE(u.full_name, 'Unknown client')";
-    } elseif (hasColumn($userColumns, 'username')) {
-        $userLabelSql = "COALESCE(u.username, 'Unknown client')";
-    }
-}
+$rawBookings = dd_walks_safe_fetch_all(
+    $pdo,
+    'SELECT * FROM ' . dd_walks_qi('bookings') . '
+     ORDER BY ' . dd_walks_qi($orderCol) . ' DESC, ' . dd_walks_qi($idCol) . ' DESC'
+);
 
-$selectParts = ['b.id'];
-$optionalBookingColumns = [
-    'user_id',
-    'pet_id',
-    'service_type',
-    'service_date',
-    'service_time',
-    'duration_minutes',
-    'status',
-    'price',
-    'walker_name',
-    'assigned_walker_id'
-];
-
-foreach ($optionalBookingColumns as $column) {
-    if (hasColumn($bookingColumns, $column)) {
-        $selectParts[] = 'b.' . $column;
-    }
-}
-
-$joins = [];
-
-if (tableExists($pdo, 'users') && hasColumn($bookingColumns, 'user_id')) {
-    $selectParts[] = $userLabelSql . ' AS client_label';
-    $joins[] = 'LEFT JOIN users u ON u.id = b.user_id';
-}
-
-if (tableExists($pdo, 'pets') && hasColumn($bookingColumns, 'pet_id') && hasColumn($petColumns, 'id')) {
-    if (hasColumn($petColumns, 'pet_name')) {
-        $selectParts[] = 'p.pet_name AS pet_name';
-    }
-    if (hasColumn($petColumns, 'breed')) {
-        $selectParts[] = 'p.breed AS pet_breed';
-    }
-    if (hasColumn($petColumns, 'size')) {
-        $selectParts[] = 'p.size AS pet_size';
-    }
-    $joins[] = 'LEFT JOIN pets p ON p.id = b.pet_id';
-}
-
-$sql = "
-    SELECT " . implode(', ', $selectParts) . "
-    FROM bookings b
-    " . implode(' ', $joins) . "
-    {$whereSql}
-    ORDER BY " . (hasColumn($bookingColumns, 'service_date') ? 'b.service_date DESC, ' : '') . "b.id DESC
-";
-
-$stmt = $pdo->prepare($sql);
-$stmt->execute($params);
-$walks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
+$walks = [];
 $summary = [
     'total' => 0,
     'unassigned' => 0,
@@ -200,40 +575,101 @@ $summary = [
     'completed' => 0,
 ];
 
-$summaryWhere = hasColumn($bookingColumns, 'service_type') ? "WHERE service_type = 'walk'" : '';
-$summarySql = "
-    SELECT
-        COUNT(*) AS total_count," .
-        (hasColumn($bookingColumns, 'assigned_walker_id')
-            ? " SUM(CASE WHEN assigned_walker_id IS NULL OR assigned_walker_id = 0 THEN 1 ELSE 0 END) AS unassigned_count,"
-            : (hasColumn($bookingColumns, 'walker_name')
-                ? " SUM(CASE WHEN walker_name IS NULL OR walker_name = '' THEN 1 ELSE 0 END) AS unassigned_count,"
-                : " 0 AS unassigned_count,")) .
-        (hasColumn($bookingColumns, 'status')
-            ? "
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
-        SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_count,
-        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress_count,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count
-        "
-            : "
-        0 AS pending_count,
-        0 AS confirmed_count,
-        0 AS in_progress_count,
-        0 AS completed_count
-        ") . "
-    FROM bookings
-    {$summaryWhere}
-";
+foreach ($rawBookings as $row) {
+    $serviceType = (string) dd_walks_value_from_row($row, [$serviceTypeCol ?? ''], '');
+    if ($serviceTypeCol !== null && !dd_walks_is_walk_service($serviceType)) {
+        continue;
+    }
 
-$summaryStmt = $pdo->query($summarySql);
-if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
-    $summary['total'] = (int) ($summaryRow['total_count'] ?? 0);
-    $summary['unassigned'] = (int) ($summaryRow['unassigned_count'] ?? 0);
-    $summary['pending'] = (int) ($summaryRow['pending_count'] ?? 0);
-    $summary['confirmed'] = (int) ($summaryRow['confirmed_count'] ?? 0);
-    $summary['in_progress'] = (int) ($summaryRow['in_progress_count'] ?? 0);
-    $summary['completed'] = (int) ($summaryRow['completed_count'] ?? 0);
+    $bookingId = (int) ($row[$idCol] ?? 0);
+    $statusValue = (string) dd_walks_value_from_row($row, [$statusCol ?? ''], 'pending');
+    $normalizedStatus = dd_walks_normalize_status($statusValue);
+
+    $assignedWalkerId = (int) dd_walks_value_from_row($row, [$walkerIdCol ?? ''], 0);
+    $walkerName = trim((string) dd_walks_value_from_row($row, [$walkerNameCol ?? ''], ''));
+
+    if ($walkerName === '' && $assignedWalkerId > 0 && isset($workerLookup[$assignedWalkerId])) {
+        $walkerName = trim((string) ($workerLookup[$assignedWalkerId]['label'] ?? ''));
+    }
+    if ($walkerName === '') {
+        $walkerName = 'Not assigned';
+    }
+
+    $clientName = trim((string) dd_walks_value_from_row($row, [$clientNameCol ?? ''], ''));
+    $clientId = (int) dd_walks_value_from_row($row, [$clientIdCol ?? ''], 0);
+
+    if ($clientName === '' && $clientId > 0 && isset($clientLookup[$clientId])) {
+        $clientName = trim((string) ($clientLookup[$clientId]['label'] ?? ''));
+    }
+    if ($clientName === '') {
+        $clientName = 'Unknown client';
+    }
+
+    $petName = trim((string) dd_walks_value_from_row($row, [$petNameCol ?? ''], ''));
+    $petId = (int) dd_walks_value_from_row($row, [$petIdCol ?? ''], 0);
+    $petBreed = '';
+    $petSize = '';
+
+    if ($petName === '' && $petId > 0 && isset($petLookup[$petId])) {
+        $petName = trim((string) ($petLookup[$petId]['label'] ?? ''));
+        $petBreed = trim((string) ($petLookup[$petId]['extra']['breed'] ?? ''));
+        $petSize = trim((string) ($petLookup[$petId]['extra']['size'] ?? ''));
+    }
+
+    if ($petName === '') {
+        $petName = 'Pet not found';
+    }
+
+    $isUnassigned = ($assignedWalkerId <= 0 && trim($walkerName) === 'Not assigned');
+
+    $normalizedRow = [
+        'id' => $bookingId,
+        'client_label' => $clientName,
+        'user_id' => $clientId,
+        'pet_name' => $petName,
+        'pet_breed' => $petBreed,
+        'pet_size' => $petSize,
+        'pet_id' => $petId,
+        'service_type' => $serviceType !== '' ? $serviceType : 'walk',
+        'service_date' => (string) dd_walks_value_from_row($row, [$serviceDateCol ?? ''], ''),
+        'service_time' => (string) dd_walks_value_from_row($row, [$serviceTimeCol ?? ''], ''),
+        'duration_minutes' => dd_walks_value_from_row($row, [$durationCol ?? ''], null),
+        'status' => $normalizedStatus,
+        'price' => dd_walks_value_from_row($row, [$priceCol ?? ''], 0),
+        'walker_name' => $walkerName,
+        'assigned_walker_id' => $assignedWalkerId,
+        'created_at' => (string) dd_walks_value_from_row($row, [$createdAtCol ?? ''], ''),
+        'is_unassigned' => $isUnassigned,
+    ];
+
+    $summary['total']++;
+
+    if ($isUnassigned) {
+        $summary['unassigned']++;
+    }
+    if ($normalizedStatus === 'pending') {
+        $summary['pending']++;
+    }
+    if ($normalizedStatus === 'confirmed') {
+        $summary['confirmed']++;
+    }
+    if ($normalizedStatus === 'in_progress') {
+        $summary['in_progress']++;
+    }
+    if ($normalizedStatus === 'completed') {
+        $summary['completed']++;
+    }
+
+    $include = true;
+    if ($currentFilter === 'unassigned') {
+        $include = $isUnassigned;
+    } elseif ($currentFilter !== 'all') {
+        $include = ($normalizedStatus === $currentFilter);
+    }
+
+    if ($include) {
+        $walks[] = $normalizedRow;
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -622,8 +1058,9 @@ if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
       </div>
 
       <div class="top-actions">
-        <a href="admin-bookings.php" class="top-btn">Main Bookings</a>
-        <a href="admin-dashboard.php" class="top-btn primary">Admin Home</a>
+        <a href="admin-dashboard.php" class="top-btn">Admin Home</a>
+        <a href="admin-revenue.php" class="top-btn">Revenue</a>
+        <a href="admin-bookings.php" class="top-btn primary">Main Bookings</a>
       </div>
     </div>
 
@@ -741,14 +1178,14 @@ if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
                   </td>
 
                   <td>
-                    <div class="primary-text"><?php echo e($walk['service_date'] ?? 'No date'); ?></div>
+                    <div class="primary-text"><?php echo e(dd_walks_format_date((string) ($walk['service_date'] ?? ''))); ?></div>
                     <div class="secondary-text">
                       <?php
                         $sched = [];
                         if (!empty($walk['service_time'])) {
                             $sched[] = $walk['service_time'];
                         }
-                        if (isset($walk['duration_minutes']) && $walk['duration_minutes'] !== null) {
+                        if (isset($walk['duration_minutes']) && $walk['duration_minutes'] !== null && $walk['duration_minutes'] !== '') {
                             $sched[] = (int) $walk['duration_minutes'] . ' min';
                         }
                         echo e($sched ? implode(' • ', $sched) : 'No schedule details');
@@ -758,7 +1195,7 @@ if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
 
                   <td>
                     <span class="<?php echo e(walkStatusClass((string) ($walk['status'] ?? 'pending'))); ?>">
-                      <?php echo e((string) ($walk['status'] ?? 'pending')); ?>
+                      <?php echo e(dd_walks_human_status((string) ($walk['status'] ?? 'pending'))); ?>
                     </span>
                   </td>
 
@@ -774,7 +1211,7 @@ if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
                   </td>
 
                   <td>
-                    <div class="primary-text">$<?php echo number_format((float) ($walk['price'] ?? 0), 2); ?></div>
+                    <div class="primary-text"><?php echo e(dd_walks_format_money($walk['price'] ?? null)); ?></div>
                   </td>
 
                   <td>
@@ -793,23 +1230,32 @@ if ($summaryRow = $summaryStmt->fetch(PDO::FETCH_ASSOC)) {
                       <a href="admin-assign-walker.php?id=<?php echo (int) ($walk['id'] ?? 0); ?>">Assign Walker</a>
                       <a href="admin-edit-booking.php?id=<?php echo (int) ($walk['id'] ?? 0); ?>">Edit Walk</a>
 
-                      <form method="post">
-                        <input type="hidden" name="booking_id" value="<?php echo (int) ($walk['id'] ?? 0); ?>">
-                        <input type="hidden" name="new_status" value="confirmed">
-                        <button type="submit">Confirm</button>
-                      </form>
+                      <?php if (($walk['status'] ?? '') !== 'confirmed'): ?>
+                        <form method="post">
+                          <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
+                          <input type="hidden" name="booking_id" value="<?php echo (int) ($walk['id'] ?? 0); ?>">
+                          <input type="hidden" name="new_status" value="confirmed">
+                          <button type="submit">Confirm</button>
+                        </form>
+                      <?php endif; ?>
 
-                      <form method="post">
-                        <input type="hidden" name="booking_id" value="<?php echo (int) ($walk['id'] ?? 0); ?>">
-                        <input type="hidden" name="new_status" value="in_progress">
-                        <button type="submit">Start Walk</button>
-                      </form>
+                      <?php if (($walk['status'] ?? '') !== 'in_progress'): ?>
+                        <form method="post">
+                          <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
+                          <input type="hidden" name="booking_id" value="<?php echo (int) ($walk['id'] ?? 0); ?>">
+                          <input type="hidden" name="new_status" value="in_progress">
+                          <button type="submit">Start Walk</button>
+                        </form>
+                      <?php endif; ?>
 
-                      <form method="post">
-                        <input type="hidden" name="booking_id" value="<?php echo (int) ($walk['id'] ?? 0); ?>">
-                        <input type="hidden" name="new_status" value="completed">
-                        <button type="submit">Complete Walk</button>
-                      </form>
+                      <?php if (($walk['status'] ?? '') !== 'completed'): ?>
+                        <form method="post">
+                          <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
+                          <input type="hidden" name="booking_id" value="<?php echo (int) ($walk['id'] ?? 0); ?>">
+                          <input type="hidden" name="new_status" value="completed">
+                          <button type="submit">Complete Walk</button>
+                        </form>
+                      <?php endif; ?>
                     </div>
                   </td>
                 </tr>

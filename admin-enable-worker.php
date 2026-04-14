@@ -3,93 +3,70 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
-
-/**
- * Doggie Dorian's
- * admin-enable-worker.php
- *
- * Stable admin-only worker enable page.
- */
+require_once __DIR__ . '/admin-auth.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     exit('Database connection not available.');
 }
 
-function h(mixed $value): string
+function ddAdminEnableWorkerH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function redirect_to(string $url): never
+function ddAdminEnableWorkerRedirect(string $url): void
 {
     header('Location: ' . $url);
     exit;
 }
 
-function is_admin_session(): bool
+function ddAdminEnableWorkerQuoteIdentifier(string $identifier): string
 {
-    $roleCandidates = [
-        $_SESSION['role'] ?? null,
-        $_SESSION['user_role'] ?? null,
-        $_SESSION['account_role'] ?? null,
-        $_SESSION['account_type'] ?? null,
-    ];
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
 
-    foreach ($roleCandidates as $role) {
-        if (is_string($role) && strtolower(trim($role)) === 'admin') {
-            return true;
+function ddAdminEnableWorkerTableExists(PDO $pdo, string $table): bool
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = false;
+        return false;
+    }
+}
+
+function ddAdminEnableWorkerGetColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminEnableWorkerTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminEnableWorkerQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
         }
-    }
 
-    if (!empty($_SESSION['is_admin']) || !empty($_SESSION['admin_logged_in'])) {
-        return true;
-    }
-
-    return false;
-}
-
-if (!isset($_SESSION['user_id']) && empty($_SESSION['admin_logged_in'])) {
-    redirect_to('admin-login.php');
-}
-
-if (!is_admin_session()) {
-    redirect_to('login.php');
-}
-
-function table_exists(PDO $pdo, string $table): bool
-{
-    static $cache = [];
-
-    if (array_key_exists($table, $cache)) {
-        return $cache[$table];
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-        $stmt->execute([':table' => $table]);
-        return $cache[$table] = (bool) $stmt->fetchColumn();
-    } catch (Throwable) {
-        return $cache[$table] = false;
-    }
-}
-
-function get_columns(PDO $pdo, string $table): array
-{
-    static $cache = [];
-
-    if (array_key_exists($table, $cache)) {
-        return $cache[$table];
-    }
-
-    if (!table_exists($pdo, $table)) {
-        return $cache[$table] = [];
-    }
-
-    try {
-        $stmt = $pdo->query("PRAGMA table_info($table)");
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        $columns = [];
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $columns = array();
 
         foreach ($rows as $row) {
             if (!empty($row['name'])) {
@@ -97,13 +74,15 @@ function get_columns(PDO $pdo, string $table): array
             }
         }
 
-        return $cache[$table] = $columns;
-    } catch (Throwable) {
-        return $cache[$table] = [];
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
     }
 }
 
-function first_existing_column(array $columns, array $candidates): ?string
+function ddAdminEnableWorkerFirstExistingColumn(array $columns, array $candidates): ?string
 {
     foreach ($candidates as $candidate) {
         if (in_array($candidate, $columns, true)) {
@@ -114,7 +93,7 @@ function first_existing_column(array $columns, array $candidates): ?string
     return null;
 }
 
-function value_from_row(array $row, array $candidates, mixed $default = null): mixed
+function ddAdminEnableWorkerValueFromRow(array $row, array $candidates, $default = null)
 {
     foreach ($candidates as $candidate) {
         if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
@@ -125,31 +104,33 @@ function value_from_row(array $row, array $candidates, mixed $default = null): m
     return $default;
 }
 
-function build_name(array $row): string
+function ddAdminEnableWorkerBuildName(array $row): string
 {
-    $full = trim((string) value_from_row($row, [
+    $full = trim((string) ddAdminEnableWorkerValueFromRow($row, array(
         'full_name',
         'name',
         'display_name',
         'username',
-    ], ''));
+        'walker_name',
+        'worker_name',
+    ), ''));
 
     if ($full !== '') {
         return $full;
     }
 
     $first = trim((string) ($row['first_name'] ?? ''));
-    $last  = trim((string) ($row['last_name'] ?? ''));
-
+    $last = trim((string) ($row['last_name'] ?? ''));
     $combined = trim($first . ' ' . $last);
+
     return $combined !== '' ? $combined : 'Unknown';
 }
 
-function worker_is_active(array $row): bool
+function ddAdminEnableWorkerIsActive(array $row): bool
 {
-    foreach (['is_active', 'active', 'enabled'] as $col) {
-        if (array_key_exists($col, $row)) {
-            return (int) $row[$col] === 1;
+    foreach (array('is_active', 'active', 'enabled') as $column) {
+        if (array_key_exists($column, $row)) {
+            return (int) $row[$column] === 1;
         }
     }
 
@@ -157,21 +138,21 @@ function worker_is_active(array $row): bool
         return (int) $row['disabled'] !== 1;
     }
 
-    foreach (['status', 'account_status', 'worker_status'] as $col) {
-        if (!isset($row[$col])) {
+    foreach (array('status', 'account_status', 'worker_status') as $column) {
+        if (!isset($row[$column])) {
             continue;
         }
 
-        $value = strtolower(trim((string) $row[$col]));
+        $value = strtolower(trim((string) $row[$column]));
         if ($value === '') {
             continue;
         }
 
-        if (in_array($value, ['disabled', 'inactive', 'blocked', 'suspended'], true)) {
+        if (in_array($value, array('disabled', 'inactive', 'blocked', 'suspended'), true)) {
             return false;
         }
 
-        if (in_array($value, ['active', 'enabled', 'approved'], true)) {
+        if (in_array($value, array('active', 'enabled', 'approved'), true)) {
             return true;
         }
     }
@@ -179,88 +160,188 @@ function worker_is_active(array $row): bool
     return true;
 }
 
-if (!table_exists($pdo, 'users')) {
-    exit('Users table not found.');
+function ddAdminEnableWorkerSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
 }
 
-$userColumns = get_columns($pdo, 'users');
-$userIdCol = first_existing_column($userColumns, ['id', 'user_id']);
+function ddAdminEnableWorkerCsrfToken(): string
+{
+    if (empty($_SESSION['admin_enable_worker_csrf']) || !is_string($_SESSION['admin_enable_worker_csrf'])) {
+        $_SESSION['admin_enable_worker_csrf'] = bin2hex(random_bytes(32));
+    }
 
-if ($userIdCol === null) {
-    exit('Users table is missing a usable ID column.');
+    return $_SESSION['admin_enable_worker_csrf'];
+}
+
+function ddAdminEnableWorkerValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_enable_worker_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
+function ddAdminEnableWorkerDetectSources(PDO $pdo): array
+{
+    $sources = array();
+
+    foreach (array('users', 'walkers', 'workers') as $table) {
+        if (!ddAdminEnableWorkerTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminEnableWorkerGetColumns($pdo, $table);
+        $idColumn = ddAdminEnableWorkerFirstExistingColumn($columns, array('id', 'user_id', 'walker_id', 'worker_id'));
+
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $sources[] = array(
+            'table' => $table,
+            'columns' => $columns,
+            'id_column' => $idColumn,
+            'role_column' => ddAdminEnableWorkerFirstExistingColumn($columns, array('role', 'user_role', 'account_role', 'account_type')),
+            'email_column' => ddAdminEnableWorkerFirstExistingColumn($columns, array('email')),
+        );
+    }
+
+    return $sources;
+}
+
+function ddAdminEnableWorkerLoadRecord(PDO $pdo, int $workerId, array $sources): ?array
+{
+    foreach ($sources as $source) {
+        $row = ddAdminEnableWorkerSafeFetchOne(
+            $pdo,
+            'SELECT * FROM ' . ddAdminEnableWorkerQuoteIdentifier((string) $source['table']) .
+            ' WHERE ' . ddAdminEnableWorkerQuoteIdentifier((string) $source['id_column']) . ' = :id LIMIT 1',
+            array(':id' => $workerId)
+        );
+
+        if (is_array($row) && !empty($row)) {
+            $source['row'] = $row;
+            return $source;
+        }
+    }
+
+    return null;
+}
+
+$sources = ddAdminEnableWorkerDetectSources($pdo);
+if (empty($sources)) {
+    exit('No supported worker tables were found.');
 }
 
 $workerId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 if ($workerId <= 0) {
     $workerId = isset($_GET['worker_id']) ? (int) $_GET['worker_id'] : 0;
 }
+if ($workerId <= 0) {
+    $workerId = isset($_POST['worker_id']) ? (int) $_POST['worker_id'] : 0;
+}
 
 if ($workerId <= 0) {
-    redirect_to('admin-walker-management.php');
+    ddAdminEnableWorkerRedirect('admin-walker-management.php');
 }
 
-try {
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE {$userIdCol} = :id LIMIT 1");
-    $stmt->execute([':id' => $workerId]);
-    $worker = $stmt->fetch(PDO::FETCH_ASSOC);
-} catch (Throwable $e) {
-    exit('Could not load worker: ' . h($e->getMessage()));
-}
-
-if (!$worker) {
+$loaded = ddAdminEnableWorkerLoadRecord($pdo, $workerId, $sources);
+if ($loaded === null) {
     exit('Worker not found.');
 }
 
-$workerName = build_name($worker);
-$workerRole = (string) value_from_row($worker, ['role', 'user_role', 'account_role', 'account_type'], 'Worker');
-$workerEmail = (string) value_from_row($worker, ['email'], '—');
-$alreadyActive = worker_is_active($worker);
+$workerTable = (string) $loaded['table'];
+$userColumns = (array) $loaded['columns'];
+$userIdCol = (string) $loaded['id_column'];
+$worker = (array) $loaded['row'];
+
+$workerName = ddAdminEnableWorkerBuildName($worker);
+$workerRole = (string) ddAdminEnableWorkerValueFromRow($worker, array('role', 'user_role', 'account_role', 'account_type'), 'Worker');
+$workerEmail = (string) ddAdminEnableWorkerValueFromRow($worker, array('email'), '—');
+$alreadyActive = ddAdminEnableWorkerIsActive($worker);
 
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    try {
-        $updates = [];
-        $params = [':id' => $workerId];
+    if (!ddAdminEnableWorkerValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+        $error = 'Security check failed. Please refresh the page and try again.';
+    } else {
+        try {
+            $updates = array();
+            $params = array(':id' => $workerId);
 
-        if (in_array('status', $userColumns, true)) {
-            $updates[] = 'status = :status';
-            $params[':status'] = 'active';
-        } elseif (in_array('account_status', $userColumns, true)) {
-            $updates[] = 'account_status = :account_status';
-            $params[':account_status'] = 'active';
-        } elseif (in_array('worker_status', $userColumns, true)) {
-            $updates[] = 'worker_status = :worker_status';
-            $params[':worker_status'] = 'active';
+            $statusColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('status', 'account_status', 'worker_status'));
+            $isActiveColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('is_active', 'active', 'enabled'));
+            $disabledColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('disabled'));
+            $updatedAtColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('updated_at', 'status_updated_at'));
+            $updatedByColumn = ddAdminEnableWorkerFirstExistingColumn($userColumns, array('updated_by', 'status_updated_by'));
+
+            if ($statusColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($statusColumn) . ' = :status';
+                $params[':status'] = 'active';
+            }
+
+            if ($isActiveColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($isActiveColumn) . ' = :is_active';
+                $params[':is_active'] = 1;
+            } elseif ($disabledColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($disabledColumn) . ' = :disabled';
+                $params[':disabled'] = 0;
+            }
+
+            if ($updatedByColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($updatedByColumn) . ' = :updated_by';
+                $params[':updated_by'] = 'admin';
+            }
+
+            if ($updatedAtColumn !== null) {
+                $updates[] = ddAdminEnableWorkerQuoteIdentifier($updatedAtColumn) . ' = CURRENT_TIMESTAMP';
+            }
+
+            if ($updates === array()) {
+                $error = 'No enable-related status columns were found in the worker table.';
+            } else {
+                $sql = 'UPDATE ' . ddAdminEnableWorkerQuoteIdentifier($workerTable)
+                    . ' SET ' . implode(', ', $updates)
+                    . ' WHERE ' . ddAdminEnableWorkerQuoteIdentifier($userIdCol) . ' = :id';
+
+                $stmt = $pdo->prepare($sql);
+
+                foreach ($params as $placeholder => $value) {
+                    if (is_int($value)) {
+                        $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
+                    } elseif ($value === null) {
+                        $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
+                    } else {
+                        $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+                    }
+                }
+
+                $stmt->execute();
+
+                ddAdminEnableWorkerRedirect('admin-worker-view.php?id=' . $workerId);
+            }
+        } catch (Throwable $e) {
+            $error = 'Could not enable worker.';
         }
-
-        if (in_array('is_active', $userColumns, true)) {
-            $updates[] = 'is_active = :is_active';
-            $params[':is_active'] = 1;
-        } elseif (in_array('active', $userColumns, true)) {
-            $updates[] = 'active = :active';
-            $params[':active'] = 1;
-        } elseif (in_array('enabled', $userColumns, true)) {
-            $updates[] = 'enabled = :enabled';
-            $params[':enabled'] = 1;
-        } elseif (in_array('disabled', $userColumns, true)) {
-            $updates[] = 'disabled = :disabled';
-            $params[':disabled'] = 0;
-        }
-
-        if ($updates === []) {
-            $error = 'No enable-related status columns were found in the users table.';
-        } else {
-            $sql = "UPDATE users SET " . implode(', ', $updates) . " WHERE {$userIdCol} = :id";
-            $updateStmt = $pdo->prepare($sql);
-            $updateStmt->execute($params);
-
-            redirect_to('admin-worker-view.php?id=' . $workerId);
-        }
-    } catch (Throwable $e) {
-        $error = 'Could not enable worker: ' . $e->getMessage();
     }
 }
+
+$csrfToken = ddAdminEnableWorkerCsrfToken();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -475,8 +556,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="brand">Doggie Dorian’s</div>
             <div class="top-links">
                 <a class="top-link" href="admin-dashboard.php">Dashboard</a>
+                <a class="top-link" href="admin-nav.php">Admin Nav</a>
                 <a class="top-link" href="admin-walker-management.php">Workers</a>
-                <a class="top-link" href="admin-worker-view.php?id=<?= $workerId ?>">Worker View</a>
+                <a class="top-link" href="admin-worker-view.php?id=<?php echo (int) $workerId; ?>">Worker View</a>
+                <a class="top-link" href="logout.php">Logout</a>
             </div>
         </div>
 
@@ -488,7 +571,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
 
             <?php if ($error !== ''): ?>
-                <div class="warn"><?= h($error) ?></div>
+                <div class="warn"><?php echo ddAdminEnableWorkerH($error); ?></div>
             <?php endif; ?>
 
             <?php if ($alreadyActive): ?>
@@ -500,26 +583,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="summary">
                 <div class="box">
                     <div class="label">Worker</div>
-                    <div class="value"><?= h($workerName) ?></div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerName); ?></div>
                 </div>
                 <div class="box">
                     <div class="label">Role</div>
-                    <div class="value"><?= h($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—') ?></div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—'); ?></div>
                 </div>
                 <div class="box">
                     <div class="label">Email</div>
-                    <div class="value"><?= h($workerEmail) ?></div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerEmail); ?></div>
                 </div>
                 <div class="box">
                     <div class="label">Status</div>
-                    <div class="value"><?= $alreadyActive ? 'Active' : 'Disabled' ?></div>
+                    <div class="value"><?php echo $alreadyActive ? 'Active' : 'Disabled'; ?></div>
+                </div>
+                <div class="box">
+                    <div class="label">Source Table</div>
+                    <div class="value"><?php echo ddAdminEnableWorkerH($workerTable); ?></div>
                 </div>
             </div>
 
             <form method="post" action="">
+                <input type="hidden" name="csrf_token" value="<?php echo ddAdminEnableWorkerH($csrfToken); ?>">
+                <input type="hidden" name="worker_id" value="<?php echo (int) $workerId; ?>">
+
                 <div class="actions">
                     <button class="btn btn-success" type="submit">Confirm Enable</button>
-                    <a class="btn btn-secondary" href="admin-worker-view.php?id=<?= $workerId ?>">Cancel</a>
+                    <a class="btn btn-secondary" href="admin-worker-view.php?id=<?php echo (int) $workerId; ?>">Cancel</a>
                 </div>
             </form>
         </section>

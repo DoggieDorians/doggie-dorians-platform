@@ -2,49 +2,293 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/admin-auth.php';
-require_once __DIR__ . '/data/config/db.php';
 
-function h(?string $value): string
-{
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    echo 'Database connection is not available.';
+    exit;
 }
 
-function tableExists(PDO $pdo, string $table): bool
+function ddAdminAddDogH($value): string
 {
-    $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :table LIMIT 1");
-    $stmt->execute(['table' => $table]);
-    return (bool)$stmt->fetchColumn();
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
-function getColumns(PDO $pdo, string $table): array
+function ddAdminAddDogQuoteIdentifier(string $identifier): string
 {
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
+function ddAdminAddDogTableExists(PDO $pdo, string $table): bool
+{
+    static $cache = array();
+
+    if (array_key_exists($table, $cache)) {
+        return $cache[$table];
+    }
+
     try {
-        $stmt = $pdo->query("PRAGMA table_info(" . $table . ")");
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        $columns = [];
-
-        foreach ($rows as $row) {
-            if (!empty($row['name'])) {
-                $columns[] = (string)$row['name'];
-            }
-        }
-
-        return $columns;
+        $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = :table LIMIT 1");
+        $stmt->execute(array(':table' => $table));
+        $cache[$table] = (bool) $stmt->fetchColumn();
+        return $cache[$table];
     } catch (Throwable $e) {
-        return [];
+        $cache[$table] = false;
+        return false;
     }
 }
 
-function hasColumn(array $columns, string $column): bool
+function ddAdminAddDogGetColumns(PDO $pdo, string $table): array
+{
+    static $cache = array();
+
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+
+    if (!ddAdminAddDogTableExists($pdo, $table)) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(' . ddAdminAddDogQuoteIdentifier($table) . ')');
+        if (!($stmt instanceof PDOStatement)) {
+            $cache[$table] = array();
+            return $cache[$table];
+        }
+
+        $columns = array();
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            if (!empty($row['name'])) {
+                $columns[] = (string) $row['name'];
+            }
+        }
+
+        $cache[$table] = $columns;
+        return $cache[$table];
+    } catch (Throwable $e) {
+        $cache[$table] = array();
+        return $cache[$table];
+    }
+}
+
+function ddAdminAddDogHasColumn(array $columns, string $column): bool
 {
     return in_array($column, $columns, true);
 }
 
-function createDogsTableIfMissing(PDO $pdo): void
+function ddAdminAddDogFirstExistingColumn(array $columns, array $candidates): ?string
 {
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS dogs (
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function ddAdminAddDogSafeFetchAll(PDO $pdo, string $sql, array $params = array()): array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return array();
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : array();
+    } catch (Throwable $e) {
+        return array();
+    }
+}
+
+function ddAdminAddDogSafeFetchOne(PDO $pdo, string $sql, array $params = array()): ?array
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function ddAdminAddDogCsrfToken(): string
+{
+    if (empty($_SESSION['admin_add_dog_csrf']) || !is_string($_SESSION['admin_add_dog_csrf'])) {
+        $_SESSION['admin_add_dog_csrf'] = bin2hex(random_bytes(32));
+    }
+
+    return $_SESSION['admin_add_dog_csrf'];
+}
+
+function ddAdminAddDogValidateCsrf(?string $submittedToken): bool
+{
+    $sessionToken = $_SESSION['admin_add_dog_csrf'] ?? '';
+
+    if (!is_string($sessionToken) || $sessionToken === '' || $submittedToken === null || $submittedToken === '') {
+        return false;
+    }
+
+    return hash_equals($sessionToken, $submittedToken);
+}
+
+function ddAdminAddDogResolveDisplayName(array $row, ?string $nameColumn, ?string $firstNameColumn, ?string $lastNameColumn, string $fallbackPrefix = 'Member'): string
+{
+    if ($nameColumn !== null && !empty($row[$nameColumn])) {
+        return trim((string) $row[$nameColumn]);
+    }
+
+    $first = $firstNameColumn !== null ? trim((string) ($row[$firstNameColumn] ?? '')) : '';
+    $last = $lastNameColumn !== null ? trim((string) ($row[$lastNameColumn] ?? '')) : '';
+    $full = trim($first . ' ' . $last);
+
+    if ($full !== '') {
+        return $full;
+    }
+
+    return $fallbackPrefix . ' #' . (int) ($row['__resolved_id'] ?? 0);
+}
+
+function ddAdminAddDogDetectMemberSource(PDO $pdo): ?array
+{
+    $candidates = array(
+        array('table' => 'users'),
+        array('table' => 'members'),
+        array('table' => 'client_profiles'),
+    );
+
+    foreach ($candidates as $candidate) {
+        $table = $candidate['table'];
+        if (!ddAdminAddDogTableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = ddAdminAddDogGetColumns($pdo, $table);
+        if (empty($columns)) {
+            continue;
+        }
+
+        $idColumn = ddAdminAddDogFirstExistingColumn($columns, array('id', 'user_id', 'member_id', 'client_id'));
+        if ($idColumn === null) {
+            continue;
+        }
+
+        $nameColumn = ddAdminAddDogFirstExistingColumn($columns, array('full_name', 'name', 'client_name'));
+        $firstNameColumn = ddAdminAddDogFirstExistingColumn($columns, array('first_name'));
+        $lastNameColumn = ddAdminAddDogFirstExistingColumn($columns, array('last_name'));
+        $emailColumn = ddAdminAddDogFirstExistingColumn($columns, array('email'));
+        $roleColumn = ddAdminAddDogFirstExistingColumn($columns, array('role', 'user_role', 'account_type'));
+
+        return array(
+            'table' => $table,
+            'columns' => $columns,
+            'id_column' => $idColumn,
+            'name_column' => $nameColumn,
+            'first_name_column' => $firstNameColumn,
+            'last_name_column' => $lastNameColumn,
+            'email_column' => $emailColumn,
+            'role_column' => $roleColumn,
+        );
+    }
+
+    return null;
+}
+
+function ddAdminAddDogFetchMembers(PDO $pdo, array $source): array
+{
+    $table = $source['table'];
+    $idColumn = $source['id_column'];
+    $nameColumn = $source['name_column'];
+    $firstNameColumn = $source['first_name_column'];
+    $emailColumn = $source['email_column'];
+    $roleColumn = $source['role_column'];
+
+    $sql = 'SELECT * FROM ' . ddAdminAddDogQuoteIdentifier($table);
+    $params = array();
+
+    if ($roleColumn !== null) {
+        $sql .= ' WHERE LOWER(COALESCE(' . ddAdminAddDogQuoteIdentifier($roleColumn) . ", 'member')) != :admin_role";
+        $params[':admin_role'] = 'admin';
+    }
+
+    if ($nameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminAddDogQuoteIdentifier($nameColumn) . ' ASC';
+    } elseif ($firstNameColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminAddDogQuoteIdentifier($firstNameColumn) . ' ASC';
+    } elseif ($emailColumn !== null) {
+        $sql .= ' ORDER BY ' . ddAdminAddDogQuoteIdentifier($emailColumn) . ' ASC';
+    } else {
+        $sql .= ' ORDER BY ' . ddAdminAddDogQuoteIdentifier($idColumn) . ' ASC';
+    }
+
+    $rows = ddAdminAddDogSafeFetchAll($pdo, $sql, $params);
+    $members = array();
+
+    foreach ($rows as $row) {
+        $row['__resolved_id'] = (int) ($row[$idColumn] ?? 0);
+
+        $members[] = array(
+            'id' => (int) ($row[$idColumn] ?? 0),
+            'full_name' => ddAdminAddDogResolveDisplayName(
+                $row,
+                $source['name_column'],
+                $source['first_name_column'],
+                $source['last_name_column']
+            ),
+            'email' => $source['email_column'] !== null ? trim((string) ($row[$source['email_column']] ?? '')) : '',
+        );
+    }
+
+    return $members;
+}
+
+function ddAdminAddDogFetchSelectedMember(PDO $pdo, array $source, int $selectedUserId): ?array
+{
+    $table = $source['table'];
+    $idColumn = $source['id_column'];
+
+    $row = ddAdminAddDogSafeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . ddAdminAddDogQuoteIdentifier($table)
+        . ' WHERE ' . ddAdminAddDogQuoteIdentifier($idColumn) . ' = :id LIMIT 1',
+        array(':id' => $selectedUserId)
+    );
+
+    if ($row === null) {
+        return null;
+    }
+
+    $row['__resolved_id'] = (int) ($row[$idColumn] ?? 0);
+
+    return array(
+        'id' => (int) ($row[$idColumn] ?? 0),
+        'full_name' => ddAdminAddDogResolveDisplayName(
+            $row,
+            $source['name_column'],
+            $source['first_name_column'],
+            $source['last_name_column']
+        ),
+        'email' => $source['email_column'] !== null ? trim((string) ($row[$source['email_column']] ?? '')) : '',
+    );
+}
+
+function ddAdminAddDogCreateDogsTableIfMissing(PDO $pdo): void
+{
+    if (ddAdminAddDogTableExists($pdo, 'dogs') || ddAdminAddDogTableExists($pdo, 'pets')) {
+        return;
+    }
+
+    $pdo->exec(
+        'CREATE TABLE IF NOT EXISTS dogs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             name TEXT NOT NULL,
@@ -52,149 +296,176 @@ function createDogsTableIfMissing(PDO $pdo): void
             age TEXT,
             notes TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    ");
+        )'
+    );
+}
+
+function ddAdminAddDogDetectDogTarget(PDO $pdo): ?array
+{
+    ddAdminAddDogCreateDogsTableIfMissing($pdo);
+
+    $table = null;
+    if (ddAdminAddDogTableExists($pdo, 'dogs')) {
+        $table = 'dogs';
+    } elseif (ddAdminAddDogTableExists($pdo, 'pets')) {
+        $table = 'pets';
+    }
+
+    if ($table === null) {
+        return null;
+    }
+
+    $columns = ddAdminAddDogGetColumns($pdo, $table);
+    if (empty($columns)) {
+        return null;
+    }
+
+    return array(
+        'table' => $table,
+        'columns' => $columns,
+        'owner_column' => ddAdminAddDogFirstExistingColumn($columns, array('user_id', 'member_id', 'owner_id', 'client_id')),
+        'name_column' => ddAdminAddDogFirstExistingColumn($columns, array('name', 'pet_name', 'dog_name')),
+        'breed_column' => ddAdminAddDogFirstExistingColumn($columns, array('breed', 'dog_breed')),
+        'age_column' => ddAdminAddDogFirstExistingColumn($columns, array('age', 'dog_age')),
+        'notes_column' => ddAdminAddDogFirstExistingColumn($columns, array('notes', 'dog_notes', 'care_notes')),
+        'created_at_column' => ddAdminAddDogFirstExistingColumn($columns, array('created_at')),
+    );
 }
 
 $successMessage = '';
 $errorMessage = '';
 $fatalError = '';
 
-$selectedUserId = (int)($_GET['user_id'] ?? $_POST['user_id'] ?? 0);
+$selectedUserId = (int) ($_GET['user_id'] ?? $_POST['user_id'] ?? 0);
 $fullName = '';
 $email = '';
 
-$dogName = trim((string)($_POST['dog_name'] ?? ''));
-$breed = trim((string)($_POST['breed'] ?? ''));
-$age = trim((string)($_POST['age'] ?? ''));
-$notes = trim((string)($_POST['notes'] ?? ''));
+$dogName = trim((string) ($_POST['dog_name'] ?? ''));
+$breed = trim((string) ($_POST['breed'] ?? ''));
+$age = trim((string) ($_POST['age'] ?? ''));
+$notes = trim((string) ($_POST['notes'] ?? ''));
 
-$users = [];
+$users = array();
 
 try {
-    if (!isset($pdo) || !($pdo instanceof PDO)) {
-        throw new RuntimeException('Database connection is not available from data/config/db.php.');
+    $memberSource = ddAdminAddDogDetectMemberSource($pdo);
+    if ($memberSource === null) {
+        throw new RuntimeException('No supported member source table was found.');
     }
 
-    if (!tableExists($pdo, 'users')) {
-        throw new RuntimeException('The users table was not found.');
-    }
-
-    createDogsTableIfMissing($pdo);
-
-    $userColumns = getColumns($pdo, 'users');
-    $roleCol = hasColumn($userColumns, 'role') ? 'role' : null;
-
-    $userSql = "
-        SELECT id, full_name, email
-        FROM users
-    ";
-
-    if ($roleCol !== null) {
-        $userSql .= " WHERE LOWER(COALESCE(role, 'member')) != 'admin' ";
-    }
-
-    $userSql .= " ORDER BY full_name ASC, email ASC";
-
-    $users = $pdo->query($userSql)->fetchAll(PDO::FETCH_ASSOC);
+    $users = ddAdminAddDogFetchMembers($pdo, $memberSource);
 
     if ($selectedUserId > 0) {
-        $userStmt = $pdo->prepare("
-            SELECT id, full_name, email
-            FROM users
-            WHERE id = ?
-            LIMIT 1
-        ");
-        $userStmt->execute([$selectedUserId]);
-        $selectedUser = $userStmt->fetch(PDO::FETCH_ASSOC);
+        $selectedUser = ddAdminAddDogFetchSelectedMember($pdo, $memberSource, $selectedUserId);
 
-        if ($selectedUser) {
-            $fullName = (string)($selectedUser['full_name'] ?? '');
-            $email = (string)($selectedUser['email'] ?? '');
+        if ($selectedUser !== null) {
+            $fullName = (string) $selectedUser['full_name'];
+            $email = (string) $selectedUser['email'];
         }
     }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        if ($selectedUserId <= 0) {
+        if (!ddAdminAddDogValidateCsrf(isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : null)) {
+            $errorMessage = 'Security check failed. Please refresh the page and try again.';
+        } elseif ($selectedUserId <= 0) {
             $errorMessage = 'Please select a member first.';
         } elseif ($dogName === '') {
             $errorMessage = 'Please enter the dog’s name.';
         } else {
-            $dogColumns = getColumns($pdo, 'dogs');
+            $selectedUser = ddAdminAddDogFetchSelectedMember($pdo, $memberSource, $selectedUserId);
+            if ($selectedUser === null) {
+                $errorMessage = 'The selected member was not found.';
+            } else {
+                $dogTarget = ddAdminAddDogDetectDogTarget($pdo);
+                if ($dogTarget === null) {
+                    throw new RuntimeException('No supported dogs table could be prepared.');
+                }
 
-            $ownerCol = hasColumn($dogColumns, 'user_id')
-                ? 'user_id'
-                : (hasColumn($dogColumns, 'member_id')
-                    ? 'member_id'
-                    : (hasColumn($dogColumns, 'owner_id')
-                        ? 'owner_id'
-                        : (hasColumn($dogColumns, 'client_id') ? 'client_id' : null)));
+                if ($dogTarget['owner_column'] === null) {
+                    throw new RuntimeException('The dogs table does not have a supported owner column.');
+                }
 
-            if ($ownerCol === null) {
-                throw new RuntimeException('The dogs table does not have a supported owner column.');
+                if ($dogTarget['name_column'] === null) {
+                    throw new RuntimeException('The dogs table does not have a supported dog name column.');
+                }
+
+                $insertColumns = array($dogTarget['owner_column'], $dogTarget['name_column']);
+                $placeholders = array(':owner_id', ':dog_name');
+                $params = array(
+                    ':owner_id' => $selectedUserId,
+                    ':dog_name' => $dogName,
+                );
+
+                if ($dogTarget['breed_column'] !== null) {
+                    $insertColumns[] = $dogTarget['breed_column'];
+                    $placeholders[] = ':breed';
+                    $params[':breed'] = $breed !== '' ? $breed : null;
+                }
+
+                if ($dogTarget['age_column'] !== null) {
+                    $insertColumns[] = $dogTarget['age_column'];
+                    $placeholders[] = ':age';
+                    $params[':age'] = $age !== '' ? $age : null;
+                }
+
+                if ($dogTarget['notes_column'] !== null) {
+                    $insertColumns[] = $dogTarget['notes_column'];
+                    $placeholders[] = ':notes';
+                    $params[':notes'] = $notes !== '' ? $notes : null;
+                }
+
+                if ($dogTarget['created_at_column'] !== null) {
+                    $insertColumns[] = $dogTarget['created_at_column'];
+                    $placeholders[] = 'CURRENT_TIMESTAMP';
+                }
+
+                $quotedColumns = array();
+                foreach ($insertColumns as $column) {
+                    $quotedColumns[] = ddAdminAddDogQuoteIdentifier($column);
+                }
+
+                $sql = 'INSERT INTO ' . ddAdminAddDogQuoteIdentifier($dogTarget['table'])
+                    . ' (' . implode(', ', $quotedColumns) . ')'
+                    . ' VALUES (' . implode(', ', $placeholders) . ')';
+
+                $stmt = $pdo->prepare($sql);
+
+                foreach ($params as $placeholder => $value) {
+                    if ($value === null) {
+                        $stmt->bindValue($placeholder, null, PDO::PARAM_NULL);
+                    } elseif (is_int($value)) {
+                        $stmt->bindValue($placeholder, $value, PDO::PARAM_INT);
+                    } else {
+                        $stmt->bindValue($placeholder, (string) $value, PDO::PARAM_STR);
+                    }
+                }
+
+                $stmt->execute();
+
+                $successMessage = 'Dog added successfully.';
+                $fullName = (string) $selectedUser['full_name'];
+                $email = (string) $selectedUser['email'];
+
+                $dogName = '';
+                $breed = '';
+                $age = '';
+                $notes = '';
             }
-
-            $nameCol = hasColumn($dogColumns, 'name')
-                ? 'name'
-                : (hasColumn($dogColumns, 'pet_name')
-                    ? 'pet_name'
-                    : (hasColumn($dogColumns, 'dog_name') ? 'dog_name' : null));
-
-            if ($nameCol === null) {
-                throw new RuntimeException('The dogs table does not have a supported dog name column.');
-            }
-
-            $insertColumns = [$ownerCol, $nameCol];
-            $insertValues = [$selectedUserId, $dogName];
-            $placeholders = ['?', '?'];
-
-            if (hasColumn($dogColumns, 'breed')) {
-                $insertColumns[] = 'breed';
-                $insertValues[] = $breed;
-                $placeholders[] = '?';
-            }
-
-            if (hasColumn($dogColumns, 'age')) {
-                $insertColumns[] = 'age';
-                $insertValues[] = $age;
-                $placeholders[] = '?';
-            } elseif (hasColumn($dogColumns, 'dog_age')) {
-                $insertColumns[] = 'dog_age';
-                $insertValues[] = $age;
-                $placeholders[] = '?';
-            }
-
-            if (hasColumn($dogColumns, 'notes')) {
-                $insertColumns[] = 'notes';
-                $insertValues[] = $notes;
-                $placeholders[] = '?';
-            }
-
-            $sql = "
-                INSERT INTO dogs (" . implode(', ', $insertColumns) . ")
-                VALUES (" . implode(', ', $placeholders) . ")
-            ";
-
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($insertValues);
-
-            $successMessage = 'Dog added successfully.';
-            $dogName = '';
-            $breed = '';
-            $age = '';
-            $notes = '';
         }
     }
 } catch (Throwable $e) {
     $fatalError = $e->getMessage();
 }
+
+$csrfToken = ddAdminAddDogCsrfToken();
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Add Dog | Doggie Dorian's Admin</title>
+    <title>Admin Add Dog | Doggie Dorian’s</title>
+    <meta name="description" content="Add a dog profile for a member in the Doggie Dorian’s admin area.">
     <style>
         :root{
             --bg:#0a0a0f;
@@ -220,6 +491,11 @@ try {
                 radial-gradient(circle at top left, rgba(212,175,55,0.14), transparent 28%),
                 radial-gradient(circle at top right, rgba(255,255,255,0.05), transparent 24%),
                 linear-gradient(180deg, #08080c 0%, #111119 100%);
+        }
+
+        a{
+            color:inherit;
+            text-decoration:none;
         }
 
         .shell{
@@ -430,11 +706,13 @@ try {
 
         <nav class="nav">
             <a href="admin-dashboard.php">Dashboard</a>
+            <a href="admin-nav.php">Admin Nav</a>
             <a href="admin-bookings.php">Booking Management</a>
             <a href="admin-revenue.php">Revenue Dashboard</a>
             <a href="admin-members.php" class="active">Members</a>
+            <a href="admin-dogs.php">Dogs</a>
             <a href="book-walk.php">Preview Public Booking Form</a>
-            <a href="admin-logout.php">Logout</a>
+            <a href="logout.php">Logout</a>
         </nav>
     </aside>
 
@@ -449,67 +727,69 @@ try {
         <?php if ($fatalError !== ''): ?>
             <div class="error-box">
                 <strong>Add dog error:</strong><br>
-                <?php echo h($fatalError); ?>
+                <?php echo ddAdminAddDogH($fatalError); ?>
             </div>
         <?php else: ?>
             <div class="card">
                 <?php if ($successMessage !== ''): ?>
-                    <div class="message success"><?php echo h($successMessage); ?></div>
+                    <div class="message success"><?php echo ddAdminAddDogH($successMessage); ?></div>
                 <?php endif; ?>
 
                 <?php if ($errorMessage !== ''): ?>
-                    <div class="message error"><?php echo h($errorMessage); ?></div>
+                    <div class="message error"><?php echo ddAdminAddDogH($errorMessage); ?></div>
                 <?php endif; ?>
 
                 <?php if ($selectedUserId > 0 && $fullName !== ''): ?>
                     <div class="user-box">
-                        <strong><?php echo h($fullName); ?></strong>
-                        <span><?php echo h($email); ?></span>
+                        <strong><?php echo ddAdminAddDogH($fullName); ?></strong>
+                        <span><?php echo ddAdminAddDogH($email); ?></span>
                     </div>
                 <?php endif; ?>
 
-                <form method="post" action="admin-add-dog.php<?php echo $selectedUserId > 0 ? '?user_id=' . (int)$selectedUserId : ''; ?>">
+                <form method="post" action="admin-add-dog.php<?php echo $selectedUserId > 0 ? '?user_id=' . (int) $selectedUserId : ''; ?>">
+                    <input type="hidden" name="csrf_token" value="<?php echo ddAdminAddDogH($csrfToken); ?>">
+
                     <?php if ($selectedUserId <= 0): ?>
                         <div class="field">
                             <label for="user_id">Select Member</label>
                             <select id="user_id" name="user_id" required>
                                 <option value="">Choose a member</option>
                                 <?php foreach ($users as $user): ?>
-                                    <option value="<?php echo (int)$user['id']; ?>" <?php echo $selectedUserId === (int)$user['id'] ? 'selected' : ''; ?>>
-                                        <?php echo h((string)$user['full_name']); ?> — <?php echo h((string)$user['email']); ?>
+                                    <option value="<?php echo (int) $user['id']; ?>" <?php echo $selectedUserId === (int) $user['id'] ? 'selected' : ''; ?>>
+                                        <?php echo ddAdminAddDogH((string) $user['full_name']); ?><?php echo $user['email'] !== '' ? ' — ' . ddAdminAddDogH((string) $user['email']) : ''; ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
                     <?php else: ?>
-                        <input type="hidden" name="user_id" value="<?php echo (int)$selectedUserId; ?>">
+                        <input type="hidden" name="user_id" value="<?php echo (int) $selectedUserId; ?>">
                     <?php endif; ?>
 
                     <div class="field">
                         <label for="dog_name">Dog Name</label>
-                        <input type="text" id="dog_name" name="dog_name" value="<?php echo h($dogName); ?>" required>
+                        <input type="text" id="dog_name" name="dog_name" value="<?php echo ddAdminAddDogH($dogName); ?>" required>
                     </div>
 
                     <div class="field">
                         <label for="breed">Breed</label>
-                        <input type="text" id="breed" name="breed" value="<?php echo h($breed); ?>">
+                        <input type="text" id="breed" name="breed" value="<?php echo ddAdminAddDogH($breed); ?>">
                     </div>
 
                     <div class="field">
                         <label for="age">Age</label>
-                        <input type="text" id="age" name="age" value="<?php echo h($age); ?>">
+                        <input type="text" id="age" name="age" value="<?php echo ddAdminAddDogH($age); ?>">
                     </div>
 
                     <div class="field">
                         <label for="notes">Notes</label>
-                        <textarea id="notes" name="notes"><?php echo h($notes); ?></textarea>
+                        <textarea id="notes" name="notes"><?php echo ddAdminAddDogH($notes); ?></textarea>
                     </div>
 
                     <div class="actions">
                         <button type="submit" class="btn btn-primary">Add Dog</button>
 
                         <?php if ($selectedUserId > 0): ?>
-                            <a class="btn btn-secondary" href="admin-member-view.php?id=<?php echo (int)$selectedUserId; ?>">Back to Member</a>
+                            <a class="btn btn-secondary" href="admin-member-view.php?id=<?php echo (int) $selectedUserId; ?>">Back to Member</a>
                         <?php else: ?>
                             <a class="btn btn-secondary" href="admin-members.php">Back to Members</a>
                         <?php endif; ?>
