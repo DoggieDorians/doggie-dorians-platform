@@ -89,3 +89,9 @@ bulk_add_bootstrap.py
 
 # Local-only Stripe secrets
 includes/stripe-env.php
+mailer-env.php
+stripe-env.php
+.vscode/sftp.json
+mailer-env.php
+stripe-env.php
+.vscode/sftp.json
