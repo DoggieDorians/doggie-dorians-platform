@@ -118,8 +118,10 @@ function ddAdminDogsSafeFetchOne(PDO $pdo, string $sql, array $params = array())
     }
 }
 
-function ddAdminDogsDetectDogSource(PDO $pdo): ?array
+function ddAdminDogsDetectDogSources(PDO $pdo): array
 {
+    $sources = array();
+
     foreach (array('dogs', 'pets') as $table) {
         if (!ddAdminDogsTableExists($pdo, $table)) {
             continue;
@@ -133,7 +135,7 @@ function ddAdminDogsDetectDogSource(PDO $pdo): ?array
             continue;
         }
 
-        return array(
+        $sources[] = array(
             'table' => $table,
             'columns' => $columns,
             'id_column' => $idColumn,
@@ -146,7 +148,7 @@ function ddAdminDogsDetectDogSource(PDO $pdo): ?array
         );
     }
 
-    return null;
+    return $sources;
 }
 
 function ddAdminDogsDetectOwnerSource(PDO $pdo): ?array
@@ -237,71 +239,91 @@ function ddAdminDogsFindOwner(PDO $pdo, ?array $ownerSource, int $ownerId): arra
     );
 }
 
+function ddAdminDogsNormalizeSortTimestamp(array $dogRecord): int
+{
+    $raw = trim((string) ($dogRecord['created_at_raw'] ?? ''));
+    if ($raw !== '') {
+        $ts = strtotime($raw);
+        if ($ts !== false) {
+            return $ts;
+        }
+    }
+
+    return (int) ($dogRecord['id'] ?? 0);
+}
+
 $search = strtolower(trim((string) ($_GET['search'] ?? '')));
 $dogs = array();
 $error = '';
 
 try {
-    $dogSource = ddAdminDogsDetectDogSource($pdo);
-    if ($dogSource === null) {
+    $dogSources = ddAdminDogsDetectDogSources($pdo);
+    if ($dogSources === array()) {
         throw new RuntimeException('Dogs table not found.');
     }
 
     $ownerSource = ddAdminDogsDetectOwnerSource($pdo);
 
-    $orderColumn = $dogSource['created_at_column'] ?? $dogSource['id_column'];
+    foreach ($dogSources as $dogSource) {
+        $orderColumn = $dogSource['created_at_column'] ?? $dogSource['id_column'];
 
-    $rows = ddAdminDogsSafeFetchAll(
-        $pdo,
-        'SELECT * FROM ' . ddAdminDogsQuoteIdentifier((string) $dogSource['table'])
-        . ' ORDER BY ' . ddAdminDogsQuoteIdentifier((string) $orderColumn) . ' DESC, '
-        . ddAdminDogsQuoteIdentifier((string) $dogSource['id_column']) . ' DESC'
-    );
-
-    foreach ($rows as $row) {
-        $dogId = (int) ($row[$dogSource['id_column']] ?? 0);
-        if ($dogId <= 0) {
-            continue;
-        }
-
-        $dogName = $dogSource['name_column'] !== null ? trim((string) ($row[$dogSource['name_column']] ?? '')) : 'Dog';
-        if ($dogName === '') {
-            $dogName = 'Dog';
-        }
-
-        $breed = $dogSource['breed_column'] !== null ? trim((string) ($row[$dogSource['breed_column']] ?? '')) : '';
-        $age = $dogSource['age_column'] !== null ? trim((string) ($row[$dogSource['age_column']] ?? '')) : '';
-        $notes = $dogSource['notes_column'] !== null ? trim((string) ($row[$dogSource['notes_column']] ?? '')) : '';
-        $ownerId = $dogSource['owner_column'] !== null ? (int) ($row[$dogSource['owner_column']] ?? 0) : 0;
-        $owner = ddAdminDogsFindOwner($pdo, $ownerSource, $ownerId);
-
-        $dogRecord = array(
-            'id' => $dogId,
-            'dog_name' => $dogName,
-            'breed' => $breed,
-            'age' => $age,
-            'notes' => $notes,
-            'user_id' => (int) $owner['owner_id'],
-            'owner_name' => (string) $owner['owner_name'],
-            'owner_email' => (string) $owner['owner_email'],
-            'source_table' => (string) $dogSource['table'],
+        $rows = ddAdminDogsSafeFetchAll(
+            $pdo,
+            'SELECT * FROM ' . ddAdminDogsQuoteIdentifier((string) $dogSource['table'])
+            . ' ORDER BY ' . ddAdminDogsQuoteIdentifier((string) $orderColumn) . ' DESC, '
+            . ddAdminDogsQuoteIdentifier((string) $dogSource['id_column']) . ' DESC'
         );
 
-        if ($search !== '') {
-            $haystack = strtolower(
-                $dogRecord['dog_name'] . ' ' .
-                $dogRecord['owner_name'] . ' ' .
-                $dogRecord['owner_email'] . ' ' .
-                $dogRecord['breed']
-            );
-
-            if (!str_contains($haystack, $search)) {
+        foreach ($rows as $row) {
+            $dogId = (int) ($row[$dogSource['id_column']] ?? 0);
+            if ($dogId <= 0) {
                 continue;
             }
-        }
 
-        $dogs[] = $dogRecord;
+            $dogName = $dogSource['name_column'] !== null ? trim((string) ($row[$dogSource['name_column']] ?? '')) : 'Dog';
+            if ($dogName === '') {
+                $dogName = 'Dog';
+            }
+
+            $breed = $dogSource['breed_column'] !== null ? trim((string) ($row[$dogSource['breed_column']] ?? '')) : '';
+            $age = $dogSource['age_column'] !== null ? trim((string) ($row[$dogSource['age_column']] ?? '')) : '';
+            $notes = $dogSource['notes_column'] !== null ? trim((string) ($row[$dogSource['notes_column']] ?? '')) : '';
+            $ownerId = $dogSource['owner_column'] !== null ? (int) ($row[$dogSource['owner_column']] ?? 0) : 0;
+            $owner = ddAdminDogsFindOwner($pdo, $ownerSource, $ownerId);
+
+            $dogRecord = array(
+                'id' => $dogId,
+                'dog_name' => $dogName,
+                'breed' => $breed,
+                'age' => $age,
+                'notes' => $notes,
+                'user_id' => (int) $owner['owner_id'],
+                'owner_name' => (string) $owner['owner_name'],
+                'owner_email' => (string) $owner['owner_email'],
+                'source_table' => (string) $dogSource['table'],
+                'created_at_raw' => $dogSource['created_at_column'] !== null ? (string) ($row[$dogSource['created_at_column']] ?? '') : '',
+            );
+
+            if ($search !== '') {
+                $haystack = strtolower(
+                    $dogRecord['dog_name'] . ' ' .
+                    $dogRecord['owner_name'] . ' ' .
+                    $dogRecord['owner_email'] . ' ' .
+                    $dogRecord['breed']
+                );
+
+                if (!str_contains($haystack, $search)) {
+                    continue;
+                }
+            }
+
+            $dogs[] = $dogRecord;
+        }
     }
+
+    usort($dogs, static function (array $a, array $b): int {
+        return ddAdminDogsNormalizeSortTimestamp($b) <=> ddAdminDogsNormalizeSortTimestamp($a);
+    });
 } catch (Throwable $e) {
     $error = $e->getMessage();
 }
@@ -583,6 +605,7 @@ h1{
         <?php else: ?>
             <div class="grid">
                 <?php foreach ($dogs as $dog): ?>
+                    <?php $sourceParam = urlencode((string) $dog['source_table']); ?>
                     <div class="card">
                         <h2><?php echo ddAdminDogsH($dog['dog_name']); ?></h2>
 
@@ -599,7 +622,7 @@ h1{
                                 <a class="action-btn" href="admin-member-view.php?id=<?php echo (int) $dog['user_id']; ?>">View Owner</a>
                             <?php endif; ?>
 
-                            <a class="action-btn gold" href="admin-edit-dog.php?id=<?php echo (int) $dog['id']; ?>">Edit Dog</a>
+                            <a class="action-btn gold" href="admin-edit-dog.php?id=<?php echo (int) $dog['id']; ?>&source=<?php echo $sourceParam; ?>">Edit Dog</a>
                         </div>
                     </div>
                 <?php endforeach; ?>

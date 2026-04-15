@@ -53,7 +53,8 @@ function getTableColumns(PDO $pdo, string $table): array
     }
 
     try {
-        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $safeTable = str_replace('"', '""', $table);
+        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
         $columns = array();
 
         if ($stmt) {
@@ -158,10 +159,42 @@ function membershipCsrfToken(): string
     return $token;
 }
 
-function membershipPriceId(string $key): string
+function membershipPriceId(string $baseKey): string
 {
-    if (function_exists('dd_env')) {
-        return trim((string) (dd_env($key, '') ?? ''));
+    if (!function_exists('dd_env')) {
+        return '';
+    }
+
+    $baseKey = trim($baseKey);
+    if ($baseKey === '') {
+        return '';
+    }
+
+    $mode = function_exists('dd_stripe_mode')
+        ? strtolower(trim((string) dd_stripe_mode()))
+        : '';
+
+    $keysToTry = array();
+
+    if (str_ends_with($baseKey, '_TEST') || str_ends_with($baseKey, '_LIVE')) {
+        $keysToTry[] = $baseKey;
+    } else {
+        if ($mode === 'live') {
+            $keysToTry[] = $baseKey . '_LIVE';
+            $keysToTry[] = $baseKey . '_TEST';
+        } else {
+            $keysToTry[] = $baseKey . '_TEST';
+            $keysToTry[] = $baseKey . '_LIVE';
+        }
+
+        $keysToTry[] = $baseKey;
+    }
+
+    foreach ($keysToTry as $key) {
+        $value = trim((string) (dd_env($key, '') ?? ''));
+        if ($value !== '') {
+            return $value;
+        }
     }
 
     return '';
@@ -532,6 +565,30 @@ $csrfToken = membershipCsrfToken();
 
 ensureFounderMembershipPlans($pdo);
 
+/*
+|--------------------------------------------------------------------------
+| Allow plan switching without being overridden by the old pending session
+|--------------------------------------------------------------------------
+*/
+if (
+    is_array($checkoutPayload)
+    && !empty($checkoutPayload['plan_slug'])
+    && isset($plansBySlug[(string) $checkoutPayload['plan_slug']])
+) {
+    $sessionPlanSlug = (string) $checkoutPayload['plan_slug'];
+
+    if ($selectedPlanSlug !== '' && $selectedPlanSlug !== $sessionPlanSlug) {
+        unset($_SESSION['pending_membership_checkout']);
+        $checkoutPayload = null;
+        $checkoutReady = false;
+    } elseif ($selectedPlanSlug === '') {
+        $selectedPlanSlug = $sessionPlanSlug;
+        $checkoutReady = true;
+    } else {
+        $checkoutReady = true;
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $postedToken = (string) ($_POST['membership_csrf_token'] ?? '');
 
@@ -640,16 +697,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-if (
-    !$checkoutReady
-    && is_array($checkoutPayload)
-    && !empty($checkoutPayload['plan_slug'])
-    && isset($plansBySlug[$checkoutPayload['plan_slug']])
-) {
-    $selectedPlanSlug = (string) $checkoutPayload['plan_slug'];
-    $checkoutReady = true;
-}
-
 $selectedPlan = ($selectedPlanSlug !== '' && isset($plansBySlug[$selectedPlanSlug]))
     ? $plansBySlug[$selectedPlanSlug]
     : null;
@@ -737,16 +784,16 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
             align-items: center;
             justify-content: space-between;
             gap: 18px;
-            padding: 18px 0;
             flex-wrap: wrap;
+            padding: 18px 0;
         }
 
         .brand {
+            color: var(--white);
             font-size: 1.14rem;
+            font-weight: 700;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            font-weight: 700;
-            color: var(--white);
         }
 
         .nav-links,
@@ -769,16 +816,16 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
         }
 
         .btn {
-            display: inline-flex;
             align-items: center;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            cursor: pointer;
+            display: inline-flex;
+            font-size: 0.95rem;
+            font-weight: 700;
             justify-content: center;
             min-height: 50px;
             padding: 0 22px;
-            border-radius: 999px;
-            border: 1px solid transparent;
-            font-size: 0.95rem;
-            font-weight: 700;
-            cursor: pointer;
             transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
             white-space: nowrap;
         }
@@ -789,8 +836,8 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
 
         .btn-gold {
             background: linear-gradient(135deg, var(--gold), var(--gold-light));
-            color: #171105;
             box-shadow: 0 16px 38px rgba(215,181,109,.28);
+            color: #171105;
         }
 
         .btn-light {
@@ -799,58 +846,273 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
             color: var(--text);
         }
 
-        .btn-ghost {
-            background: transparent;
-            border-color: rgba(255,255,255,0.10);
-            color: var(--muted);
-        }
-
         .btn-block {
             width: 100%;
-        }
-
-        .page {
-            padding: 34px 0 72px;
-        }
-
-        .hero {
-            display: grid;
-            grid-template-columns: 1.2fr 0.8fr;
-            gap: 24px;
-            margin-bottom: 26px;
         }
 
         .card {
             background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.03));
             border: 1px solid var(--line);
             border-radius: var(--radius);
-            padding: 28px;
             box-shadow: var(--shadow);
+            padding: 28px;
         }
 
         .eyebrow {
-            display: inline-flex;
             align-items: center;
-            gap: 10px;
-            padding: 9px 15px;
-            border-radius: 999px;
-            border: 1px solid rgba(215,178,106,0.24);
             background: rgba(215,178,106,0.08);
+            border: 1px solid rgba(215,178,106,0.24);
+            border-radius: 999px;
             color: var(--gold-light);
+            display: inline-flex;
             font-size: 0.78rem;
             font-weight: 700;
+            gap: 10px;
             letter-spacing: 0.08em;
-            text-transform: uppercase;
             margin-bottom: 16px;
+            padding: 9px 15px;
+            text-transform: uppercase;
         }
 
         .eyebrow::before {
-            content: "";
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
             background: var(--gold);
+            border-radius: 50%;
             box-shadow: 0 0 14px rgba(215,178,106,0.95);
+            content: "";
+            height: 8px;
+            width: 8px;
+        }
+
+        .footer {
+            color: var(--soft);
+            display: flex;
+            flex-wrap: wrap;
+            font-size: 0.92rem;
+            gap: 16px;
+            justify-content: space-between;
+            margin-top: 34px;
+        }
+
+        .footer-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .footer-links a:hover {
+            color: var(--gold-light);
+        }
+
+        .flash {
+            border-radius: 18px;
+            font-weight: 700;
+            margin-bottom: 22px;
+            padding: 16px 18px;
+        }
+
+        .flash.error {
+            background: var(--danger-bg);
+            border: 1px solid rgba(201, 92, 71, 0.30);
+            color: var(--danger);
+        }
+
+        .flash.success {
+            background: var(--success-bg);
+            border: 1px solid rgba(90, 148, 73, 0.30);
+            color: var(--success);
+        }
+
+        .helper,
+        .sub,
+        .lead {
+            color: var(--muted);
+            font-size: 1.02rem;
+        }
+
+        .helper {
+            color: var(--soft);
+            font-size: 0.94rem;
+        }
+
+        .hero {
+            display: grid;
+            gap: 24px;
+            grid-template-columns: 1.2fr 0.8fr;
+            margin-bottom: 26px;
+        }
+
+        .hero-pills,
+        .mini-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        .page {
+            padding: 34px 0 72px;
+        }
+
+        .pill {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 999px;
+            color: var(--text);
+            font-size: 0.92rem;
+            padding: 10px 14px;
+        }
+
+        .plan-badge {
+            align-self: flex-start;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 999px;
+            color: var(--gold-light);
+            display: inline-flex;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            padding: 8px 12px;
+            text-transform: uppercase;
+        }
+
+        .plan-card {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            min-height: 100%;
+            position: relative;
+        }
+
+        .plan-card.selected {
+            border-color: rgba(215,178,106,0.45);
+            box-shadow: 0 26px 70px rgba(215,178,106,0.10), var(--shadow);
+        }
+
+        .plan-price {
+            align-items: baseline;
+            display: flex;
+            gap: 10px;
+        }
+
+        .plan-price strong {
+            color: var(--white);
+            font-size: 2.3rem;
+        }
+
+        .plan-price span {
+            color: var(--muted);
+        }
+
+        .plans-grid {
+            display: grid;
+            gap: 22px;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            margin-top: 20px;
+        }
+
+        .ready-box {
+            background: linear-gradient(180deg, rgba(215,178,106,0.10), rgba(255,255,255,0.03));
+            border: 1px solid rgba(215,178,106,0.22);
+            border-radius: 22px;
+            padding: 20px;
+        }
+
+        .ready-meta {
+            color: var(--muted);
+            display: grid;
+            gap: 10px;
+            margin-top: 14px;
+        }
+
+        .section-title {
+            margin: 12px 0 18px;
+        }
+
+        .selection-panel {
+            display: grid;
+            gap: 24px;
+            grid-template-columns: 1.1fr 0.9fr;
+            margin-top: 28px;
+        }
+
+        .selection-summary {
+            display: grid;
+            gap: 18px;
+        }
+
+        .site-header + .page .container {
+            position: relative;
+        }
+
+        .stack {
+            display: grid;
+            gap: 16px;
+        }
+
+        .summary-box,
+        .tos-box {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 22px;
+            padding: 20px;
+        }
+
+        .summary-row {
+            color: var(--muted);
+            display: flex;
+            gap: 16px;
+            justify-content: space-between;
+        }
+
+        .summary-row strong {
+            color: var(--white);
+        }
+
+        .summary-rows {
+            display: grid;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .tos-box label {
+            align-items: flex-start;
+            color: var(--muted);
+            cursor: pointer;
+            display: flex;
+            gap: 12px;
+        }
+
+        .tos-box input[type="checkbox"] {
+            accent-color: #d7b26a;
+            flex: 0 0 auto;
+            height: 18px;
+            margin-top: 5px;
+            width: 18px;
+        }
+
+        .tos-link {
+            color: var(--gold-light);
+            text-decoration: underline;
+            text-underline-offset: 3px;
+        }
+
+        .value-note {
+            color: var(--soft);
+            font-size: 0.96rem;
+        }
+
+        .welcome-list {
+            display: grid;
+            gap: 14px;
+            margin-top: 18px;
+        }
+
+        .welcome-item {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 18px;
+            padding: 14px 16px;
         }
 
         h1, h2, h3 {
@@ -872,248 +1134,6 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
             margin-bottom: 10px;
         }
 
-        .sub,
-        .lead {
-            color: var(--muted);
-            font-size: 1.02rem;
-        }
-
-        .lead {
-            max-width: 760px;
-        }
-
-        .hero-pills,
-        .mini-pills {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-top: 20px;
-        }
-
-        .pill {
-            padding: 10px 14px;
-            border-radius: 999px;
-            border: 1px solid rgba(255,255,255,0.10);
-            background: rgba(255,255,255,0.04);
-            color: var(--text);
-            font-size: 0.92rem;
-        }
-
-        .welcome-list {
-            display: grid;
-            gap: 14px;
-            margin-top: 18px;
-        }
-
-        .welcome-item {
-            padding: 14px 16px;
-            border-radius: 18px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08);
-        }
-
-        .section-title {
-            margin: 12px 0 18px;
-        }
-
-        .plans-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 22px;
-            margin-top: 20px;
-        }
-
-        .plan-card {
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            gap: 18px;
-            min-height: 100%;
-        }
-
-        .plan-card.selected {
-            border-color: rgba(215,178,106,0.45);
-            box-shadow: 0 26px 70px rgba(215,178,106,0.10), var(--shadow);
-        }
-
-        .plan-badge {
-            display: inline-flex;
-            align-self: flex-start;
-            padding: 8px 12px;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.10);
-            color: var(--gold-light);
-            font-size: 0.8rem;
-            font-weight: 700;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-        }
-
-        .plan-price {
-            display: flex;
-            align-items: baseline;
-            gap: 10px;
-        }
-
-        .plan-price strong {
-            font-size: 2.3rem;
-            color: var(--white);
-        }
-
-        .plan-price span {
-            color: var(--muted);
-        }
-
-        .value-note {
-            color: var(--soft);
-            font-size: 0.96rem;
-        }
-
-        .feature-list {
-            list-style: none;
-            display: grid;
-            gap: 10px;
-        }
-
-        .feature-list li {
-            position: relative;
-            padding-left: 22px;
-            color: var(--muted);
-        }
-
-        .feature-list li::before {
-            content: "•";
-            position: absolute;
-            left: 0;
-            top: 0;
-            color: var(--gold);
-            font-size: 1.2rem;
-            line-height: 1;
-        }
-
-        .selection-panel {
-            margin-top: 28px;
-            display: grid;
-            grid-template-columns: 1.1fr 0.9fr;
-            gap: 24px;
-        }
-
-        .selection-summary {
-            display: grid;
-            gap: 18px;
-        }
-
-        .summary-box,
-        .tos-box,
-        .ready-box {
-            padding: 20px;
-            border-radius: 22px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(255,255,255,0.04);
-        }
-
-        .summary-rows {
-            display: grid;
-            gap: 10px;
-            margin-top: 10px;
-        }
-
-        .summary-row {
-            display: flex;
-            justify-content: space-between;
-            gap: 16px;
-            color: var(--muted);
-        }
-
-        .summary-row strong {
-            color: var(--white);
-        }
-
-        .tos-box label {
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-            color: var(--muted);
-            cursor: pointer;
-        }
-
-        .tos-box input[type="checkbox"] {
-            margin-top: 5px;
-            width: 18px;
-            height: 18px;
-            accent-color: #d7b26a;
-            flex: 0 0 auto;
-        }
-
-        .tos-link {
-            color: var(--gold-light);
-            text-decoration: underline;
-            text-underline-offset: 3px;
-        }
-
-        .stack {
-            display: grid;
-            gap: 16px;
-        }
-
-        .flash {
-            margin-bottom: 22px;
-            padding: 16px 18px;
-            border-radius: 18px;
-            font-weight: 700;
-        }
-
-        .flash.error {
-            background: var(--danger-bg);
-            border: 1px solid rgba(201, 92, 71, 0.30);
-            color: var(--danger);
-        }
-
-        .flash.success {
-            background: var(--success-bg);
-            border: 1px solid rgba(90, 148, 73, 0.30);
-            color: var(--success);
-        }
-
-        .helper {
-            color: var(--soft);
-            font-size: 0.94rem;
-        }
-
-        .ready-box {
-            background:
-                linear-gradient(180deg, rgba(215,178,106,0.10), rgba(255,255,255,0.03));
-            border-color: rgba(215,178,106,0.22);
-        }
-
-        .ready-meta {
-            display: grid;
-            gap: 10px;
-            margin-top: 14px;
-            color: var(--muted);
-        }
-
-        .footer {
-            margin-top: 34px;
-            display: flex;
-            justify-content: space-between;
-            gap: 16px;
-            flex-wrap: wrap;
-            color: var(--soft);
-            font-size: 0.92rem;
-        }
-
-        .footer-links {
-            display: flex;
-            gap: 16px;
-            flex-wrap: wrap;
-        }
-
-        .footer-links a:hover {
-            color: var(--gold-light);
-        }
-
         @media (max-width: 1100px) {
             .hero,
             .selection-panel,
@@ -1123,35 +1143,32 @@ if (isset($_GET['membership_checkout']) && $_GET['membership_checkout'] === 'can
         }
 
         @media (max-width: 700px) {
-            .page {
-                padding: 22px 0 54px;
+            .card {
+                border-radius: 22px;
+                padding: 20px;
             }
 
-            .card {
-                padding: 20px;
-                border-radius: 22px;
+            .footer {
+                flex-direction: column;
+            }
+
+            .nav-actions .btn,
+            .nav-links,
+            .nav-actions {
+                width: 100%;
             }
 
             .nav-wrap {
                 align-items: flex-start;
             }
 
-            .nav-links,
-            .nav-actions {
-                width: 100%;
-            }
-
-            .nav-actions .btn {
-                width: 100%;
+            .page {
+                padding: 22px 0 54px;
             }
 
             .summary-row {
                 flex-direction: column;
                 gap: 4px;
-            }
-
-            .footer {
-                flex-direction: column;
             }
         }
     </style>

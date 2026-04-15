@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/admin-auth.php';
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
@@ -14,112 +15,6 @@ function ddAdminBookingsH($value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
-
-function ddAdminBookingsRedirect(string $url): void
-{
-    header('Location: ' . $url);
-    exit;
-}
-
-function ddAdminBookingsNormalizeRole($value): string
-{
-    return strtolower(trim((string) $value));
-}
-
-function ddAdminBookingsSessionBool(string $key): bool
-{
-    return isset($_SESSION[$key]) && $_SESSION[$key] === true;
-}
-
-function ddAdminBookingsSessionNonempty(string $key): bool
-{
-    return isset($_SESSION[$key]) && $_SESSION[$key] !== '' && $_SESSION[$key] !== null;
-}
-
-function ddAdminBookingsIsAdmin(): bool
-{
-    $roleCandidates = array(
-        ddAdminBookingsNormalizeRole($_SESSION['role'] ?? ''),
-        ddAdminBookingsNormalizeRole($_SESSION['user_role'] ?? ''),
-        ddAdminBookingsNormalizeRole($_SESSION['user_type'] ?? ''),
-        ddAdminBookingsNormalizeRole($_SESSION['account_type'] ?? ''),
-        ddAdminBookingsNormalizeRole($_SESSION['access_role'] ?? ''),
-        ddAdminBookingsNormalizeRole($_SESSION['admin']['role'] ?? ''),
-    );
-
-    $hasAdminRole = in_array('admin', $roleCandidates, true);
-
-    $hasAdminFlag = (
-        ddAdminBookingsSessionBool('admin_logged_in')
-        || ddAdminBookingsSessionBool('is_admin')
-        || (
-            isset($_SESSION['admin'])
-            && is_array($_SESSION['admin'])
-            && (
-                (!empty($_SESSION['admin']['logged_in']) && $_SESSION['admin']['logged_in'] === true)
-                || (!empty($_SESSION['admin']['is_admin']) && $_SESSION['admin']['is_admin'] === true)
-            )
-        )
-    );
-
-    $hasAdminIdentity = (
-        ddAdminBookingsSessionNonempty('admin_id')
-        || ddAdminBookingsSessionNonempty('admin_email')
-        || ddAdminBookingsSessionNonempty('admin_name')
-        || (
-            isset($_SESSION['admin'])
-            && is_array($_SESSION['admin'])
-            && !empty($_SESSION['admin'])
-        )
-    );
-
-    return ($hasAdminFlag && ($hasAdminRole || $hasAdminIdentity))
-        || ($hasAdminRole && $hasAdminIdentity);
-}
-
-function ddAdminBookingsNormalizeAdminSession(): void
-{
-    if (!ddAdminBookingsIsAdmin()) {
-        return;
-    }
-
-    $_SESSION['admin_logged_in'] = true;
-    $_SESSION['is_admin'] = true;
-
-    if (empty($_SESSION['role'])) {
-        $_SESSION['role'] = 'admin';
-    }
-
-    if (empty($_SESSION['user_role'])) {
-        $_SESSION['user_role'] = 'admin';
-    }
-
-    if (empty($_SESSION['admin_name']) && !empty($_SESSION['admin']['name'])) {
-        $_SESSION['admin_name'] = (string) $_SESSION['admin']['name'];
-    }
-
-    if (empty($_SESSION['admin_email']) && !empty($_SESSION['admin']['email'])) {
-        $_SESSION['admin_email'] = (string) $_SESSION['admin']['email'];
-    }
-
-    if (empty($_SESSION['admin_id'])) {
-        if (!empty($_SESSION['admin']['id'])) {
-            $_SESSION['admin_id'] = (int) $_SESSION['admin']['id'];
-        } elseif (!empty($_SESSION['user_id'])) {
-            $_SESSION['admin_id'] = (int) $_SESSION['user_id'];
-        }
-    }
-
-    if (empty($_SESSION['user_id']) && !empty($_SESSION['admin_id'])) {
-        $_SESSION['user_id'] = (int) $_SESSION['admin_id'];
-    }
-}
-
-if (!ddAdminBookingsIsAdmin()) {
-    ddAdminBookingsRedirect('admin-login.php');
-}
-
-ddAdminBookingsNormalizeAdminSession();
 
 function ddAdminBookingsQuoteIdentifier(string $identifier): string
 {
@@ -628,17 +523,6 @@ function ddAdminBookingsCountUnreadNotifications(PDO $pdo): int
     return (int) ($row['count_value'] ?? 0);
 }
 
-function ddAdminBookingsBaseTable(PDO $pdo): ?string
-{
-    foreach (array('bookings', 'walks') as $candidate) {
-        if (ddAdminBookingsTableExists($pdo, $candidate)) {
-            return $candidate;
-        }
-    }
-
-    return null;
-}
-
 function ddAdminBookingsResolveMemberClientName(PDO $pdo, array $row, array $jsonSources): string
 {
     $name = trim((string) ddAdminBookingsValueFromRow(
@@ -838,40 +722,70 @@ function ddAdminBookingsResolveWorkerName(PDO $pdo, array $row): string
         return $name;
     }
 
-    $workerId = ddAdminBookingsValueFromRow($row, array('walker_id', 'worker_id', 'assigned_worker_id', 'assigned_walker_id'), null);
+    $workerId = ddAdminBookingsValueFromRow(
+        $row,
+        array(
+            'assigned_worker_id',
+            'assigned_walker_id',
+            'worker_id',
+            'walker_id',
+            'assigned_user_id',
+            'assigned_to_user_id',
+            'staff_id',
+            'employee_id',
+        ),
+        null
+    );
 
     if ($workerId === null || $workerId === '') {
         return '';
     }
 
-    $name = ddAdminBookingsLookupRelatedFullName(
-        $pdo,
-        'walkers',
-        $workerId,
-        array('id', 'walker_id', 'worker_id'),
-        array('full_name', 'name', 'walker_name', 'worker_name'),
-        array('first_name'),
-        array('last_name')
-    );
+    $source = strtolower(trim((string) ddAdminBookingsValueFromRow(
+        $row,
+        array(
+            'assigned_worker_source',
+            'assigned_walker_source',
+            'worker_source',
+            'walker_source',
+        ),
+        ''
+    )));
 
-    if ($name === '') {
+    $lookupOrder = array();
+
+    if ($source !== '') {
+        $lookupOrder[] = $source;
+    }
+
+    foreach (array('users', 'walkers', 'workers') as $table) {
+        if (!in_array($table, $lookupOrder, true)) {
+            $lookupOrder[] = $table;
+        }
+    }
+
+    foreach ($lookupOrder as $table) {
         $name = ddAdminBookingsLookupRelatedFullName(
             $pdo,
-            'workers',
+            $table,
             $workerId,
-            array('id', 'worker_id', 'walker_id'),
-            array('full_name', 'name', 'worker_name', 'walker_name'),
+            array('id', 'user_id', 'worker_id', 'walker_id'),
+            array('full_name', 'name', 'worker_name', 'walker_name', 'display_name'),
             array('first_name'),
             array('last_name')
         );
+
+        if ($name !== '') {
+            return $name;
+        }
     }
 
-    return $name;
+    return '';
 }
 
 function ddAdminBookingsBuildSortTimestamp(array $row): int
 {
-    foreach (array('created_at', 'updated_at', 'submitted_at', 'booking_date', 'service_date', 'date') as $key) {
+    foreach (array('created_at', 'updated_at', 'submitted_at', 'booking_date', 'service_date', 'date', 'scheduled_date', 'walk_date') as $key) {
         if (!empty($row[$key])) {
             $ts = strtotime((string) $row[$key]);
             if ($ts !== false) {
@@ -883,10 +797,14 @@ function ddAdminBookingsBuildSortTimestamp(array $row): int
     return 0;
 }
 
-function ddAdminBookingsFetchMemberBookings(PDO $pdo): array
+function ddAdminBookingsBuildAssignUrl(string $table, int $id): string
 {
-    $table = ddAdminBookingsBaseTable($pdo);
-    if ($table === null) {
+    return 'admin-assign-walker.php?booking_source_key=' . urlencode($table . ':' . $id);
+}
+
+function ddAdminBookingsFetchMemberLikeBookingsFromTable(PDO $pdo, string $table, string $sourceLabel): array
+{
+    if (!ddAdminBookingsTableExists($pdo, $table)) {
         return array();
     }
 
@@ -900,11 +818,15 @@ function ddAdminBookingsFetchMemberBookings(PDO $pdo): array
     foreach ($rows as $row) {
         $jsonSources = ddAdminBookingsCollectJsonSourcesFromRow($row);
 
-        $id = (int) ddAdminBookingsValueFromRow($row, array('id', 'booking_id'), 0);
-        $serviceType = (string) ddAdminBookingsValueFromRow($row, array('service_type', 'service'), '');
-        $status = ddAdminBookingsNormalizeStatus(ddAdminBookingsValueFromRow($row, array('status'), 'pending'));
-        $date = (string) ddAdminBookingsValueFromRow($row, array('date', 'booking_date', 'service_date'), '');
-        $time = (string) ddAdminBookingsValueFromRow($row, array('time', 'service_time', 'booking_time', 'start_time'), '');
+        $id = (int) ddAdminBookingsValueFromRow($row, array('id', 'booking_id', 'walk_id'), 0);
+        if ($id <= 0) {
+            continue;
+        }
+
+        $serviceType = (string) ddAdminBookingsValueFromRow($row, array('service_type', 'service', 'booking_type', 'type'), '');
+        $status = ddAdminBookingsNormalizeStatus(ddAdminBookingsValueFromRow($row, array('status', 'booking_status', 'service_status'), 'pending'));
+        $date = (string) ddAdminBookingsValueFromRow($row, array('date', 'booking_date', 'service_date', 'scheduled_date', 'walk_date'), '');
+        $time = (string) ddAdminBookingsValueFromRow($row, array('time', 'service_time', 'booking_time', 'start_time', 'scheduled_time'), '');
         $createdAt = (string) ddAdminBookingsValueFromRow($row, array('created_at', 'submitted_at', 'updated_at'), '');
         $price = ddAdminBookingsValueFromRow($row, array('price', 'amount', 'total_price', 'total'), '');
         $paymentStatus = (string) ddAdminBookingsValueFromRow($row, array('payment_status', 'paid_status'), '');
@@ -916,11 +838,26 @@ function ddAdminBookingsFetchMemberBookings(PDO $pdo): array
         $workerName = ddAdminBookingsResolveWorkerName($pdo, $row);
         $notes = ddAdminBookingsExtractDisplayNotes($jsonSources, $notesRaw);
 
+        $viewUrl = '';
+        $viewLabel = 'Open Booking';
+        $editUrl = '';
+        $statusUrl = '';
+
+        if ($table === 'bookings') {
+            $viewUrl = 'admin-edit-booking.php?id=' . $id;
+            $editUrl = 'admin-edit-booking.php?id=' . $id;
+            $statusUrl = 'admin-update-booking-status.php?id=' . $id;
+        } elseif ($table === 'walks') {
+            $viewUrl = 'admin-walks.php';
+            $viewLabel = 'Open Walks';
+        }
+
         $normalized[] = array(
             'source' => 'member',
-            'source_label' => 'Member',
+            'source_label' => $sourceLabel,
             'table' => $table,
             'id' => $id,
+            'route_key' => $table . ':' . $id,
             'service_type' => ddAdminBookingsNormalizeServiceType($serviceType),
             'service_label' => ddAdminBookingsServiceDisplayName($serviceType),
             'client_name' => $clientName,
@@ -936,14 +873,29 @@ function ddAdminBookingsFetchMemberBookings(PDO $pdo): array
             'payment_method' => $paymentMethod,
             'notes' => $notes,
             'sort_timestamp' => ddAdminBookingsBuildSortTimestamp($row),
-            'view_url' => 'booking-details.php?id=' . $id,
-            'edit_url' => 'admin-edit-booking.php?id=' . $id,
-            'assign_url' => 'admin-assign-walker.php?id=' . $id,
-            'status_url' => 'admin-update-booking-status.php?id=' . $id,
+            'view_url' => $viewUrl,
+            'view_label' => $viewLabel,
+            'edit_url' => $editUrl,
+            'assign_url' => ddAdminBookingsBuildAssignUrl($table, $id),
+            'status_url' => $statusUrl,
         );
     }
 
     return $normalized;
+}
+
+function ddAdminBookingsFetchMemberBookings(PDO $pdo): array
+{
+    $all = array();
+
+    foreach (array(
+        'bookings' => 'Member',
+        'walks' => 'Walk',
+    ) as $table => $label) {
+        $all = array_merge($all, ddAdminBookingsFetchMemberLikeBookingsFromTable($pdo, $table, $label));
+    }
+
+    return $all;
 }
 
 function ddAdminBookingsFetchPublicBookings(PDO $pdo): array
@@ -964,10 +916,14 @@ function ddAdminBookingsFetchPublicBookings(PDO $pdo): array
         $jsonSources = ddAdminBookingsCollectJsonSourcesFromRow($row);
 
         $id = (int) ddAdminBookingsValueFromRow($row, array('id', 'booking_id'), 0);
+        if ($id <= 0) {
+            continue;
+        }
+
         $serviceType = (string) ddAdminBookingsValueFromRow($row, array('service_type', 'service'), '');
         $status = ddAdminBookingsNormalizePublicStatus(ddAdminBookingsValueFromRow($row, array('status'), 'new'));
-        $date = (string) ddAdminBookingsValueFromRow($row, array('date', 'booking_date', 'service_date'), '');
-        $time = (string) ddAdminBookingsValueFromRow($row, array('time', 'service_time', 'booking_time', 'start_time'), '');
+        $date = (string) ddAdminBookingsValueFromRow($row, array('date', 'booking_date', 'service_date', 'scheduled_date'), '');
+        $time = (string) ddAdminBookingsValueFromRow($row, array('time', 'service_time', 'booking_time', 'start_time', 'scheduled_time'), '');
         $createdAt = (string) ddAdminBookingsValueFromRow($row, array('created_at', 'submitted_at', 'updated_at'), '');
         $price = ddAdminBookingsValueFromRow($row, array('price', 'amount', 'total_price', 'total'), '');
         $paymentStatus = (string) ddAdminBookingsValueFromRow($row, array('payment_status', 'paid_status'), '');
@@ -976,18 +932,21 @@ function ddAdminBookingsFetchPublicBookings(PDO $pdo): array
 
         $clientName = ddAdminBookingsResolvePublicClientName($row, $jsonSources);
         $petName = ddAdminBookingsResolvePetName($pdo, $row, $jsonSources);
+        $workerName = ddAdminBookingsResolveWorkerName($pdo, $row);
         $notes = ddAdminBookingsExtractDisplayNotes($jsonSources, $notesRaw);
+        $publicViewUrl = 'admin-non-member-booking-view.php?id=' . $id;
 
         $normalized[] = array(
             'source' => 'public',
             'source_label' => 'Public',
             'table' => $table,
             'id' => $id,
+            'route_key' => $table . ':' . $id,
             'service_type' => ddAdminBookingsNormalizeServiceType($serviceType),
             'service_label' => ddAdminBookingsServiceDisplayName($serviceType),
             'client_name' => $clientName,
             'pet_name' => $petName,
-            'worker_name' => '',
+            'worker_name' => $workerName,
             'status' => $status,
             'status_label' => ucwords(str_replace('_', ' ', $status)),
             'date' => $date,
@@ -998,10 +957,11 @@ function ddAdminBookingsFetchPublicBookings(PDO $pdo): array
             'payment_method' => $paymentMethod,
             'notes' => $notes,
             'sort_timestamp' => ddAdminBookingsBuildSortTimestamp($row),
-            'view_url' => 'admin-non-member-booking-view.php?id=' . $id,
-            'edit_url' => 'admin-booking-update.php?id=' . $id,
-            'assign_url' => '',
-            'status_url' => 'admin-booking-update.php?id=' . $id,
+            'view_url' => $publicViewUrl,
+            'view_label' => 'Open Public Booking',
+            'edit_url' => '',
+            'assign_url' => ddAdminBookingsBuildAssignUrl($table, $id),
+            'status_url' => '',
         );
     }
 
@@ -1425,7 +1385,7 @@ $unreadNotifications = ddAdminBookingsCountUnreadNotifications($pdo);
                 <div class="eyebrow">Booking Control</div>
                 <h1>Admin Bookings</h1>
                 <div class="sub">
-                    Review both member and public booking activity from one launch-ready dashboard page.
+                    Review member, walk, and public booking activity from one launch-ready dashboard page with safe routing.
                 </div>
 
                 <div class="stats">
@@ -1434,7 +1394,7 @@ $unreadNotifications = ddAdminBookingsCountUnreadNotifications($pdo);
                         <div class="stat-value"><?php echo (int) $totalCount; ?></div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Member</div>
+                        <div class="stat-label">Member / Walk</div>
                         <div class="stat-value"><?php echo (int) $memberCount; ?></div>
                     </div>
                     <div class="stat">
@@ -1457,7 +1417,7 @@ $unreadNotifications = ddAdminBookingsCountUnreadNotifications($pdo);
                 <div class="eyebrow">Filter View</div>
                 <h2>Choose what to review</h2>
                 <div class="sub">
-                    Switch between all bookings, member bookings, or public non-member bookings.
+                    Switch between all bookings, member-side bookings, or public non-member bookings.
                 </div>
 
                 <div class="filter-row">
@@ -1470,6 +1430,7 @@ $unreadNotifications = ddAdminBookingsCountUnreadNotifications($pdo);
                     <a class="btn btn-gold" href="admin-create-booking.php">Create Booking</a>
                     <a class="btn" href="admin-walks.php">View Walks</a>
                     <a class="btn" href="admin-non-member-bookings.php">Public Bookings Page</a>
+                    <a class="btn" href="admin-assign-walker.php">Assign Worker</a>
                 </div>
             </div>
         </section>
@@ -1555,7 +1516,11 @@ $unreadNotifications = ddAdminBookingsCountUnreadNotifications($pdo);
                         <?php endif; ?>
 
                         <div class="action-row">
-                            <a class="btn btn-gold" href="<?php echo ddAdminBookingsH($booking['view_url']); ?>">Open Booking</a>
+                            <?php if ($booking['view_url'] !== ''): ?>
+                                <a class="btn btn-gold" href="<?php echo ddAdminBookingsH($booking['view_url']); ?>">
+                                    <?php echo ddAdminBookingsH($booking['view_label']); ?>
+                                </a>
+                            <?php endif; ?>
 
                             <?php if ($booking['edit_url'] !== ''): ?>
                                 <a class="btn" href="<?php echo ddAdminBookingsH($booking['edit_url']); ?>">Edit Booking</a>

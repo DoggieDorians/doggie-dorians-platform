@@ -2,64 +2,11 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/admin-auth.php';
 
-function dd_admin_nav_redirect(string $url): never
-{
-    header('Location: ' . $url);
-    exit;
-}
-
-function dd_admin_nav_is_admin(): bool
-{
-    if (!empty($_SESSION['is_admin'])) {
-        return true;
-    }
-
-    if (!empty($_SESSION['admin_id'])) {
-        return true;
-    }
-
-    if (!empty($_SESSION['admin_logged_in'])) {
-        return true;
-    }
-
-    $roles = [
-        $_SESSION['role'] ?? null,
-        $_SESSION['user_role'] ?? null,
-        $_SESSION['account_role'] ?? null,
-        $_SESSION['account_type'] ?? null,
-    ];
-
-    foreach ($roles as $role) {
-        if (!is_string($role)) {
-            continue;
-        }
-
-        $normalized = strtolower(trim($role));
-        if (in_array($normalized, ['admin', 'superadmin', 'owner'], true)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function h(mixed $value): string
+function dd_admin_nav_h(mixed $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
-}
-
-if (
-    empty($_SESSION['user_id']) &&
-    empty($_SESSION['admin_id']) &&
-    empty($_SESSION['is_admin']) &&
-    empty($_SESSION['admin_logged_in'])
-) {
-    dd_admin_nav_redirect('admin-login.php');
-}
-
-if (!dd_admin_nav_is_admin()) {
-    dd_admin_nav_redirect('admin-dashboard.php');
 }
 
 $currentFile = basename((string) ($_SERVER['PHP_SELF'] ?? 'admin-nav.php'));
@@ -69,86 +16,90 @@ $sections = [
         'title' => 'Core Admin',
         'description' => 'Main control pages for the admin side.',
         'items' => [
-            ['file' => 'admin-dashboard.php', 'label' => 'Admin Dashboard', 'note' => 'Main admin home'],
-            ['file' => 'admin-nav.php', 'label' => 'Admin Navigation', 'note' => 'Central admin link hub'],
-            ['file' => 'admin.php', 'label' => 'Admin', 'note' => 'Legacy or alternate admin entry'],
-            ['file' => 'admin-revenue.php', 'label' => 'Admin Revenue', 'note' => 'Revenue dashboard'],
-            ['file' => 'admin-notifications.php', 'label' => 'Admin Notifications', 'note' => 'Admin alert center'],
-            ['file' => 'admin-login.php', 'label' => 'Admin Login', 'note' => 'Admin login page'],
-            ['file' => 'admin-logout.php', 'label' => 'Admin Logout', 'note' => 'Logout endpoint'],
+            ['file' => 'admin-dashboard.php', 'label' => 'Admin Dashboard', 'note' => 'Main admin home', 'href' => 'admin-dashboard.php', 'type' => 'page'],
+            ['file' => 'admin-nav.php', 'label' => 'Admin Navigation', 'note' => 'Central admin link hub', 'href' => 'admin-nav.php', 'type' => 'page'],
+            ['file' => 'admin.php', 'label' => 'Admin', 'note' => 'Legacy or alternate admin entry', 'href' => 'admin-dashboard.php', 'type' => 'redirected'],
+            ['file' => 'admin-revenue.php', 'label' => 'Admin Revenue', 'note' => 'Revenue dashboard', 'href' => 'admin-revenue.php', 'type' => 'page'],
+            ['file' => 'admin-notifications.php', 'label' => 'Admin Notifications', 'note' => 'Admin alert center', 'href' => 'admin-notifications.php', 'type' => 'page'],
+            ['file' => 'admin-login.php', 'label' => 'Admin Login', 'note' => 'Admin login page', 'href' => 'admin-login.php', 'type' => 'page'],
+            ['file' => 'admin-logout.php', 'label' => 'Admin Logout', 'note' => 'Logout endpoint', 'href' => 'logout.php', 'type' => 'redirected'],
         ],
     ],
     [
         'title' => 'Bookings & Clients',
         'description' => 'Member bookings, non-member bookings, member pages, pets, and booking actions.',
         'items' => [
-            ['file' => 'admin-bookings.php', 'label' => 'Admin Bookings', 'note' => 'Main booking management'],
-            ['file' => 'admin-booking-requests.php', 'label' => 'Admin Booking Requests', 'note' => 'Incoming request review'],
-            ['file' => 'admin-booking-update.php', 'label' => 'Admin Booking Update', 'note' => 'Booking update flow'],
-            ['file' => 'admin-create-booking.php', 'label' => 'Admin Create Booking', 'note' => 'Create a booking manually'],
-            ['file' => 'admin-edit-booking.php', 'label' => 'Admin Edit Booking', 'note' => 'Edit an existing booking'],
-            ['file' => 'admin-update-booking-status.php', 'label' => 'Admin Update Booking Status', 'note' => 'Booking status action file', 'internal' => true],
-            ['file' => 'admin-members.php', 'label' => 'Admin Members', 'note' => 'Member directory'],
-            ['file' => 'admin-member-view.php', 'label' => 'Admin Member View', 'note' => 'Single member profile page'],
-            ['file' => 'admin-non-member-bookings.php', 'label' => 'Admin Non-Member Bookings', 'note' => 'Public booking queue'],
-            ['file' => 'admin-non-member-booking-view.php', 'label' => 'Admin Non-Member Booking View', 'note' => 'Single non-member booking detail'],
-            ['file' => 'admin-dogs.php', 'label' => 'Admin Dogs', 'note' => 'Dog directory or dog management'],
-            ['file' => 'admin-add-dog.php', 'label' => 'Admin Add Dog', 'note' => 'Add dog from admin side'],
-            ['file' => 'admin-edit-dog.php', 'label' => 'Admin Edit Dog', 'note' => 'Edit dog details'],
-            ['file' => 'add-pet.php', 'label' => 'Add Pet', 'note' => 'Pet creation page visible in your list'],
+            ['file' => 'admin-bookings.php', 'label' => 'Admin Bookings', 'note' => 'Main booking management', 'href' => 'admin-bookings.php', 'type' => 'page'],
+            ['file' => 'admin-booking-requests.php', 'label' => 'Admin Booking Requests', 'note' => 'Incoming request review', 'href' => 'admin-booking-requests.php', 'type' => 'page'],
+            ['file' => 'admin-booking-update.php', 'label' => 'Admin Booking Update', 'note' => 'Requires a specific public booking. Opens the public bookings list first.', 'href' => 'admin-bookings.php?view=public', 'type' => 'context'],
+            ['file' => 'admin-create-booking.php', 'label' => 'Admin Create Booking', 'note' => 'Create a booking manually', 'href' => 'admin-create-booking.php', 'type' => 'page'],
+            ['file' => 'admin-edit-booking.php', 'label' => 'Admin Edit Booking', 'note' => 'Requires a specific member booking. Opens the member bookings list first.', 'href' => 'admin-bookings.php?view=member', 'type' => 'context'],
+            ['file' => 'admin-update-booking-status.php', 'label' => 'Admin Update Booking Status', 'note' => 'Status action for a specific member booking. Opens the member bookings list first.', 'href' => 'admin-bookings.php?view=member', 'type' => 'context'],
+            ['file' => 'admin-members.php', 'label' => 'Admin Members', 'note' => 'Member directory', 'href' => 'admin-members.php', 'type' => 'page'],
+            ['file' => 'admin-member-view.php', 'label' => 'Admin Member View', 'note' => 'Requires a specific member. Opens the members list first.', 'href' => 'admin-members.php', 'type' => 'context'],
+            ['file' => 'admin-non-member-bookings.php', 'label' => 'Admin Non-Member Bookings', 'note' => 'Public booking queue', 'href' => 'admin-non-member-bookings.php', 'type' => 'page'],
+            ['file' => 'admin-non-member-booking-view.php', 'label' => 'Admin Non-Member Booking View', 'note' => 'Requires a specific public booking. Opens the public bookings list first.', 'href' => 'admin-non-member-bookings.php', 'type' => 'context'],
+            ['file' => 'admin-dogs.php', 'label' => 'Admin Dogs', 'note' => 'Dog directory or dog management', 'href' => 'admin-dogs.php', 'type' => 'page'],
+            ['file' => 'admin-add-dog.php', 'label' => 'Admin Add Dog', 'note' => 'Add dog from admin side', 'href' => 'admin-add-dog.php', 'type' => 'page'],
+            ['file' => 'admin-edit-dog.php', 'label' => 'Admin Edit Dog', 'note' => 'Requires a specific dog. Opens the dogs list first.', 'href' => 'admin-dogs.php', 'type' => 'context'],
+            ['file' => 'add-pet.php', 'label' => 'Add Pet', 'note' => 'Pet creation page visible in your list', 'href' => 'add-pet.php', 'type' => 'page'],
         ],
     ],
     [
         'title' => 'Walks, Tracking & Worker Ops',
         'description' => 'Walk workflow, worker assignment, live tracking, and worker management.',
         'items' => [
-            ['file' => 'admin-walks.php', 'label' => 'Admin Walks', 'note' => 'Walk operations board'],
-            ['file' => 'admin-live-tracking.php', 'label' => 'Admin Live Tracking', 'note' => 'Admin live tracking screen'],
-            ['file' => 'admin-tracking.php', 'label' => 'Admin Tracking', 'note' => 'Tracking-related admin page'],
-            ['file' => 'admin-walker-management.php', 'label' => 'Admin Walker Management', 'note' => 'Worker directory and controls'],
-            ['file' => 'admin-worker-view.php', 'label' => 'Admin Worker View', 'note' => 'Single worker profile page'],
-            ['file' => 'admin-worker-jobs.php', 'label' => 'Admin Worker Jobs', 'note' => 'Worker job view'],
-            ['file' => 'admin-create-worker.php', 'label' => 'Admin Create Worker', 'note' => 'Create worker account'],
-            ['file' => 'admin-edit-worker.php', 'label' => 'Admin Edit Worker', 'note' => 'Edit worker account'],
-            ['file' => 'admin-enable-worker.php', 'label' => 'Admin Enable Worker', 'note' => 'Enable worker action'],
-            ['file' => 'admin-disable-worker.php', 'label' => 'Admin Disable Worker', 'note' => 'Disable worker action'],
-            ['file' => 'admin-assign-walker.php', 'label' => 'Admin Assign Walker', 'note' => 'Assign worker to booking'],
-            ['file' => 'admin-unassign-walker.php', 'label' => 'Admin Unassign Walker', 'note' => 'Remove worker from booking'],
+            ['file' => 'admin-walks.php', 'label' => 'Admin Walks', 'note' => 'Walk operations board', 'href' => 'admin-walks.php', 'type' => 'page'],
+            ['file' => 'admin-live-tracking.php', 'label' => 'Admin Live Tracking', 'note' => 'Admin live tracking screen', 'href' => 'admin-live-tracking.php', 'type' => 'page'],
+            ['file' => 'admin-tracking.php', 'label' => 'Admin Tracking', 'note' => 'Tracking-related admin page', 'href' => 'admin-tracking.php', 'type' => 'page'],
+            ['file' => 'admin-walker-management.php', 'label' => 'Admin Walker Management', 'note' => 'Worker directory and controls', 'href' => 'admin-walker-management.php', 'type' => 'page'],
+            ['file' => 'admin-worker-view.php', 'label' => 'Admin Worker View', 'note' => 'Requires a specific worker. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
+            ['file' => 'admin-worker-jobs.php', 'label' => 'Admin Worker Jobs', 'note' => 'Requires a specific worker context. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
+            ['file' => 'admin-create-worker.php', 'label' => 'Admin Create Worker', 'note' => 'Create worker account', 'href' => 'admin-create-worker.php', 'type' => 'page'],
+            ['file' => 'admin-edit-worker.php', 'label' => 'Admin Edit Worker', 'note' => 'Requires a specific worker. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
+            ['file' => 'admin-enable-worker.php', 'label' => 'Admin Enable Worker', 'note' => 'Requires a specific worker. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
+            ['file' => 'admin-disable-worker.php', 'label' => 'Admin Disable Worker', 'note' => 'Requires a specific worker. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
+            ['file' => 'admin-assign-walker.php', 'label' => 'Admin Assign Walker', 'note' => 'Assign worker to booking', 'href' => 'admin-assign-walker.php', 'type' => 'page'],
+            ['file' => 'admin-unassign-walker.php', 'label' => 'Admin Unassign Walker', 'note' => 'Requires a specific booking assignment context. Opens bookings first.', 'href' => 'admin-bookings.php', 'type' => 'context'],
         ],
     ],
     [
         'title' => 'Applications & Programs',
         'description' => 'Founder applications, group walks, and related program pages.',
         'items' => [
-            ['file' => 'admin-founder-applications.php', 'label' => 'Admin Founder Applications', 'note' => 'Founder application review'],
-            ['file' => 'admin-group-walk-applications.php', 'label' => 'Admin Group Walk Applications', 'note' => 'Group walk application queue'],
-            ['file' => 'ambassadors.php', 'label' => 'Ambassadors', 'note' => 'Ambassador-related page visible in your list'],
+            ['file' => 'admin-founder-applications.php', 'label' => 'Admin Founder Applications', 'note' => 'Founder application review', 'href' => 'admin-founder-applications.php', 'type' => 'page'],
+            ['file' => 'admin-group-walk-applications.php', 'label' => 'Admin Group Walk Applications', 'note' => 'Group walk application queue', 'href' => 'admin-group-walk-applications.php', 'type' => 'page'],
+            ['file' => 'ambassadors.php', 'label' => 'Ambassadors', 'note' => 'Ambassador-related page visible in your list', 'href' => 'ambassadors.php', 'type' => 'page'],
         ],
     ],
     [
         'title' => 'Internal / Utility Files',
-        'description' => 'These were visible in your screenshots too, but they are more utility/action files than normal landing pages.',
+        'description' => 'These are helper or action files, not normal landing pages.',
         'items' => [
-            ['file' => 'admin-auth.php', 'label' => 'Admin Auth', 'note' => 'Admin auth helper / guard', 'internal' => true],
-            ['file' => 'admin-config.php', 'label' => 'Admin Config', 'note' => 'Admin config / settings helper', 'internal' => true],
-            ['file' => 'api-create-booking.php', 'label' => 'API Create Booking', 'note' => 'API / action endpoint', 'internal' => true],
+            ['file' => 'admin-auth.php', 'label' => 'Admin Auth', 'note' => 'Admin auth helper / guard', 'href' => '', 'type' => 'internal'],
+            ['file' => 'admin-config.php', 'label' => 'Admin Config', 'note' => 'Admin config / settings helper', 'href' => '', 'type' => 'internal'],
+            ['file' => 'api-create-booking.php', 'label' => 'API Create Booking', 'note' => 'API / action endpoint', 'href' => '', 'type' => 'internal'],
         ],
     ],
 ];
 
 $totalLinks = 0;
 $internalLinks = 0;
+$contextLinks = 0;
 
 foreach ($sections as $section) {
     foreach ($section['items'] as $item) {
         $totalLinks++;
-        if (!empty($item['internal'])) {
+        if (($item['type'] ?? '') === 'internal') {
             $internalLinks++;
+        }
+        if (($item['type'] ?? '') === 'context') {
+            $contextLinks++;
         }
     }
 }
 
-$primaryLinks = $totalLinks - $internalLinks;
+$primaryLinks = $totalLinks - $internalLinks - $contextLinks;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -173,6 +124,7 @@ $primaryLinks = $totalLinks - $internalLinks;
             --gold-soft: #f4df9f;
             --green: #78dba8;
             --blue: #7ec0ff;
+            --amber: #f5c26b;
             --shadow: 0 24px 70px rgba(2, 8, 23, 0.42);
             --max: 1440px;
         }
@@ -373,7 +325,8 @@ $primaryLinks = $totalLinks - $internalLinks;
             gap: 14px;
         }
 
-        .link-card {
+        .link-card,
+        .link-card-static {
             display: grid;
             gap: 12px;
             background: var(--panel-soft);
@@ -389,13 +342,20 @@ $primaryLinks = $totalLinks - $internalLinks;
             background: rgba(255,255,255,0.055);
         }
 
-        .link-card.is-current {
+        .link-card.is-current,
+        .link-card-static.is-current {
             border-color: rgba(212, 175, 55, 0.42);
             background: rgba(212, 175, 55, 0.10);
         }
 
-        .link-card.is-internal {
+        .link-card-static.is-internal {
             border-style: dashed;
+            opacity: 0.95;
+        }
+
+        .link-card.is-context {
+            border-color: rgba(245, 194, 107, 0.24);
+            background: rgba(245, 194, 107, 0.07);
         }
 
         .link-top {
@@ -442,6 +402,18 @@ $primaryLinks = $totalLinks - $internalLinks;
             background: rgba(120, 219, 168, 0.12);
             color: #d8ffea;
             border-color: rgba(120, 219, 168, 0.22);
+        }
+
+        .pill.context {
+            background: rgba(245, 194, 107, 0.14);
+            color: #ffe8b7;
+            border-color: rgba(245, 194, 107, 0.24);
+        }
+
+        .pill.redirected {
+            background: rgba(255,255,255,0.10);
+            color: #eef4fb;
+            border-color: rgba(255,255,255,0.12);
         }
 
         .link-note {
@@ -500,7 +472,7 @@ $primaryLinks = $totalLinks - $internalLinks;
                 <div class="eyebrow">Doggie Dorian’s Admin</div>
                 <h1>Admin Navigation</h1>
                 <div class="subtext">
-                    Central link hub for the admin area. This page includes every admin-related file visible in your screenshots, with internal/action files separated from the main UI pages so the admin side stays organized.
+                    Central link hub for the admin area. ID-required booking, member, dog, and worker pages now route through their correct list pages first instead of opening directly without context.
                 </div>
             </div>
 
@@ -531,13 +503,13 @@ $primaryLinks = $totalLinks - $internalLinks;
                     <div class="stat-note">Regular admin destinations and working pages.</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-label">Internal / Action</div>
-                    <div class="stat-value"><?php echo (int) $internalLinks; ?></div>
-                    <div class="stat-note">Utility endpoints and helper files shown separately.</div>
+                    <div class="stat-label">Context Required</div>
+                    <div class="stat-value"><?php echo (int) $contextLinks; ?></div>
+                    <div class="stat-note">Pages that need a specific record first, now routed safely.</div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Current File</div>
-                    <div class="stat-value"><?php echo h($currentFile); ?></div>
+                    <div class="stat-value"><?php echo dd_admin_nav_h($currentFile); ?></div>
                     <div class="stat-note">This page highlights itself automatically.</div>
                 </div>
             </div>
@@ -560,8 +532,8 @@ $primaryLinks = $totalLinks - $internalLinks;
         <?php foreach ($sections as $section): ?>
             <section class="section admin-nav-section">
                 <div class="section-head">
-                    <h2 class="section-title"><?php echo h($section['title']); ?></h2>
-                    <div class="section-copy"><?php echo h($section['description']); ?></div>
+                    <h2 class="section-title"><?php echo dd_admin_nav_h($section['title']); ?></h2>
+                    <div class="section-copy"><?php echo dd_admin_nav_h($section['description']); ?></div>
                 </div>
 
                 <div class="link-grid">
@@ -570,38 +542,65 @@ $primaryLinks = $totalLinks - $internalLinks;
                         $file = (string) $item['file'];
                         $label = (string) $item['label'];
                         $note = (string) $item['note'];
-                        $isInternal = !empty($item['internal']);
+                        $href = (string) ($item['href'] ?? '');
+                        $type = (string) ($item['type'] ?? 'page');
                         $isCurrent = $file === $currentFile;
 
-                        $searchBlob = strtolower($file . ' ' . $label . ' ' . $note);
-                        $cardClass = 'link-card';
+                        $searchBlob = strtolower($file . ' ' . $label . ' ' . $note . ' ' . $href);
+
+                        $cardClass = $href !== '' ? 'link-card' : 'link-card-static';
                         if ($isCurrent) {
                             $cardClass .= ' is-current';
                         }
-                        if ($isInternal) {
+                        if ($type === 'internal') {
                             $cardClass .= ' is-internal';
                         }
+                        if ($type === 'context') {
+                            $cardClass .= ' is-context';
+                        }
                         ?>
-                        <a
-                            href="<?php echo h($file); ?>"
-                            class="<?php echo h($cardClass); ?>"
-                            data-search="<?php echo h($searchBlob); ?>"
-                        >
-                            <div class="link-top">
-                                <div class="link-title"><?php echo h($label); ?></div>
+                        <?php if ($href !== ''): ?>
+                            <a
+                                href="<?php echo dd_admin_nav_h($href); ?>"
+                                class="<?php echo dd_admin_nav_h($cardClass); ?>"
+                                data-search="<?php echo dd_admin_nav_h($searchBlob); ?>"
+                            >
+                                <div class="link-top">
+                                    <div class="link-title"><?php echo dd_admin_nav_h($label); ?></div>
 
-                                <?php if ($isCurrent): ?>
-                                    <span class="pill current">Current</span>
-                                <?php elseif ($isInternal): ?>
-                                    <span class="pill internal">Internal</span>
-                                <?php else: ?>
-                                    <span class="pill page">Page</span>
-                                <?php endif; ?>
+                                    <?php if ($isCurrent): ?>
+                                        <span class="pill current">Current</span>
+                                    <?php elseif ($type === 'context'): ?>
+                                        <span class="pill context">Context</span>
+                                    <?php elseif ($type === 'redirected'): ?>
+                                        <span class="pill redirected">Safe Route</span>
+                                    <?php else: ?>
+                                        <span class="pill page">Page</span>
+                                    <?php endif; ?>
+                                </div>
+
+                                <div class="link-note"><?php echo dd_admin_nav_h($note); ?></div>
+                                <div class="file-name"><?php echo dd_admin_nav_h($file); ?></div>
+                            </a>
+                        <?php else: ?>
+                            <div
+                                class="<?php echo dd_admin_nav_h($cardClass); ?>"
+                                data-search="<?php echo dd_admin_nav_h($searchBlob); ?>"
+                            >
+                                <div class="link-top">
+                                    <div class="link-title"><?php echo dd_admin_nav_h($label); ?></div>
+
+                                    <?php if ($isCurrent): ?>
+                                        <span class="pill current">Current</span>
+                                    <?php else: ?>
+                                        <span class="pill internal">Internal</span>
+                                    <?php endif; ?>
+                                </div>
+
+                                <div class="link-note"><?php echo dd_admin_nav_h($note); ?></div>
+                                <div class="file-name"><?php echo dd_admin_nav_h($file); ?></div>
                             </div>
-
-                            <div class="link-note"><?php echo h($note); ?></div>
-                            <div class="file-name"><?php echo h($file); ?></div>
-                        </a>
+                        <?php endif; ?>
                     <?php endforeach; ?>
                 </div>
             </section>
@@ -611,7 +610,7 @@ $primaryLinks = $totalLinks - $internalLinks;
     <script>
         (function () {
             const input = document.getElementById('adminNavSearch');
-            const cards = Array.from(document.querySelectorAll('.link-card'));
+            const cards = Array.from(document.querySelectorAll('.link-card, .link-card-static'));
             const sections = Array.from(document.querySelectorAll('.admin-nav-section'));
             const emptyState = document.getElementById('emptySearchState');
 
@@ -631,7 +630,7 @@ $primaryLinks = $totalLinks - $internalLinks;
                 });
 
                 sections.forEach((section) => {
-                    const sectionCards = Array.from(section.querySelectorAll('.link-card'));
+                    const sectionCards = Array.from(section.querySelectorAll('.link-card, .link-card-static'));
                     const anyVisible = sectionCards.some((card) => card.style.display !== 'none');
                     section.style.display = anyVisible ? '' : 'none';
                 });

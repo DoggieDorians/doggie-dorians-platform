@@ -8,9 +8,6 @@ require_once __DIR__ . '/includes/pricing.php';
 require_once __DIR__ . '/includes/stripe-config.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
-error_reporting(E_ALL);
-ini_set('display_errors', '0');
-
 if (!function_exists('redirectTo')) {
     function redirectTo(string $url, int $statusCode = 302): never
     {
@@ -1114,7 +1111,11 @@ if ($mode === 'non_member') {
             throw new Exception('Unsupported non-member service.');
         }
     } catch (Throwable $e) {
-        failPage($e->getMessage(), 400, 'non-member-booking.php');
+        failPage(
+            'We could not calculate that booking total right now. Please go back and try again.',
+            400,
+            'non-member-booking.php'
+        );
     }
 
     $amount = (float) ($pricing['total_price'] ?? 0);

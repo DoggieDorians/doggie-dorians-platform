@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/admin-auth.php';
 
 /**
  * Doggie Dorian's
@@ -17,66 +18,14 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
 }
 
 /* ==========================================================================
-   ACCESS CONTROL
+   HELPERS
    ========================================================================== */
 
-function redirect_to(string $url): never
+function ddAdminWorkerJobsRedirect(string $url): void
 {
     header('Location: ' . $url);
     exit;
 }
-
-function is_admin_session(): bool
-{
-    if (!empty($_SESSION['is_admin'])) {
-        return true;
-    }
-
-    if (!empty($_SESSION['admin_id'])) {
-        return true;
-    }
-
-    if (!empty($_SESSION['admin_logged_in'])) {
-        return true;
-    }
-
-    $roleCandidates = [
-        $_SESSION['role'] ?? null,
-        $_SESSION['user_role'] ?? null,
-        $_SESSION['account_role'] ?? null,
-        $_SESSION['account_type'] ?? null,
-    ];
-
-    foreach ($roleCandidates as $role) {
-        if (!is_string($role)) {
-            continue;
-        }
-
-        $normalized = strtolower(trim($role));
-        if (in_array($normalized, ['admin', 'superadmin', 'owner'], true)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-if (
-    empty($_SESSION['user_id']) &&
-    empty($_SESSION['admin_id']) &&
-    empty($_SESSION['is_admin']) &&
-    empty($_SESSION['admin_logged_in'])
-) {
-    redirect_to('admin-login.php');
-}
-
-if (!is_admin_session()) {
-    redirect_to('admin-dashboard.php');
-}
-
-/* ==========================================================================
-   HELPERS
-   ========================================================================== */
 
 function h(mixed $value): string
 {
@@ -193,25 +142,10 @@ function format_datetime_value(mixed $value): string
 
     $ts = strtotime($raw);
     if ($ts === false) {
-        return h($raw);
+        return $raw;
     }
 
     return date('M j, Y g:i A', $ts);
-}
-
-function format_date_value(mixed $value): string
-{
-    $raw = trim((string) $value);
-    if ($raw === '') {
-        return '—';
-    }
-
-    $ts = strtotime($raw);
-    if ($ts === false) {
-        return h($raw);
-    }
-
-    return date('M j, Y', $ts);
 }
 
 function booking_title(array $row): string
@@ -382,35 +316,45 @@ function load_worker_from_table(PDO $pdo, string $table, int $workerId): ?array
         return null;
     }
 
+    $sql = 'SELECT * FROM ' . qi($table) . ' WHERE ' . qi($idCol) . ' = :id LIMIT 1';
+    $row = safe_fetch_one($pdo, $sql, [':id' => $workerId]);
+
+    if (!$row) {
+        return null;
+    }
+
     if ($table === 'users') {
         $roleCol = first_existing_column($columns, ['role', 'user_role', 'account_role', 'account_type']);
-        $sql = 'SELECT * FROM ' . qi($table) . ' WHERE ' . qi($idCol) . ' = :id LIMIT 1';
-        $row = safe_fetch_one($pdo, $sql, [':id' => $workerId]);
-
-        if (!$row) {
-            return null;
-        }
-
         if ($roleCol !== null) {
             $role = strtolower(trim((string) ($row[$roleCol] ?? '')));
             if (!in_array($role, ['walker', 'worker', 'staff', 'employee'], true)) {
                 return null;
             }
         }
-
-        return $row;
     }
 
-    $sql = 'SELECT * FROM ' . qi($table) . ' WHERE ' . qi($idCol) . ' = :id LIMIT 1';
-    return safe_fetch_one($pdo, $sql, [':id' => $workerId]);
+    $row['_source_table'] = $table;
+    return $row;
 }
 
-function load_worker(PDO $pdo, int $workerId): ?array
+function load_worker(PDO $pdo, int $workerId, string $preferredSource = ''): ?array
 {
-    foreach (['workers', 'walkers', 'users'] as $table) {
+    $validSources = ['workers', 'walkers', 'users'];
+
+    if ($preferredSource !== '' && in_array($preferredSource, $validSources, true)) {
+        $preferred = load_worker_from_table($pdo, $preferredSource, $workerId);
+        if ($preferred) {
+            return $preferred;
+        }
+    }
+
+    foreach ($validSources as $table) {
+        if ($table === $preferredSource) {
+            continue;
+        }
+
         $row = load_worker_from_table($pdo, $table, $workerId);
         if ($row) {
-            $row['_source_table'] = $table;
             return $row;
         }
     }
@@ -482,7 +426,15 @@ function build_lookup(PDO $pdo, array $sourceTables, array $idCandidates, array 
 
 $workerId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 if ($workerId <= 0) {
-    exit('Invalid worker ID.');
+    $workerId = isset($_GET['worker_id']) ? (int) $_GET['worker_id'] : 0;
+}
+if ($workerId <= 0) {
+    ddAdminWorkerJobsRedirect('admin-walker-management.php');
+}
+
+$workerSource = strtolower(trim((string) ($_GET['source'] ?? '')));
+if (!in_array($workerSource, ['users', 'walkers', 'workers'], true)) {
+    $workerSource = '';
 }
 
 $filter = strtolower(trim((string) ($_GET['filter'] ?? 'all')));
@@ -495,16 +447,17 @@ if (!in_array($filter, $allowedFilters, true)) {
    WORKER LOAD
    ========================================================================== */
 
-$worker = load_worker($pdo, $workerId);
+$worker = load_worker($pdo, $workerId, $workerSource);
 
 if (!$worker) {
-    exit('Worker not found.');
+    ddAdminWorkerJobsRedirect('admin-walker-management.php');
 }
 
 $workerName = build_name($worker);
 $workerRole = (string) value_from_row($worker, ['role', 'user_role', 'account_role', 'account_type'], 'Worker');
 $workerEmail = (string) value_from_row($worker, ['email'], '—');
-$workerSource = (string) ($worker['_source_table'] ?? 'unknown');
+$resolvedWorkerSource = (string) ($worker['_source_table'] ?? $workerSource ?: 'unknown');
+$sourceParam = urlencode($resolvedWorkerSource);
 
 /* ==========================================================================
    LOOKUPS
@@ -917,8 +870,8 @@ foreach ($allJobs as $job) {
                 <a class="top-link" href="admin-nav.php">Admin Nav</a>
                 <a class="top-link" href="admin-bookings.php">Bookings</a>
                 <a class="top-link" href="admin-walker-management.php">Workers</a>
-                <a class="top-link" href="admin-worker-view.php?id=<?= $workerId ?>">Worker View</a>
-                <a class="top-link" href="admin-worker-jobs.php?id=<?= $workerId ?>">Worker Jobs</a>
+                <a class="top-link" href="admin-worker-view.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>">Worker View</a>
+                <a class="top-link" href="admin-worker-jobs.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>">Worker Jobs</a>
             </div>
         </div>
 
@@ -933,7 +886,7 @@ foreach ($allJobs as $job) {
                 <div class="pill">Worker ID: <?= h((string) $workerId) ?></div>
                 <div class="pill">Role: <?= h($workerRole !== '' ? ucwords(str_replace('_', ' ', strtolower($workerRole))) : '—') ?></div>
                 <div class="pill">Email: <?= h($workerEmail) ?></div>
-                <div class="pill">Source: <?= h($workerSource) ?></div>
+                <div class="pill">Source: <?= h($resolvedWorkerSource) ?></div>
             </div>
 
             <div class="stats">
@@ -958,10 +911,10 @@ foreach ($allJobs as $job) {
 
         <section class="panel">
             <div class="filters">
-                <a class="filter <?= $filter === 'all' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&filter=all">All</a>
-                <a class="filter <?= $filter === 'assigned' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&filter=assigned">Assigned</a>
-                <a class="filter <?= $filter === 'live' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&filter=live">Live</a>
-                <a class="filter <?= $filter === 'completed' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&filter=completed">Completed</a>
+                <a class="filter <?= $filter === 'all' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>&filter=all">All</a>
+                <a class="filter <?= $filter === 'assigned' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>&filter=assigned">Assigned</a>
+                <a class="filter <?= $filter === 'live' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>&filter=live">Live</a>
+                <a class="filter <?= $filter === 'completed' ? 'active' : '' ?>" href="admin-worker-jobs.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>&filter=completed">Completed</a>
             </div>
 
             <?php if ($filteredJobs === []): ?>
@@ -1009,8 +962,8 @@ foreach ($allJobs as $job) {
                             <div class="actions">
                                 <?php if ($jobId > 0): ?>
                                     <a class="action" href="admin-edit-booking.php?id=<?= $jobId ?>">Open Booking</a>
-                                    <a class="action" href="admin-bookings.php">Bookings</a>
                                 <?php endif; ?>
+                                <a class="action" href="admin-worker-view.php?id=<?= $workerId ?>&source=<?= $sourceParam ?>">Worker View</a>
                             </div>
                         </div>
                     <?php endforeach; ?>

@@ -5,13 +5,22 @@ declare(strict_types=1);
  * Doggie Dorian's
  * Secure Stripe configuration loader
  *
- * Loads Stripe secrets from a protected file inside /includes,
- * which is blocked from direct public access on this host.
+ * Loads Stripe secrets from a protected file stored alongside the live app,
+ * using a real filesystem path derived from this file's location.
  */
 
 function dd_private_stripe_env_path(): string
 {
-    return __DIR__ . '/stripe-env.php';
+    $override = getenv('DD_STRIPE_ENV_PATH');
+
+    if ($override !== false) {
+        $override = trim((string) $override);
+        if ($override !== '') {
+            return $override;
+        }
+    }
+
+    return dirname(__DIR__) . '/private/stripe-env.php';
 }
 
 function dd_fail_stripe_config(string $logMessage): never
@@ -199,11 +208,6 @@ function dd_stripe_public_base_url(): string
 {
     return dd_stripe_config()['public_base_url'];
 }
-
-/**
- * Backward-compatible wrappers for any older files
- * still calling the legacy helper names.
- */
 
 function stripe_secret_key(): string
 {

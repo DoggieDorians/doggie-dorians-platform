@@ -24,30 +24,84 @@ if (!class_exists(\PHPMailer\PHPMailer\PHPMailer::class)) {
     }
 }
 
+function dd_private_mailer_env_path(): string
+{
+    $override = getenv('DD_MAILER_ENV_PATH');
+
+    if ($override !== false) {
+        $override = trim((string) $override);
+        if ($override !== '') {
+            return $override;
+        }
+    }
+
+    return '/private/mailer-env.php';
+}
+
+function dd_load_private_mailer_env(): array
+{
+    static $config = null;
+
+    if ($config !== null) {
+        return $config;
+    }
+
+    $config = [];
+
+    $path = dd_private_mailer_env_path();
+
+    if (is_file($path)) {
+        $loaded = require $path;
+
+        if (is_array($loaded)) {
+            $config = $loaded;
+        } else {
+            error_log('Doggie Dorian\'s mailer config file did not return an array: ' . $path);
+        }
+    }
+
+    return $config;
+}
+
+function dd_mailer_env(string $key, mixed $default = null): mixed
+{
+    $envValue = getenv($key);
+
+    if ($envValue !== false) {
+        $envValue = trim((string) $envValue);
+        if ($envValue !== '') {
+            return $envValue;
+        }
+    }
+
+    $privateConfig = dd_load_private_mailer_env();
+
+    if (array_key_exists($key, $privateConfig)) {
+        $value = $privateConfig[$key];
+
+        if (is_string($value)) {
+            $value = trim($value);
+            if ($value === '') {
+                return $default;
+            }
+        }
+
+        return $value;
+    }
+
+    return $default;
+}
+
 $ddMailerConfig = array(
-    'host' => getenv('DD_SMTP_HOST') !== false ? (string) getenv('DD_SMTP_HOST') : 'smtp.ionos.com',
-    'username' => getenv('DD_SMTP_USERNAME') !== false ? (string) getenv('DD_SMTP_USERNAME') : 'admin@doggiedorians.com',
-    'password' => getenv('DD_SMTP_PASSWORD') !== false ? (string) getenv('DD_SMTP_PASSWORD') : 'Cmf8282!!!',
-    'port' => getenv('DD_SMTP_PORT') !== false ? (int) getenv('DD_SMTP_PORT') : 587,
-    'from_email' => getenv('DD_SMTP_FROM_EMAIL') !== false ? (string) getenv('DD_SMTP_FROM_EMAIL') : 'admin@doggiedorians.com',
-    'from_name' => getenv('DD_SMTP_FROM_NAME') !== false ? (string) getenv('DD_SMTP_FROM_NAME') : 'Doggie Dorian\'s',
-    'timeout' => 30,
+    'host' => (string) dd_mailer_env('DD_SMTP_HOST', 'smtp.ionos.com'),
+    'username' => (string) dd_mailer_env('DD_SMTP_USERNAME', ''),
+    'password' => (string) dd_mailer_env('DD_SMTP_PASSWORD', ''),
+    'port' => (int) dd_mailer_env('DD_SMTP_PORT', 587),
+    'from_email' => (string) dd_mailer_env('DD_SMTP_FROM_EMAIL', 'admin@doggiedorians.com'),
+    'from_name' => (string) dd_mailer_env('DD_SMTP_FROM_NAME', 'Doggie Dorian\'s'),
+    'timeout' => (int) dd_mailer_env('DD_SMTP_TIMEOUT', 30),
 );
 
-/**
- * Send an email through IONOS SMTP using Doggie Dorian's mail configuration.
- *
- * @param string $toEmail
- * @param string $toName
- * @param string $subject
- * @param string $htmlBody
- * @param string $textBody
- * @param array<int, array{path:string,name?:string}> $attachments
- * @param array<int, array{email:string,name?:string}> $cc
- * @param array<int, array{email:string,name?:string}> $bcc
- * @param array{email:string,name?:string}|null $replyTo
- * @return array{success:bool,error:?string}
- */
 function dd_send_email(
     string $toEmail,
     string $toName,
@@ -65,6 +119,20 @@ function dd_send_email(
         return [
             'success' => false,
             'error' => 'PHPMailer package is still missing on the server at /vendor/phpmailer/phpmailer/src/',
+        ];
+    }
+
+    if (
+        trim((string) $ddMailerConfig['host']) === ''
+        || trim((string) $ddMailerConfig['username']) === ''
+        || trim((string) $ddMailerConfig['password']) === ''
+        || trim((string) $ddMailerConfig['from_email']) === ''
+    ) {
+        error_log('Doggie Dorian\'s mailer configuration is incomplete.');
+
+        return [
+            'success' => false,
+            'error' => 'Email could not be sent right now.',
         ];
     }
 
