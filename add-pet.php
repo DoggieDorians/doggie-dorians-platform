@@ -10,6 +10,9 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
+$GLOBALS['dd_has_table_cache'] = array();
+$GLOBALS['dd_table_columns_cache'] = array();
+
 function h($value)
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
@@ -61,36 +64,37 @@ if (!isMemberLike()) {
 
 function hasTable(PDO $pdo, $table)
 {
-    static $cache = array();
-
-    if (isset($cache[$table])) {
-        return $cache[$table];
+    if (isset($GLOBALS['dd_has_table_cache'][$table])) {
+        return (bool) $GLOBALS['dd_has_table_cache'][$table];
     }
 
     try {
         $stmt = $pdo->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = :name LIMIT 1");
         $stmt->execute(array(':name' => $table));
-        $cache[$table] = (bool) $stmt->fetchColumn();
-        return $cache[$table];
+        $GLOBALS['dd_has_table_cache'][$table] = (bool) $stmt->fetchColumn();
+        return (bool) $GLOBALS['dd_has_table_cache'][$table];
     } catch (Throwable $e) {
-        $cache[$table] = false;
+        $GLOBALS['dd_has_table_cache'][$table] = false;
         return false;
     } catch (Exception $e) {
-        $cache[$table] = false;
+        $GLOBALS['dd_has_table_cache'][$table] = false;
         return false;
     }
 }
 
+function clearTableColumnCache($table)
+{
+    unset($GLOBALS['dd_table_columns_cache'][$table]);
+}
+
 function getTableColumns(PDO $pdo, $table)
 {
-    static $cache = array();
-
-    if (isset($cache[$table])) {
-        return $cache[$table];
+    if (isset($GLOBALS['dd_table_columns_cache'][$table])) {
+        return $GLOBALS['dd_table_columns_cache'][$table];
     }
 
     if (!hasTable($pdo, $table)) {
-        $cache[$table] = array();
+        $GLOBALS['dd_table_columns_cache'][$table] = array();
         return array();
     }
 
@@ -108,13 +112,13 @@ function getTableColumns(PDO $pdo, $table)
             }
         }
 
-        $cache[$table] = $columns;
+        $GLOBALS['dd_table_columns_cache'][$table] = $columns;
         return $columns;
     } catch (Throwable $e) {
-        $cache[$table] = array();
+        $GLOBALS['dd_table_columns_cache'][$table] = array();
         return array();
     } catch (Exception $e) {
-        $cache[$table] = array();
+        $GLOBALS['dd_table_columns_cache'][$table] = array();
         return array();
     }
 }
@@ -139,6 +143,34 @@ function safeExecute(PDOStatement $stmt, array $params = array())
     } catch (Exception $e) {
         return false;
     }
+}
+
+function quoteIdentifier($identifier)
+{
+    return '"' . str_replace('"', '""', (string) $identifier) . '"';
+}
+
+function ensureColumnExists(PDO $pdo, $table, $column, $definition)
+{
+    if (!hasTable($pdo, $table)) {
+        return false;
+    }
+
+    $columns = getTableColumns($pdo, $table);
+    if (in_array($column, $columns, true)) {
+        return true;
+    }
+
+    try {
+        $sql = 'ALTER TABLE ' . quoteIdentifier($table) . ' ADD COLUMN ' . quoteIdentifier($column) . ' ' . $definition;
+        $pdo->exec($sql);
+        clearTableColumnCache($table);
+    } catch (Throwable $e) {
+    } catch (Exception $e) {
+    }
+
+    $columns = getTableColumns($pdo, $table);
+    return in_array($column, $columns, true);
 }
 
 function countUnreadNotificationsForUser(PDO $pdo, $userId)
@@ -216,28 +248,34 @@ function petTableName(PDO $pdo)
 function ensurePetTable(PDO $pdo)
 {
     $table = petTableName($pdo);
+
+    if ($table === null) {
+        $sql = "CREATE TABLE IF NOT EXISTS pets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            breed TEXT DEFAULT '',
+            size TEXT DEFAULT '',
+            birthday TEXT DEFAULT '',
+            age TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT ''
+        )";
+
+        try {
+            $pdo->exec($sql);
+        } catch (Throwable $e) {
+        } catch (Exception $e) {
+        }
+
+        $table = hasTable($pdo, 'pets') ? 'pets' : null;
+    }
+
     if ($table !== null) {
-        return $table;
+        ensureColumnExists($pdo, $table, 'birthday', "TEXT DEFAULT ''");
     }
 
-    $sql = "CREATE TABLE IF NOT EXISTS pets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        breed TEXT DEFAULT '',
-        size TEXT DEFAULT '',
-        age TEXT DEFAULT '',
-        notes TEXT DEFAULT '',
-        created_at TEXT DEFAULT ''
-    )";
-
-    try {
-        $pdo->exec($sql);
-    } catch (Throwable $e) {
-    } catch (Exception $e) {
-    }
-
-    return hasTable($pdo, 'pets') ? 'pets' : null;
+    return $table;
 }
 
 function insertPetForUser(PDO $pdo, $userId, array $data)
@@ -277,10 +315,16 @@ function insertPetForUser(PDO $pdo, $userId, array $data)
         $nameCol => $data['name'],
     );
 
-    foreach (array('breed', 'size', 'age', 'notes') as $field) {
+    foreach (array('breed', 'size', 'notes') as $field) {
         if (in_array($field, $columns, true)) {
             $map[$field] = $data[$field];
         }
+    }
+
+    if (in_array('birthday', $columns, true)) {
+        $map['birthday'] = $data['birthday'];
+    } elseif (in_array('age', $columns, true)) {
+        $map['age'] = $data['birthday'];
     }
 
     if (in_array('care_notes', $columns, true)) {
@@ -322,7 +366,7 @@ $form = array(
     'name' => '',
     'breed' => '',
     'size' => '',
-    'age' => '',
+    'birthday' => '',
     'notes' => '',
 );
 
@@ -332,7 +376,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $form['name'] = trim((string) (isset($_POST['name']) ? $_POST['name'] : ''));
     $form['breed'] = trim((string) (isset($_POST['breed']) ? $_POST['breed'] : ''));
     $form['size'] = trim((string) (isset($_POST['size']) ? $_POST['size'] : ''));
-    $form['age'] = trim((string) (isset($_POST['age']) ? $_POST['age'] : ''));
+    $form['birthday'] = trim((string) (isset($_POST['birthday']) ? $_POST['birthday'] : ''));
     $form['notes'] = trim((string) (isset($_POST['notes']) ? $_POST['notes'] : ''));
 
     if ($form['name'] === '') {
@@ -683,8 +727,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
 
                     <div class="helper-box">
-                        <strong>Size and age</strong>
-                        Helps support better care visibility and pricing context.
+                        <strong>Size and birthday</strong>
+                        Helps support better care visibility and profile accuracy.
                     </div>
 
                     <div class="helper-box">
@@ -727,8 +771,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
 
                     <div>
-                        <label for="age">Age</label>
-                        <input type="text" id="age" name="age" value="<?php echo h($form['age']); ?>" placeholder="Example: 2 years">
+                        <label for="birthday">Dog’s Birthday</label>
+                        <input type="date" id="birthday" name="birthday" value="<?php echo h($form['birthday']); ?>">
                     </div>
                 </div>
 

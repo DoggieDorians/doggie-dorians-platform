@@ -213,6 +213,22 @@ function petTableName(PDO $pdo)
     return null;
 }
 
+function formatDisplayDate($value)
+{
+    $value = trim((string) $value);
+
+    if ($value === '') {
+        return '—';
+    }
+
+    $timestamp = strtotime($value);
+    if ($timestamp === false) {
+        return $value;
+    }
+
+    return date('M j, Y', $timestamp);
+}
+
 function fetchPetsForUser(PDO $pdo, $userId)
 {
     $table = petTableName($pdo);
@@ -230,8 +246,9 @@ function fetchPetsForUser(PDO $pdo, $userId)
 
     $breedCol = firstExistingColumn($pdo, $table, array('breed'));
     $sizeCol = firstExistingColumn($pdo, $table, array('size'));
+    $birthdayCol = firstExistingColumn($pdo, $table, array('birthday'));
     $ageCol = firstExistingColumn($pdo, $table, array('age'));
-    $notesCol = firstExistingColumn($pdo, $table, array('notes', 'care_notes', 'special_notes'));
+    $notesCol = firstExistingColumn($pdo, $table, array('notes', 'care_notes', 'special_notes', 'temperament', 'feeding_instructions', 'medication_notes'));
     $createdCol = firstExistingColumn($pdo, $table, array('created_at'));
 
     $select = array(
@@ -241,7 +258,8 @@ function fetchPetsForUser(PDO $pdo, $userId)
 
     $select[] = $breedCol !== null ? $breedCol . ' AS breed' : "'' AS breed";
     $select[] = $sizeCol !== null ? $sizeCol . ' AS size' : "'' AS size";
-    $select[] = $ageCol !== null ? $ageCol . ' AS age' : "'' AS age";
+    $select[] = $birthdayCol !== null ? $birthdayCol . ' AS birthday' : "'' AS birthday";
+    $select[] = $ageCol !== null ? $ageCol . ' AS legacy_age' : "'' AS legacy_age";
     $select[] = $notesCol !== null ? $notesCol . ' AS notes' : "'' AS notes";
     $select[] = $createdCol !== null ? $createdCol . ' AS created_at' : "'' AS created_at";
 
@@ -253,7 +271,27 @@ function fetchPetsForUser(PDO $pdo, $userId)
     }
 
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    return is_array($rows) ? $rows : array();
+    if (!is_array($rows)) {
+        return array();
+    }
+
+    foreach ($rows as &$row) {
+        $birthday = isset($row['birthday']) ? trim((string) $row['birthday']) : '';
+        $legacyAge = isset($row['legacy_age']) ? trim((string) $row['legacy_age']) : '';
+
+        if ($birthday !== '') {
+            $row['birthday_display'] = formatDisplayDate($birthday);
+        } elseif ($legacyAge !== '') {
+            $row['birthday_display'] = $legacyAge;
+        } else {
+            $row['birthday_display'] = '—';
+        }
+
+        $row['created_at_display'] = isset($row['created_at']) ? formatDisplayDate($row['created_at']) : '—';
+    }
+    unset($row);
+
+    return $rows;
 }
 
 function deletePetForUser(PDO $pdo, $userId, $petId)
@@ -687,13 +725,13 @@ $petCount = count($pets);
                             </div>
 
                             <div class="meta-box">
-                                <div class="meta-label">Age</div>
-                                <div class="meta-value"><?php echo h((isset($pet['age']) && trim((string) $pet['age']) !== '') ? $pet['age'] : '—'); ?></div>
+                                <div class="meta-label">Dog’s Birthday</div>
+                                <div class="meta-value"><?php echo h((isset($pet['birthday_display']) && trim((string) $pet['birthday_display']) !== '') ? $pet['birthday_display'] : '—'); ?></div>
                             </div>
 
                             <div class="meta-box">
                                 <div class="meta-label">Added</div>
-                                <div class="meta-value"><?php echo h((isset($pet['created_at']) && trim((string) $pet['created_at']) !== '') ? $pet['created_at'] : '—'); ?></div>
+                                <div class="meta-value"><?php echo h((isset($pet['created_at_display']) && trim((string) $pet['created_at_display']) !== '') ? $pet['created_at_display'] : '—'); ?></div>
                             </div>
                         </div>
 

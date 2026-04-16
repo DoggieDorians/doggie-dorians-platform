@@ -36,7 +36,8 @@ function getTableColumns(PDO $pdo, string $tableName): array
         return [];
     }
 
-    $stmt = $pdo->query("PRAGMA table_info(" . $tableName . ")");
+    $safeTable = str_replace('"', '""', $tableName);
+    $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
     $columns = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
     $names = [];
 
@@ -60,6 +61,22 @@ function firstExistingColumn(array $columns, array $choices): ?string
     return null;
 }
 
+function quoteIdentifier(string $identifier): string
+{
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
+function petTableName(PDO $pdo): ?string
+{
+    foreach (['pets', 'dogs'] as $candidate) {
+        if (tableExists($pdo, $candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
 $userId = (int) $_SESSION['user_id'];
 $petId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 
@@ -69,7 +86,6 @@ if ($petId <= 0) {
 }
 
 $error = '';
-$success = '';
 
 try {
     if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -79,61 +95,52 @@ try {
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
-    if (!tableExists($pdo, 'dogs')) {
+    $petTable = petTableName($pdo);
+    if ($petTable === null) {
         throw new RuntimeException('Pets table not found.');
     }
 
-    $columns = getTableColumns($pdo, 'dogs');
+    $columns = getTableColumns($pdo, $petTable);
 
-    $ownerColumn = null;
-    if (in_array('user_id', $columns, true)) {
-        $ownerColumn = 'user_id';
-    } elseif (in_array('member_id', $columns, true)) {
-        $ownerColumn = 'member_id';
+    $idColumn = firstExistingColumn($columns, ['id', 'pet_id', 'dog_id']);
+    if ($idColumn === null) {
+        throw new RuntimeException('Pet ID column not found.');
     }
 
+    $ownerColumn = firstExistingColumn($columns, ['user_id', 'member_id', 'owner_id', 'client_id']);
     if ($ownerColumn === null) {
         throw new RuntimeException('Pet owner column not found.');
     }
 
-    $nameColumn = firstExistingColumn($columns, ['dog_name', 'name']);
+    $nameColumn = firstExistingColumn($columns, ['pet_name', 'dog_name', 'name']);
     if ($nameColumn === null) {
-        throw new RuntimeException('Dog name column not found.');
+        throw new RuntimeException('Pet name column not found.');
     }
 
     $breedColumn = firstExistingColumn($columns, ['breed']);
     $sizeColumn = firstExistingColumn($columns, ['size']);
-    $notesColumn = firstExistingColumn($columns, ['notes']);
+    $birthdayColumn = firstExistingColumn($columns, ['birthday']);
+    $ageColumn = firstExistingColumn($columns, ['age']);
+    $notesColumn = firstExistingColumn($columns, ['notes', 'care_notes', 'special_notes', 'temperament', 'feeding_instructions', 'medication_notes']);
+    $updatedAtColumn = firstExistingColumn($columns, ['updated_at']);
 
     $selectFields = [
-        "id",
-        "{$ownerColumn} AS owner_id",
-        "{$nameColumn} AS pet_name",
+        quoteIdentifier($idColumn) . ' AS internal_id',
+        quoteIdentifier($ownerColumn) . ' AS owner_id',
+        quoteIdentifier($nameColumn) . ' AS pet_name',
     ];
 
-    if ($breedColumn !== null) {
-        $selectFields[] = "{$breedColumn} AS breed";
-    } else {
-        $selectFields[] = "NULL AS breed";
-    }
-
-    if ($sizeColumn !== null) {
-        $selectFields[] = "{$sizeColumn} AS size";
-    } else {
-        $selectFields[] = "NULL AS size";
-    }
-
-    if ($notesColumn !== null) {
-        $selectFields[] = "{$notesColumn} AS notes";
-    } else {
-        $selectFields[] = "NULL AS notes";
-    }
+    $selectFields[] = $breedColumn !== null ? quoteIdentifier($breedColumn) . ' AS breed' : "NULL AS breed";
+    $selectFields[] = $sizeColumn !== null ? quoteIdentifier($sizeColumn) . ' AS size' : "NULL AS size";
+    $selectFields[] = $birthdayColumn !== null ? quoteIdentifier($birthdayColumn) . ' AS birthday' : "NULL AS birthday";
+    $selectFields[] = $ageColumn !== null ? quoteIdentifier($ageColumn) . ' AS legacy_age' : "NULL AS legacy_age";
+    $selectFields[] = $notesColumn !== null ? quoteIdentifier($notesColumn) . ' AS notes' : "NULL AS notes";
 
     $loadStmt = $pdo->prepare("
         SELECT " . implode(', ', $selectFields) . "
-        FROM dogs
-        WHERE id = :id
-          AND {$ownerColumn} = :owner_id
+        FROM " . quoteIdentifier($petTable) . "
+        WHERE " . quoteIdentifier($idColumn) . " = :id
+          AND " . quoteIdentifier($ownerColumn) . " = :owner_id
         LIMIT 1
     ");
     $loadStmt->execute([
@@ -151,20 +158,29 @@ try {
     $name = trim((string) ($pet['pet_name'] ?? ''));
     $breed = trim((string) ($pet['breed'] ?? ''));
     $size = trim((string) ($pet['size'] ?? ''));
+    $birthday = trim((string) ($pet['birthday'] ?? ''));
+    $legacyAge = trim((string) ($pet['legacy_age'] ?? ''));
     $notes = trim((string) ($pet['notes'] ?? ''));
+
+    if ($birthday === '' && $legacyAge !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $legacyAge)) {
+        $birthday = $legacyAge;
+    }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = trim((string) ($_POST['name'] ?? ''));
         $breed = trim((string) ($_POST['breed'] ?? ''));
         $size = trim((string) ($_POST['size'] ?? ''));
+        $birthday = trim((string) ($_POST['birthday'] ?? ''));
         $notes = trim((string) ($_POST['notes'] ?? ''));
 
-        $allowedSizes = ['', 'Small', 'Medium', 'Large'];
+        $allowedSizes = ['', 'small', 'medium', 'large', 'Small', 'Medium', 'Large'];
 
         if ($name === '') {
             $error = 'Dog name is required.';
         } elseif (!in_array($size, $allowedSizes, true)) {
             $error = 'Please choose a valid size.';
+        } elseif ($birthday !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $birthday)) {
+            $error = 'Please enter a valid birthday.';
         } else {
             $updateParts = [];
             $params = [
@@ -173,28 +189,41 @@ try {
                 ':name' => $name,
             ];
 
-            $updateParts[] = "{$nameColumn} = :name";
+            $updateParts[] = quoteIdentifier($nameColumn) . ' = :name';
 
             if ($breedColumn !== null) {
-                $updateParts[] = "{$breedColumn} = :breed";
+                $updateParts[] = quoteIdentifier($breedColumn) . ' = :breed';
                 $params[':breed'] = ($breed !== '') ? $breed : null;
             }
 
             if ($sizeColumn !== null) {
-                $updateParts[] = "{$sizeColumn} = :size";
+                $updateParts[] = quoteIdentifier($sizeColumn) . ' = :size';
                 $params[':size'] = ($size !== '') ? $size : null;
             }
 
+            if ($birthdayColumn !== null) {
+                $updateParts[] = quoteIdentifier($birthdayColumn) . ' = :birthday';
+                $params[':birthday'] = ($birthday !== '') ? $birthday : null;
+            } elseif ($ageColumn !== null) {
+                $updateParts[] = quoteIdentifier($ageColumn) . ' = :birthday';
+                $params[':birthday'] = ($birthday !== '') ? $birthday : null;
+            }
+
             if ($notesColumn !== null) {
-                $updateParts[] = "{$notesColumn} = :notes";
+                $updateParts[] = quoteIdentifier($notesColumn) . ' = :notes';
                 $params[':notes'] = ($notes !== '') ? $notes : null;
             }
 
+            if ($updatedAtColumn !== null) {
+                $updateParts[] = quoteIdentifier($updatedAtColumn) . ' = :updated_at';
+                $params[':updated_at'] = date('Y-m-d H:i:s');
+            }
+
             $updateStmt = $pdo->prepare("
-                UPDATE dogs
+                UPDATE " . quoteIdentifier($petTable) . "
                 SET " . implode(', ', $updateParts) . "
-                WHERE id = :id
-                  AND {$ownerColumn} = :owner_id
+                WHERE " . quoteIdentifier($idColumn) . " = :id
+                  AND " . quoteIdentifier($ownerColumn) . " = :owner_id
             ");
             $updateStmt->execute($params);
 
@@ -207,6 +236,7 @@ try {
     $name = $name ?? '';
     $breed = $breed ?? '';
     $size = $size ?? '';
+    $birthday = $birthday ?? '';
     $notes = $notes ?? '';
 }
 ?>
@@ -329,6 +359,7 @@ try {
         }
 
         input[type="text"],
+        input[type="date"],
         select,
         textarea {
             width: 100%;
@@ -344,6 +375,7 @@ try {
         }
 
         input[type="text"]:focus,
+        input[type="date"]:focus,
         select:focus,
         textarea:focus {
             border-color: rgba(214,179,106,0.6);
@@ -461,10 +493,20 @@ try {
                         <label for="size">Size</label>
                         <select id="size" name="size">
                             <option value="" <?php echo $size === '' ? 'selected' : ''; ?>>Select Size</option>
-                            <option value="Small" <?php echo $size === 'Small' ? 'selected' : ''; ?>>Small</option>
-                            <option value="Medium" <?php echo $size === 'Medium' ? 'selected' : ''; ?>>Medium</option>
-                            <option value="Large" <?php echo $size === 'Large' ? 'selected' : ''; ?>>Large</option>
+                            <option value="small" <?php echo $size === 'small' || $size === 'Small' ? 'selected' : ''; ?>>Small</option>
+                            <option value="medium" <?php echo $size === 'medium' || $size === 'Medium' ? 'selected' : ''; ?>>Medium</option>
+                            <option value="large" <?php echo $size === 'large' || $size === 'Large' ? 'selected' : ''; ?>>Large</option>
                         </select>
+                    </div>
+
+                    <div class="field">
+                        <label for="birthday">Dog’s Birthday</label>
+                        <input
+                            type="date"
+                            id="birthday"
+                            name="birthday"
+                            value="<?php echo h($birthday); ?>"
+                        >
                     </div>
 
                     <div class="field">
