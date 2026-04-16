@@ -1191,6 +1191,7 @@ try {
         'mode' => 'payment',
         'success_url' => $successUrl,
         'cancel_url' => $cancelUrl,
+        'payment_method_types' => array('card'),
         'metadata' => $metadata,
         'payment_intent_data' => [
             'metadata' => $metadata,
