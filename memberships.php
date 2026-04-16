@@ -646,17 +646,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ? trim((string) $_SESSION['email'])
                             : '';
 
-                        $metadata = array(
-                            'ledger_action' => 'membership_signup',
-                            'member_id' => (string) $currentMemberId,
-                            'plan_id' => (string) $planId,
-                            'plan_slug' => $plan['slug'],
-                            'plan_name' => $plan['name'],
-                            'tos_version' => $tosVersion,
-                        );
-
                         $checkoutParams = array(
                             'mode' => 'subscription',
+                            'payment_method_types' => array('card'),
                             'line_items' => array(
                                 array(
                                     'price' => $stripePriceId,
@@ -665,9 +657,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ),
                             'success_url' => $baseUrl . '/dashboard.php?membership_checkout=success',
                             'cancel_url' => $baseUrl . '/memberships.php?plan=' . rawurlencode($plan['slug']) . '&membership_checkout=cancelled#selection',
-                            'metadata' => $metadata,
+                            'metadata' => array(
+                                'ledger_action' => 'membership_signup',
+                                'member_id' => (string) $currentMemberId,
+                                'plan_id' => (string) $planId,
+                                'plan_slug' => $plan['slug'],
+                                'plan_name' => $plan['name'],
+                                'tos_version' => $tosVersion,
+                            ),
                             'subscription_data' => array(
-                                'metadata' => $metadata,
+                                'metadata' => array(
+                                    'ledger_action' => 'membership_signup',
+                                    'member_id' => (string) $currentMemberId,
+                                    'plan_id' => (string) $planId,
+                                    'plan_slug' => $plan['slug'],
+                                    'plan_name' => $plan['name'],
+                                    'tos_version' => $tosVersion,
+                                ),
                             ),
                             'client_reference_id' => (string) $currentMemberId,
                             'allow_promotion_codes' => false,
