@@ -1019,7 +1019,7 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 16px;
+            gap: 12px;
             flex-wrap: wrap;
             margin-bottom: 22px;
         }
@@ -1032,16 +1032,18 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
 
         .top-links {
             display: flex;
-            gap: 12px;
+            gap: 8px;
             flex-wrap: wrap;
         }
 
         .top-link {
-            padding: 10px 14px;
+            padding: 8px 10px;
             border-radius: 999px;
             background: rgba(255,255,255,0.06);
             border: 1px solid rgba(255,255,255,0.08);
             font-weight: 700;
+            font-size: 0.82rem;
+            line-height: 1.1;
         }
 
         .hero {
@@ -1388,6 +1390,8 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                 <a class="top-link" href="my-bookings.php">My Bookings</a>
                 <a class="top-link" href="live-tracking.php">Live Tracking</a>
                 <a class="top-link" href="memberships.php">Memberships</a>
+                <a class="top-link" href="member-care-library.php">Care Library</a>
+                <a class="top-link" href="member-care-article.php">Featured Guide</a>
                 <a class="top-link" href="notifications.php">Notifications<?php echo $unreadNotifications > 0 ? ' (' . (int) $unreadNotifications . ')' : ''; ?></a>
                 <a class="top-link" href="profile.php">Profile</a>
                 <a class="top-link" href="logout.php">Logout</a>
