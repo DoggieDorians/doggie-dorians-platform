@@ -95,3 +95,6 @@ stripe-env.php
 mailer-env.php
 stripe-env.php
 .vscode/sftp.json
+
+# Local SFTP helper scripts
+*.sftp
