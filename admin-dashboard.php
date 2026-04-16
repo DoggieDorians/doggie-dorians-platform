@@ -283,20 +283,7 @@ function ddAdminDashboardCountTable(PDO $pdo, string $table): int
 
 function ddAdminDashboardFetchMemberCount(PDO $pdo): int
 {
-    foreach (array('members', 'users') as $table) {
-        if (!ddAdminDashboardTableExists($pdo, $table)) {
-            continue;
-        }
-
-        $row = ddAdminDashboardSafeFetchOne(
-            $pdo,
-            'SELECT COUNT(*) AS count_value FROM ' . ddAdminDashboardQuoteIdentifier($table)
-        );
-
-        return (int) ddAdminDashboardValueFromRow($row, array('count_value'), 0);
-    }
-
-    return 0;
+    return count(ddAdminDashboardFetchMemberOptions($pdo));
 }
 
 function ddAdminDashboardCountUnreadNotifications(PDO $pdo): int
@@ -529,58 +516,755 @@ function ddAdminDashboardPlanCatalog(): array
     );
 }
 
-function ddAdminDashboardFetchMemberOptions(PDO $pdo): array
+function ddAdminDashboardMembershipOwnerColumn(PDO $pdo): ?string
 {
-    foreach (array('members', 'users') as $table) {
-        if (!ddAdminDashboardTableExists($pdo, $table)) {
-            continue;
-        }
-
-        $idCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('id', 'member_id', 'user_id'));
-        if ($idCol === null) {
-            continue;
-        }
-
-        $nameCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('full_name', 'name', 'client_name', 'first_name'));
-        $lastNameCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('last_name'));
-        $emailCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('email'));
-
-        $rows = ddAdminDashboardSafeFetchAll(
-            $pdo,
-            'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier($table)
-            . ' ORDER BY ' . ddAdminDashboardQuoteIdentifier($idCol) . ' DESC'
-        );
-
-        $options = array();
-        foreach ($rows as $row) {
-            $name = '';
-            if ($nameCol !== null) {
-                $name = trim((string) ($row[$nameCol] ?? ''));
-            }
-
-            if ($name !== '' && $lastNameCol !== null && !empty($row[$lastNameCol]) && stripos($name, (string) $row[$lastNameCol]) === false) {
-                $name .= ' ' . trim((string) $row[$lastNameCol]);
-            }
-
-            if ($name === '' && isset($row['first_name'])) {
-                $name = trim((string) $row['first_name'] . ' ' . (string) ($row['last_name'] ?? ''));
-            }
-
-            if ($name === '') {
-                $name = 'Member #' . (int) $row[$idCol];
-            }
-
-            $options[] = array(
-                'member_id' => (int) $row[$idCol],
-                'member_name' => $name,
-                'email' => $emailCol !== null ? trim((string) ($row[$emailCol] ?? '')) : '',
-            );
-        }
-
-        return $options;
+    if (!ddAdminDashboardHasTable($pdo, 'member_memberships')) {
+        return null;
     }
 
-    return array();
+    $columns = ddAdminDashboardGetTableColumns($pdo, 'member_memberships');
+    if (in_array('user_id', $columns, true)) {
+        return 'user_id';
+    }
+
+    if (in_array('member_id', $columns, true)) {
+        return 'member_id';
+    }
+
+    return null;
+}
+
+function ddAdminDashboardUserRoleValue(?array $row): string
+{
+    if ($row === null) {
+        return '';
+    }
+
+    foreach (array('role', 'user_role', 'account_type', 'user_type', 'access_role') as $key) {
+        if (!isset($row[$key])) {
+            continue;
+        }
+
+        $value = strtolower(trim((string) $row[$key]));
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return '';
+}
+
+function ddAdminDashboardIsMemberLikeRow(?array $row): bool
+{
+    $role = ddAdminDashboardUserRoleValue($row);
+    if ($role === '') {
+        return true;
+    }
+
+    return !in_array($role, array('admin', 'walker', 'staff', 'employee'), true);
+}
+
+function ddAdminDashboardBuildPersonName(?array $row, ?string $nameCol, ?string $lastNameCol, string $fallbackPrefix, int $fallbackId): string
+{
+    if ($row !== null) {
+        $name = '';
+
+        if ($nameCol !== null) {
+            $name = trim((string) ($row[$nameCol] ?? ''));
+        }
+
+        if ($name === '' && isset($row['first_name'])) {
+            $name = trim((string) $row['first_name'] . ' ' . (string) ($row['last_name'] ?? ''));
+        }
+
+        if ($name !== '' && $lastNameCol !== null && !empty($row[$lastNameCol]) && stripos($name, (string) $row[$lastNameCol]) === false) {
+            $name .= ' ' . trim((string) $row[$lastNameCol]);
+        }
+
+        if ($name !== '') {
+            return $name;
+        }
+    }
+
+    return $fallbackPrefix . ' #' . $fallbackId;
+}
+
+function ddAdminDashboardFindMemberRowByUserId(PDO $pdo, int $userId): ?array
+{
+    if ($userId <= 0 || !ddAdminDashboardHasTable($pdo, 'members')) {
+        return null;
+    }
+
+    $userCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('user_id'));
+    if ($userCol !== null) {
+        $row = ddAdminDashboardSafeFetchOne(
+            $pdo,
+            'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+            . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userCol) . ' = :user_id LIMIT 1',
+            array(':user_id' => $userId)
+        );
+
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    if (!ddAdminDashboardHasTable($pdo, 'users')) {
+        return null;
+    }
+
+    $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+    if ($userIdCol === null) {
+        return null;
+    }
+
+    $userRow = ddAdminDashboardSafeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+        . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userIdCol) . ' = :user_id LIMIT 1',
+        array(':user_id' => $userId)
+    );
+
+    if ($userRow === null) {
+        return null;
+    }
+
+    return ddAdminDashboardFindMemberRowForUserRow($pdo, $userRow);
+}
+
+function ddAdminDashboardFindMemberRowByEmail(PDO $pdo, string $email): ?array
+{
+    $email = strtolower(trim($email));
+    if ($email === '' || !ddAdminDashboardHasTable($pdo, 'members')) {
+        return null;
+    }
+
+    $emailCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('email', 'member_email', 'user_email', 'client_email'));
+    if ($emailCol === null) {
+        return null;
+    }
+
+    return ddAdminDashboardSafeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+        . ' WHERE LOWER(TRIM(COALESCE(' . ddAdminDashboardQuoteIdentifier($emailCol) . ", ''))) = :email LIMIT 1",
+        array(':email' => $email)
+    );
+}
+
+function ddAdminDashboardFindUserRowByEmail(PDO $pdo, string $email): ?array
+{
+    $email = strtolower(trim($email));
+    if ($email === '' || !ddAdminDashboardHasTable($pdo, 'users')) {
+        return null;
+    }
+
+    $emailCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('email', 'user_email', 'member_email', 'client_email'));
+    if ($emailCol === null) {
+        return null;
+    }
+
+    return ddAdminDashboardSafeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+        . ' WHERE LOWER(TRIM(COALESCE(' . ddAdminDashboardQuoteIdentifier($emailCol) . ", ''))) = :email LIMIT 1",
+        array(':email' => $email)
+    );
+}
+
+function ddAdminDashboardRowDisplayName(?array $row): string
+{
+    if ($row === null) {
+        return '';
+    }
+
+    foreach (array('full_name', 'name', 'client_name', 'member_name', 'username') as $key) {
+        $value = trim((string) ($row[$key] ?? ''));
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    $first = trim((string) ($row['first_name'] ?? ''));
+    $last = trim((string) ($row['last_name'] ?? ''));
+    $combined = trim($first . ' ' . $last);
+
+    return $combined;
+}
+
+function ddAdminDashboardFindMemberRowForUserRow(PDO $pdo, array $userRow): ?array
+{
+    if (!ddAdminDashboardHasTable($pdo, 'members')) {
+        return null;
+    }
+
+    $userId = (int) ($userRow['id'] ?? $userRow['user_id'] ?? 0);
+    if ($userId > 0) {
+        $userCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('user_id'));
+        if ($userCol !== null) {
+            $row = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+                . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userCol) . ' = :user_id LIMIT 1',
+                array(':user_id' => $userId)
+            );
+
+            if ($row !== null) {
+                return $row;
+            }
+        }
+    }
+
+    $email = strtolower(trim((string) ($userRow['email'] ?? $userRow['user_email'] ?? $userRow['member_email'] ?? '')));
+    if ($email !== '') {
+        $row = ddAdminDashboardFindMemberRowByEmail($pdo, $email);
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    $displayName = strtolower(trim(ddAdminDashboardRowDisplayName($userRow)));
+    if ($displayName !== '') {
+        $nameCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('full_name', 'name', 'client_name', 'member_name', 'username'));
+        if ($nameCol !== null) {
+            $row = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+                . ' WHERE LOWER(TRIM(COALESCE(' . ddAdminDashboardQuoteIdentifier($nameCol) . ", ''))) = :name LIMIT 1",
+                array(':name' => $displayName)
+            );
+
+            if ($row !== null) {
+                return $row;
+            }
+        }
+    }
+
+    return null;
+}
+
+function ddAdminDashboardAttachUserIdToMemberIfPossible(PDO $pdo, int $memberId, int $userId): void
+{
+    if ($memberId <= 0 || $userId <= 0 || !ddAdminDashboardHasTable($pdo, 'members')) {
+        return;
+    }
+
+    $memberIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+    $userCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('user_id'));
+    if ($memberIdCol === null || $userCol === null) {
+        return;
+    }
+
+    $stmt = $pdo->prepare(
+        'UPDATE ' . ddAdminDashboardQuoteIdentifier('members')
+        . ' SET ' . ddAdminDashboardQuoteIdentifier($userCol) . ' = :user_id'
+        . ' WHERE ' . ddAdminDashboardQuoteIdentifier($memberIdCol) . ' = :member_id'
+        . ' AND COALESCE(' . ddAdminDashboardQuoteIdentifier($userCol) . ', 0) <= 0'
+    );
+
+    ddAdminDashboardSafeExecute($stmt, array(
+        ':user_id' => $userId,
+        ':member_id' => $memberId,
+    ));
+}
+
+function ddAdminDashboardFindUserRowByMemberId(PDO $pdo, int $memberId): ?array
+{
+    if ($memberId <= 0 || !ddAdminDashboardHasTable($pdo, 'members') || !ddAdminDashboardHasTable($pdo, 'users')) {
+        return null;
+    }
+
+    $memberIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+    if ($memberIdCol === null) {
+        return null;
+    }
+
+    $memberRow = ddAdminDashboardSafeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+        . ' WHERE ' . ddAdminDashboardQuoteIdentifier($memberIdCol) . ' = :member_id LIMIT 1',
+        array(':member_id' => $memberId)
+    );
+
+    if ($memberRow === null) {
+        return null;
+    }
+
+    $userCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('user_id'));
+    $userId = $userCol !== null ? (int) ($memberRow[$userCol] ?? 0) : 0;
+    if ($userId > 0) {
+        $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+        if ($userIdCol !== null) {
+            $userRow = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+                . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userIdCol) . ' = :user_id LIMIT 1',
+                array(':user_id' => $userId)
+            );
+
+            if ($userRow !== null) {
+                return $userRow;
+            }
+        }
+    }
+
+    $email = trim((string) ($memberRow['email'] ?? $memberRow['member_email'] ?? $memberRow['user_email'] ?? ''));
+    if ($email !== '') {
+        return ddAdminDashboardFindUserRowByEmail($pdo, $email);
+    }
+
+    return null;
+}
+
+function ddAdminDashboardEnsureMembersTable(PDO $pdo): bool
+{
+    if (ddAdminDashboardHasTable($pdo, 'members')) {
+        return true;
+    }
+
+    try {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS ' . ddAdminDashboardQuoteIdentifier('members') . ' ('
+            . ddAdminDashboardQuoteIdentifier('id') . ' INTEGER PRIMARY KEY AUTOINCREMENT, '
+            . ddAdminDashboardQuoteIdentifier('user_id') . ' INTEGER, '
+            . ddAdminDashboardQuoteIdentifier('full_name') . ' TEXT, '
+            . ddAdminDashboardQuoteIdentifier('email') . ' TEXT, '
+            . ddAdminDashboardQuoteIdentifier('created_at') . ' TEXT, '
+            . ddAdminDashboardQuoteIdentifier('updated_at') . ' TEXT'
+            . ')'
+        );
+    } catch (Throwable $e) {
+        return ddAdminDashboardHasTable($pdo, 'members');
+    }
+
+    return ddAdminDashboardHasTable($pdo, 'members');
+}
+
+function ddAdminDashboardGetTableInfo(PDO $pdo, string $table): array
+{
+    if (!ddAdminDashboardTableExists($pdo, $table)) {
+        return array();
+    }
+
+    try {
+        $sql = 'PRAGMA table_info(' . ddAdminDashboardQuoteIdentifier($table) . ')';
+        $rows = $pdo->query($sql);
+        if (!($rows instanceof PDOStatement)) {
+            return array();
+        }
+
+        $info = $rows->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($info) ? $info : array();
+    } catch (Throwable $e) {
+        return array();
+    }
+}
+
+function ddAdminDashboardEnsureMemberRowForUser(PDO $pdo, int $userId): int
+{
+    if ($userId <= 0) {
+        return 0;
+    }
+
+    if (!ddAdminDashboardEnsureMembersTable($pdo) || !ddAdminDashboardHasTable($pdo, 'users')) {
+        return 0;
+    }
+
+    $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+    if ($userIdCol === null) {
+        return 0;
+    }
+
+    $userRow = ddAdminDashboardSafeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+        . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userIdCol) . ' = :user_id LIMIT 1',
+        array(':user_id' => $userId)
+    );
+
+    if ($userRow === null) {
+        return 0;
+    }
+
+    $existing = ddAdminDashboardFindMemberRowForUserRow($pdo, $userRow);
+    if ($existing !== null) {
+        $memberId = (int) ddAdminDashboardValueFromRow($existing, array('id', 'member_id'), 0);
+        if ($memberId > 0) {
+            ddAdminDashboardAttachUserIdToMemberIfPossible($pdo, $memberId, $userId);
+            return $memberId;
+        }
+    }
+
+    $memberColumns = ddAdminDashboardGetTableColumns($pdo, 'members');
+    $memberInfo = ddAdminDashboardGetTableInfo($pdo, 'members');
+    if (empty($memberColumns) || empty($memberInfo)) {
+        return 0;
+    }
+
+    $now = date('Y-m-d H:i:s');
+    $fullName = trim((string) ($userRow['full_name'] ?? $userRow['name'] ?? ''));
+    if ($fullName === '' && isset($userRow['first_name'])) {
+        $fullName = trim((string) $userRow['first_name'] . ' ' . (string) ($userRow['last_name'] ?? ''));
+    }
+    $email = trim((string) ($userRow['email'] ?? ''));
+    $phone = trim((string) ($userRow['phone'] ?? $userRow['phone_number'] ?? ''));
+
+    $data = array();
+
+    foreach ($memberInfo as $columnInfo) {
+        $columnName = isset($columnInfo['name']) ? (string) $columnInfo['name'] : '';
+        if ($columnName === '') {
+            continue;
+        }
+
+        $isPrimary = !empty($columnInfo['pk']);
+        if ($isPrimary) {
+            continue;
+        }
+
+        $lower = strtolower($columnName);
+        $type = strtoupper((string) ($columnInfo['type'] ?? ''));
+        $isNotNull = !empty($columnInfo['notnull']);
+        $defaultValue = $columnInfo['dflt_value'] ?? null;
+
+        if ($lower === 'user_id') {
+            $data[$columnName] = $userId;
+            continue;
+        }
+
+        if (in_array($lower, array('created_at', 'updated_at'), true)) {
+            $data[$columnName] = $now;
+            continue;
+        }
+
+        if (in_array($lower, array('full_name', 'name', 'client_name', 'member_name'), true) && $fullName !== '') {
+            $data[$columnName] = $fullName;
+            continue;
+        }
+
+        if ($lower === 'username' && $fullName !== '') {
+            $data[$columnName] = $fullName;
+            continue;
+        }
+
+        if (in_array($lower, array('email', 'member_email', 'user_email', 'client_email'), true) && $email !== '') {
+            $data[$columnName] = $email;
+            continue;
+        }
+
+        if (in_array($lower, array('phone', 'phone_number', 'mobile', 'mobile_number'), true) && $phone !== '') {
+            $data[$columnName] = $phone;
+            continue;
+        }
+
+        if ($lower === 'signup_method') {
+            $data[$columnName] = 'email';
+            continue;
+        }
+
+        if ($lower === 'password_hash') {
+            $data[$columnName] = (string) ($userRow['password_hash'] ?? '');
+            continue;
+        }
+
+        if (in_array($lower, array('email_verified', 'is_verified'), true)) {
+            $data[$columnName] = (int) ($userRow[$columnName] ?? 1);
+            continue;
+        }
+
+        if (!array_key_exists($columnName, $userRow) || $userRow[$columnName] === null || $userRow[$columnName] === '') {
+            if ($isNotNull && $defaultValue === null) {
+                if (strpos($type, 'INT') !== false || strpos($type, 'REAL') !== false || strpos($type, 'NUM') !== false) {
+                    $data[$columnName] = 0;
+                } else {
+                    $data[$columnName] = '';
+                }
+            }
+            continue;
+        }
+
+        $data[$columnName] = $userRow[$columnName];
+    }
+
+    if (empty($data)) {
+        return 0;
+    }
+
+    $fields = array_keys($data);
+    $quotedCols = array();
+    $placeholders = array();
+    $params = array();
+
+    foreach ($fields as $field) {
+        $quotedCols[] = ddAdminDashboardQuoteIdentifier($field);
+        $placeholders[] = ':' . $field;
+        $params[':' . $field] = $data[$field];
+    }
+
+    try {
+        $sql = 'INSERT INTO ' . ddAdminDashboardQuoteIdentifier('members')
+            . ' (' . implode(', ', $quotedCols) . ') VALUES (' . implode(', ', $placeholders) . ')';
+        $stmt = $pdo->prepare($sql);
+        if (!ddAdminDashboardSafeExecute($stmt, $params)) {
+            $existing = ddAdminDashboardFindMemberRowForUserRow($pdo, $userRow);
+            return $existing !== null ? (int) ddAdminDashboardValueFromRow($existing, array('id', 'member_id'), 0) : 0;
+        }
+
+        $newId = (int) $pdo->lastInsertId();
+        if ($newId > 0) {
+            ddAdminDashboardAttachUserIdToMemberIfPossible($pdo, $newId, $userId);
+            return $newId;
+        }
+    } catch (Throwable $e) {
+        $existing = ddAdminDashboardFindMemberRowForUserRow($pdo, $userRow);
+        return $existing !== null ? (int) ddAdminDashboardValueFromRow($existing, array('id', 'member_id'), 0) : 0;
+    }
+
+    $created = ddAdminDashboardFindMemberRowForUserRow($pdo, $userRow);
+    return $created !== null ? (int) ddAdminDashboardValueFromRow($created, array('id', 'member_id'), 0) : 0;
+}
+
+function ddAdminDashboardResolveMemberIdentityFromUserRow(PDO $pdo, array $row): array
+{
+    $idCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+    $nameCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('full_name', 'name', 'client_name', 'first_name', 'username'));
+    $lastNameCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('last_name'));
+    $emailCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('email'));
+
+    $userId = $idCol !== null ? (int) ($row[$idCol] ?? 0) : 0;
+    $memberRow = ddAdminDashboardFindMemberRowForUserRow($pdo, $row);
+    $memberId = $memberRow !== null ? (int) ddAdminDashboardValueFromRow($memberRow, array('id', 'member_id'), 0) : 0;
+
+    return array(
+        'member_key' => $memberId > 0 ? 'm:' . $memberId : ($userId > 0 ? 'u:' . $userId : ''),
+        'user_id' => $userId,
+        'member_id' => $memberId,
+        'member_name' => ddAdminDashboardBuildPersonName($row, $nameCol, $lastNameCol, 'Member', $memberId > 0 ? $memberId : $userId),
+        'email' => $emailCol !== null ? trim((string) ($row[$emailCol] ?? '')) : '',
+        'display_id' => $memberId > 0 ? $memberId : $userId,
+        'source_table' => 'users',
+    );
+}
+
+function ddAdminDashboardResolveMemberIdentityFromMemberRow(PDO $pdo, array $row): array
+{
+    $idCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+    $userCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('user_id'));
+    $nameCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('full_name', 'name', 'client_name', 'first_name', 'username'));
+    $lastNameCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('last_name'));
+    $emailCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('email', 'member_email'));
+
+    $memberId = $idCol !== null ? (int) ($row[$idCol] ?? 0) : 0;
+    $userId = $userCol !== null ? (int) ($row[$userCol] ?? 0) : 0;
+
+    if ($userId <= 0) {
+        $userRow = ddAdminDashboardFindUserRowByMemberId($pdo, $memberId);
+        if ($userRow !== null) {
+            $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+            if ($userIdCol !== null) {
+                $userId = (int) ($userRow[$userIdCol] ?? 0);
+            }
+        }
+    }
+
+    if ($userId <= 0) {
+        $email = $emailCol !== null ? trim((string) ($row[$emailCol] ?? '')) : '';
+        if ($email !== '') {
+            $userRow = ddAdminDashboardFindUserRowByEmail($pdo, $email);
+            if ($userRow !== null) {
+                $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+                if ($userIdCol !== null) {
+                    $userId = (int) ($userRow[$userIdCol] ?? 0);
+                }
+            }
+        }
+    }
+
+    return array(
+        'member_key' => $memberId > 0 ? 'm:' . $memberId : ($userId > 0 ? 'u:' . $userId : ''),
+        'user_id' => $userId,
+        'member_id' => $memberId,
+        'member_name' => ddAdminDashboardBuildPersonName($row, $nameCol, $lastNameCol, 'Member', $memberId > 0 ? $memberId : $userId),
+        'email' => $emailCol !== null ? trim((string) ($row[$emailCol] ?? '')) : '',
+        'display_id' => $memberId > 0 ? $memberId : $userId,
+        'source_table' => 'members',
+    );
+}
+
+function ddAdminDashboardResolveSelectedMember(PDO $pdo, string $memberKey): ?array
+{
+    $memberKey = trim($memberKey);
+    if ($memberKey === '') {
+        return null;
+    }
+
+    if (strpos($memberKey, ':') === false && ctype_digit($memberKey)) {
+        $userRow = null;
+        if (ddAdminDashboardHasTable($pdo, 'users')) {
+            $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+            if ($userIdCol !== null) {
+                $userRow = ddAdminDashboardSafeFetchOne(
+                    $pdo,
+                    'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+                    . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userIdCol) . ' = :id LIMIT 1',
+                    array(':id' => (int) $memberKey)
+                );
+            }
+        }
+
+        if ($userRow !== null) {
+            return ddAdminDashboardResolveMemberIdentityFromUserRow($pdo, $userRow);
+        }
+
+        if (ddAdminDashboardHasTable($pdo, 'members')) {
+            $memberIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+            if ($memberIdCol !== null) {
+                $memberRow = ddAdminDashboardSafeFetchOne(
+                    $pdo,
+                    'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+                    . ' WHERE ' . ddAdminDashboardQuoteIdentifier($memberIdCol) . ' = :id LIMIT 1',
+                    array(':id' => (int) $memberKey)
+                );
+                if ($memberRow !== null) {
+                    return ddAdminDashboardResolveMemberIdentityFromMemberRow($pdo, $memberRow);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    list($prefix, $rawId) = array_pad(explode(':', $memberKey, 2), 2, '');
+    $prefix = strtolower(trim($prefix));
+    $id = (int) $rawId;
+
+    if ($id <= 0) {
+        return null;
+    }
+
+    if ($prefix === 'u' && ddAdminDashboardHasTable($pdo, 'users')) {
+        $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+        if ($userIdCol !== null) {
+            $userRow = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+                . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userIdCol) . ' = :id LIMIT 1',
+                array(':id' => $id)
+            );
+            if ($userRow !== null) {
+                return ddAdminDashboardResolveMemberIdentityFromUserRow($pdo, $userRow);
+            }
+        }
+    }
+
+    if ($prefix === 'm' && ddAdminDashboardHasTable($pdo, 'members')) {
+        $memberIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+        if ($memberIdCol !== null) {
+            $memberRow = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+                . ' WHERE ' . ddAdminDashboardQuoteIdentifier($memberIdCol) . ' = :id LIMIT 1',
+                array(':id' => $id)
+            );
+            if ($memberRow !== null) {
+                return ddAdminDashboardResolveMemberIdentityFromMemberRow($pdo, $memberRow);
+            }
+        }
+    }
+
+    return null;
+}
+
+function ddAdminDashboardMembershipOwnerIdForIdentity(PDO $pdo, array $identity): int
+{
+    $ownerColumn = ddAdminDashboardMembershipOwnerColumn($pdo);
+
+    if ($ownerColumn === 'member_id') {
+        return (int) ($identity['member_id'] ?? 0);
+    }
+
+    if ($ownerColumn === 'user_id') {
+        return (int) ($identity['user_id'] ?? 0);
+    }
+
+    return 0;
+}
+
+function ddAdminDashboardFetchMemberOptions(PDO $pdo): array
+{
+    $options = array();
+    $seenUserIds = array();
+    $seenMemberIds = array();
+
+    if (ddAdminDashboardHasTable($pdo, 'users')) {
+        $idCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+        if ($idCol !== null) {
+            $rows = ddAdminDashboardSafeFetchAll(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+                . ' ORDER BY ' . ddAdminDashboardQuoteIdentifier($idCol) . ' DESC'
+            );
+
+            foreach ($rows as $row) {
+                if (!ddAdminDashboardIsMemberLikeRow($row)) {
+                    continue;
+                }
+
+                $identity = ddAdminDashboardResolveMemberIdentityFromUserRow($pdo, $row);
+                if ((int) $identity['user_id'] <= 0 && (int) $identity['member_id'] <= 0) {
+                    continue;
+                }
+
+                $options[] = $identity;
+                if ((int) $identity['user_id'] > 0) {
+                    $seenUserIds[(int) $identity['user_id']] = true;
+                }
+                if ((int) $identity['member_id'] > 0) {
+                    $seenMemberIds[(int) $identity['member_id']] = true;
+                }
+            }
+        }
+    }
+
+    if (ddAdminDashboardHasTable($pdo, 'members')) {
+        $idCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+        if ($idCol !== null) {
+            $rows = ddAdminDashboardSafeFetchAll(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+                . ' ORDER BY ' . ddAdminDashboardQuoteIdentifier($idCol) . ' DESC'
+            );
+
+            foreach ($rows as $row) {
+                $identity = ddAdminDashboardResolveMemberIdentityFromMemberRow($pdo, $row);
+
+                if ((int) $identity['member_id'] > 0 && isset($seenMemberIds[(int) $identity['member_id']])) {
+                    continue;
+                }
+                if ((int) $identity['user_id'] > 0 && isset($seenUserIds[(int) $identity['user_id']])) {
+                    continue;
+                }
+
+                if ((int) $identity['user_id'] <= 0 && (int) $identity['member_id'] <= 0) {
+                    continue;
+                }
+
+                $options[] = $identity;
+                if ((int) $identity['user_id'] > 0) {
+                    $seenUserIds[(int) $identity['user_id']] = true;
+                }
+                if ((int) $identity['member_id'] > 0) {
+                    $seenMemberIds[(int) $identity['member_id']] = true;
+                }
+            }
+        }
+    }
+
+    usort($options, function (array $a, array $b): int {
+        return strcasecmp((string) ($a['member_name'] ?? ''), (string) ($b['member_name'] ?? ''));
+    });
+
+    return $options;
 }
 
 function ddAdminDashboardEnsureMembershipPlansTable(PDO $pdo): bool
@@ -732,7 +1416,7 @@ function ddAdminDashboardEnsureFounderPlans(PDO $pdo): bool
     return true;
 }
 
-function ddAdminDashboardCreateMembershipRow(PDO $pdo, int $memberId, int $planId): int
+function ddAdminDashboardCreateMembershipRow(PDO $pdo, int $membershipOwnerId, int $planId, array $identity = array()): int
 {
     $table = 'member_memberships';
     if (!ddAdminDashboardHasTable($pdo, $table)) {
@@ -740,18 +1424,28 @@ function ddAdminDashboardCreateMembershipRow(PDO $pdo, int $memberId, int $planI
     }
 
     $columns = ddAdminDashboardGetTableColumns($pdo, $table);
-    $memberCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('member_id', 'user_id'));
+    $ownerCol = ddAdminDashboardMembershipOwnerColumn($pdo);
     $planCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('plan_id'));
 
-    if ($memberCol === null || $planCol === null) {
+    if ($ownerCol === null || $planCol === null) {
         return 0;
     }
 
-    $insert = array($memberCol, $planCol);
+    $insert = array($ownerCol, $planCol);
     $params = array(
-        ':' . $memberCol => $memberId,
+        ':' . $ownerCol => $membershipOwnerId,
         ':' . $planCol => $planId,
     );
+
+    if ($ownerCol !== 'user_id' && in_array('user_id', $columns, true) && !isset($params[':user_id']) && (int) ($identity['user_id'] ?? 0) > 0) {
+        $insert[] = 'user_id';
+        $params[':user_id'] = (int) $identity['user_id'];
+    }
+
+    if ($ownerCol !== 'member_id' && in_array('member_id', $columns, true) && !isset($params[':member_id']) && (int) ($identity['member_id'] ?? 0) > 0) {
+        $insert[] = 'member_id';
+        $params[':member_id'] = (int) $identity['member_id'];
+    }
 
     if (in_array('renewal_count', $columns, true)) {
         $insert[] = 'renewal_count';
@@ -775,7 +1469,7 @@ function ddAdminDashboardCreateMembershipRow(PDO $pdo, int $memberId, int $planI
 
     $quotedCols = array();
     $placeholders = array();
-    foreach ($insert as $column) {
+    foreach (array_values(array_unique($insert)) as $column) {
         $quotedCols[] = ddAdminDashboardQuoteIdentifier($column);
         $placeholders[] = ':' . $column;
     }
@@ -791,15 +1485,15 @@ function ddAdminDashboardCreateMembershipRow(PDO $pdo, int $memberId, int $planI
     return (int) $pdo->lastInsertId();
 }
 
-function ddAdminDashboardGetCurrentMembershipForMember(PDO $pdo, int $memberId): ?array
+function ddAdminDashboardGetCurrentMembershipForMember(PDO $pdo, int $membershipOwnerId): ?array
 {
     $table = 'member_memberships';
     if (!ddAdminDashboardHasTable($pdo, $table)) {
         return null;
     }
 
-    $memberCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('member_id', 'user_id'));
-    if ($memberCol === null) {
+    $ownerCol = ddAdminDashboardMembershipOwnerColumn($pdo);
+    if ($ownerCol === null) {
         return null;
     }
 
@@ -810,7 +1504,7 @@ function ddAdminDashboardGetCurrentMembershipForMember(PDO $pdo, int $memberId):
 
     $idCol = ddAdminDashboardFirstExistingColumn($pdo, $table, array('id'));
     $sql = 'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier($table)
-        . ' WHERE ' . ddAdminDashboardQuoteIdentifier($memberCol) . ' = :member_id'
+        . ' WHERE ' . ddAdminDashboardQuoteIdentifier($ownerCol) . ' = :owner_id'
         . ' ORDER BY ' . ddAdminDashboardQuoteIdentifier($orderCol) . ' DESC';
 
     if ($idCol !== null && $idCol !== $orderCol) {
@@ -819,7 +1513,7 @@ function ddAdminDashboardGetCurrentMembershipForMember(PDO $pdo, int $memberId):
 
     $sql .= ' LIMIT 1';
 
-    return ddAdminDashboardSafeFetchOne($pdo, $sql, array(':member_id' => $memberId));
+    return ddAdminDashboardSafeFetchOne($pdo, $sql, array(':owner_id' => $membershipOwnerId));
 }
 
 function ddAdminDashboardPlanSlugFromMembership(PDO $pdo, ?array $membershipRow): string
@@ -1162,7 +1856,7 @@ function ddAdminDashboardSeedMembershipEntitlements(PDO $pdo, int $membershipId,
     }
 }
 
-function ddAdminDashboardAssignMembershipAdmin(PDO $pdo, int $memberId, string $planSlug): array
+function ddAdminDashboardAssignMembershipAdmin(PDO $pdo, string $memberKey, string $planSlug): array
 {
     $catalog = ddAdminDashboardPlanCatalog();
     if (!isset($catalog[$planSlug])) {
@@ -1171,6 +1865,25 @@ function ddAdminDashboardAssignMembershipAdmin(PDO $pdo, int $memberId, string $
 
     if (!ddAdminDashboardEnsureFounderPlans($pdo)) {
         return array('ok' => false, 'message' => 'Could not prepare founder membership plans.');
+    }
+
+    $identity = ddAdminDashboardResolveSelectedMember($pdo, $memberKey);
+    if ($identity === null) {
+        return array('ok' => false, 'message' => 'Selected member could not be resolved.');
+    }
+
+    $ownerColumn = ddAdminDashboardMembershipOwnerColumn($pdo);
+    if ($ownerColumn === null) {
+        return array('ok' => false, 'message' => 'member_memberships table is not available.');
+    }
+
+    if ($ownerColumn === 'member_id' && (int) ($identity['member_id'] ?? 0) <= 0 && (int) ($identity['user_id'] ?? 0) > 0) {
+        $identity['member_id'] = ddAdminDashboardEnsureMemberRowForUser($pdo, (int) $identity['user_id']);
+    }
+
+    $membershipOwnerId = ddAdminDashboardMembershipOwnerIdForIdentity($pdo, $identity);
+    if ($membershipOwnerId <= 0) {
+        return array('ok' => false, 'message' => 'Selected member account could not be linked to the membership ledger.');
     }
 
     $planRow = ddAdminDashboardFindPlanRow($pdo, $planSlug);
@@ -1185,7 +1898,7 @@ function ddAdminDashboardAssignMembershipAdmin(PDO $pdo, int $memberId, string $
 
     $pdo->beginTransaction();
     try {
-        $membershipId = ddAdminDashboardCreateMembershipRow($pdo, $memberId, $planId);
+        $membershipId = ddAdminDashboardCreateMembershipRow($pdo, $membershipOwnerId, $planId, $identity);
         if ($membershipId <= 0) {
             throw new RuntimeException('Could not create membership row.');
         }
@@ -1334,9 +2047,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!ddAdminDashboardValidateCsrfToken($_POST['csrf_token'] ?? '')) {
         $result['message'] = 'Security check failed. Please refresh the page and try again.';
     } elseif (isset($_POST['assign_membership'])) {
-        $memberId = (int) ($_POST['member_id'] ?? 0);
+        $memberKey = trim((string) ($_POST['member_key'] ?? $_POST['member_id'] ?? ''));
         $planSlug = trim((string) ($_POST['plan_slug'] ?? ''));
-        $result = ddAdminDashboardAssignMembershipAdmin($pdo, $memberId, $planSlug);
+        $result = ddAdminDashboardAssignMembershipAdmin($pdo, $memberKey, $planSlug);
     } elseif (isset($_POST['renew_membership'])) {
         $membershipId = (int) ($_POST['renew_membership_id'] ?? 0);
         $result = ddAdminDashboardRenewMembershipAdmin($pdo, $membershipId);
@@ -1361,7 +2074,6 @@ if ($memberBookings === 0) {
 }
 $publicBookings = ddAdminDashboardCountTable($pdo, 'non_member_bookings');
 $groupWalkApps = ddAdminDashboardCountTable($pdo, 'group_walk_applications');
-$memberCount = ddAdminDashboardFetchMemberCount($pdo);
 $unreadNotifications = ddAdminDashboardCountUnreadNotifications($pdo);
 $totalBookings = $memberBookings + $publicBookings;
 
@@ -1377,17 +2089,23 @@ foreach ($recentPublicBookings as $row) {
 }
 
 $memberOptions = ddAdminDashboardFetchMemberOptions($pdo);
+$memberCount = count($memberOptions);
 $founderPlans = ddAdminDashboardPlanCatalog();
 $csrfToken = ddAdminDashboardCsrfToken();
 
 $memberMembershipSnapshots = array();
 foreach ($memberOptions as $memberOption) {
-    $membershipRow = ddAdminDashboardGetCurrentMembershipForMember($pdo, (int) $memberOption['member_id']);
+    $membershipOwnerId = ddAdminDashboardMembershipOwnerIdForIdentity($pdo, $memberOption);
+    $membershipRow = $membershipOwnerId > 0
+        ? ddAdminDashboardGetCurrentMembershipForMember($pdo, $membershipOwnerId)
+        : null;
     $summary = ddAdminDashboardGetMembershipDisplaySummary($pdo, $membershipRow);
     $entitlements = ddAdminDashboardGetMembershipEntitlements($pdo, (int) $summary['membership_id']);
 
     $memberMembershipSnapshots[] = array(
-        'member_id' => (int) $memberOption['member_id'],
+        'member_key' => (string) ($memberOption['member_key'] ?? ''),
+        'member_id' => (int) ($memberOption['display_id'] ?? 0),
+        'membership_owner_id' => $membershipOwnerId,
         'member_name' => (string) $memberOption['member_name'],
         'email' => (string) $memberOption['email'],
         'membership' => $summary,
@@ -1834,11 +2552,11 @@ foreach ($memberOptions as $memberOption) {
                 <form method="post" class="form-grid">
                     <input type="hidden" name="csrf_token" value="<?php echo ddAdminDashboardEscape($csrfToken); ?>">
 
-                    <select name="member_id" required>
+                    <select name="member_key" required>
                         <option value="">Select member</option>
                         <?php foreach ($memberOptions as $member): ?>
-                            <option value="<?php echo (int) $member['member_id']; ?>">
-                                <?php echo ddAdminDashboardEscape($member['member_name']); ?><?php echo $member['email'] !== '' ? ' · ' . ddAdminDashboardEscape($member['email']) : ''; ?> · ID <?php echo (int) $member['member_id']; ?>
+                            <option value="<?php echo ddAdminDashboardEscape((string) ($member['member_key'] ?? '')); ?>">
+                                <?php echo ddAdminDashboardEscape($member['member_name']); ?><?php echo $member['email'] !== '' ? ' · ' . ddAdminDashboardEscape($member['email']) : ''; ?> · ID <?php echo (int) ($member['display_id'] ?? 0); ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
