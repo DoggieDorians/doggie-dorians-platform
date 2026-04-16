@@ -10,6 +10,10 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     exit;
 }
 
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
 function h($value)
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
@@ -281,7 +285,154 @@ function getDisplayNameFromUser(array $row)
 
 function getCurrentReferralCode(array $row)
 {
-    foreach (array('referral_code', 'ambassador_code', 'affiliate_code') as $key) {
+    foreach (array('referral_code', 'ambassador_code', 'affiliate_code', 'custom_referral_code', 'custom_code', 'promo_code') as $key) {
+        if (isset($row[$key]) && trim((string) $row[$key]) !== '') {
+            return strtoupper(trim((string) $row[$key]));
+        }
+    }
+
+    return '';
+}
+
+function getUserEmailFromUser(array $row)
+{
+    foreach (array('email', 'member_email', 'user_email', 'client_email') as $key) {
+        if (isset($row[$key]) && filter_var((string) $row[$key], FILTER_VALIDATE_EMAIL)) {
+            return trim((string) $row[$key]);
+        }
+    }
+
+    return '';
+}
+
+function resolveActorIds(PDO $pdo, array $user, $sessionId)
+{
+    $sessionId = (int) $sessionId;
+    $table = isset($user['_table']) ? (string) $user['_table'] : '';
+    $idCol = isset($user['_id_col']) ? (string) $user['_id_col'] : '';
+    $rowId = ($idCol !== '' && isset($user[$idCol]) && is_numeric($user[$idCol])) ? (int) $user[$idCol] : 0;
+
+    $userId = 0;
+    $memberId = 0;
+
+    if ($table === 'users') {
+        $userId = $rowId > 0 ? $rowId : $sessionId;
+    } elseif ($table === 'members') {
+        $memberId = $rowId > 0 ? $rowId : $sessionId;
+        if (isset($user['user_id']) && is_numeric($user['user_id'])) {
+            $userId = (int) $user['user_id'];
+        }
+    } elseif ($table === 'client_profiles') {
+        if (isset($user['user_id']) && is_numeric($user['user_id'])) {
+            $userId = (int) $user['user_id'];
+        } elseif ($rowId > 0) {
+            $userId = $rowId;
+        }
+    }
+
+    if ($userId <= 0 && isset($user['user_id']) && is_numeric($user['user_id'])) {
+        $userId = (int) $user['user_id'];
+    }
+
+    if ($memberId <= 0 && isset($user['member_id']) && is_numeric($user['member_id'])) {
+        $memberId = (int) $user['member_id'];
+    }
+
+    if ($memberId <= 0 && $userId > 0 && hasTable($pdo, 'members')) {
+        $memberIdCol = firstExistingColumn($pdo, 'members', array('id', 'member_id'));
+        $memberUserCol = firstExistingColumn($pdo, 'members', array('user_id'));
+        if ($memberIdCol !== null && $memberUserCol !== null) {
+            $row = fetchOne(
+                $pdo,
+                "SELECT {$memberIdCol} AS member_id FROM members WHERE {$memberUserCol} = :user_id LIMIT 1",
+                array(':user_id' => $userId)
+            );
+            if ($row !== null && isset($row['member_id']) && is_numeric($row['member_id'])) {
+                $memberId = (int) $row['member_id'];
+            }
+        }
+    }
+
+    if ($userId <= 0 && $memberId > 0 && hasTable($pdo, 'members')) {
+        $memberIdCol = firstExistingColumn($pdo, 'members', array('id', 'member_id'));
+        $memberUserCol = firstExistingColumn($pdo, 'members', array('user_id'));
+        if ($memberIdCol !== null && $memberUserCol !== null) {
+            $row = fetchOne(
+                $pdo,
+                "SELECT {$memberUserCol} AS user_id FROM members WHERE {$memberIdCol} = :member_id LIMIT 1",
+                array(':member_id' => $memberId)
+            );
+            if ($row !== null && isset($row['user_id']) && is_numeric($row['user_id'])) {
+                $userId = (int) $row['user_id'];
+            }
+        }
+    }
+
+    if ($userId <= 0 && $sessionId > 0 && $table !== 'members') {
+        $userId = $sessionId;
+    }
+
+    if ($memberId <= 0 && $sessionId > 0 && $table === 'members') {
+        $memberId = $sessionId;
+    }
+
+    return array(
+        'user_id' => max(0, (int) $userId),
+        'member_id' => max(0, (int) $memberId),
+    );
+}
+
+function getAmbassadorRecordForActor(PDO $pdo, $userId, $memberId)
+{
+    $userId = (int) $userId;
+    $memberId = (int) $memberId;
+
+    if (!hasTable($pdo, 'ambassadors')) {
+        return null;
+    }
+
+    $columns = getTableColumns($pdo, 'ambassadors');
+    if (empty($columns)) {
+        return null;
+    }
+
+    $conditions = array();
+    $params = array();
+
+    $userColumn = firstExistingColumn($pdo, 'ambassadors', array('user_id', 'referring_user_id', 'referrer_user_id', 'owner_user_id'));
+    $memberColumn = firstExistingColumn($pdo, 'ambassadors', array('member_id', 'referring_member_id', 'referrer_member_id', 'owner_member_id'));
+
+    if ($userColumn !== null && $userId > 0) {
+        $conditions[] = $userColumn . ' = :user_id';
+        $params[':user_id'] = $userId;
+    }
+
+    if ($memberColumn !== null && $memberId > 0) {
+        $conditions[] = $memberColumn . ' = :member_id';
+        $params[':member_id'] = $memberId;
+    }
+
+    if (empty($conditions)) {
+        return null;
+    }
+
+    $row = fetchOne(
+        $pdo,
+        'SELECT * FROM ambassadors WHERE ' . implode(' OR ', $conditions) . ' ORDER BY rowid DESC LIMIT 1',
+        $params
+    );
+
+    return $row !== null ? $row : null;
+}
+
+function getAmbassadorTableCodeForActor(PDO $pdo, $userId, $memberId)
+{
+    $row = getAmbassadorRecordForActor($pdo, $userId, $memberId);
+    if ($row === null) {
+        return '';
+    }
+
+    foreach (array('ambassador_code', 'referral_code', 'code', 'custom_code', 'promo_code') as $key) {
         if (isset($row[$key]) && trim((string) $row[$key]) !== '') {
             return strtoupper(trim((string) $row[$key]));
         }
@@ -303,7 +454,7 @@ function saveReferralCodeToUser(PDO $pdo, array $row, $code)
     $columns = getTableColumns($pdo, $table);
     $refCol = null;
 
-    foreach (array('referral_code', 'ambassador_code', 'affiliate_code') as $candidate) {
+    foreach (array('referral_code', 'ambassador_code', 'affiliate_code', 'custom_referral_code', 'custom_code', 'promo_code') as $candidate) {
         if (in_array($candidate, $columns, true)) {
             $refCol = $candidate;
             break;
@@ -314,53 +465,227 @@ function saveReferralCodeToUser(PDO $pdo, array $row, $code)
         return false;
     }
 
-    $sql = 'UPDATE ' . $table . ' SET ' . $refCol . ' = :code WHERE ' . $idCol . ' = :id';
+    $updateParts = array($refCol . ' = :code');
+    $params = array(
+        ':code' => $code,
+        ':id' => $idVal,
+    );
+
+    if (in_array('updated_at', $columns, true)) {
+        $updateParts[] = 'updated_at = :updated_at';
+        $params[':updated_at'] = date('Y-m-d H:i:s');
+    }
+
+    $sql = 'UPDATE ' . $table . ' SET ' . implode(', ', $updateParts) . ' WHERE ' . $idCol . ' = :id';
     $stmt = $pdo->prepare($sql);
 
-    return safeExecute($stmt, array(':code' => $code, ':id' => $idVal));
+    return safeExecute($stmt, $params);
 }
 
-function findOtherUserByReferralCode(PDO $pdo, $code, $excludeUserId)
+function upsertAmbassadorRecord(PDO $pdo, $userId, $memberId, $email, $displayName, $code)
+{
+    $userId = (int) $userId;
+    $memberId = (int) $memberId;
+    $email = trim((string) $email);
+    $displayName = trim((string) $displayName);
+    $code = normalizeReferralCodeLocal($code);
+
+    if ($code === '' || !hasTable($pdo, 'ambassadors')) {
+        return true;
+    }
+
+    $columns = getTableColumns($pdo, 'ambassadors');
+    if (empty($columns)) {
+        return true;
+    }
+
+    $codeColumn = firstExistingColumn($pdo, 'ambassadors', array('ambassador_code', 'referral_code', 'code', 'custom_code', 'promo_code'));
+    if ($codeColumn === null) {
+        return true;
+    }
+
+    $userColumn = firstExistingColumn($pdo, 'ambassadors', array('user_id', 'referring_user_id', 'referrer_user_id', 'owner_user_id'));
+    $memberColumn = firstExistingColumn($pdo, 'ambassadors', array('member_id', 'referring_member_id', 'referrer_member_id', 'owner_member_id'));
+    $nameColumn = firstExistingColumn($pdo, 'ambassadors', array('full_name', 'name', 'member_name'));
+    $emailColumn = firstExistingColumn($pdo, 'ambassadors', array('email', 'member_email', 'user_email'));
+    $updatedAtColumn = firstExistingColumn($pdo, 'ambassadors', array('updated_at'));
+    $createdAtColumn = firstExistingColumn($pdo, 'ambassadors', array('created_at'));
+
+    $where = array();
+    $whereParams = array();
+
+    if ($userColumn !== null && $userId > 0) {
+        $where[] = $userColumn . ' = :user_id';
+        $whereParams[':user_id'] = $userId;
+    }
+
+    if ($memberColumn !== null && $memberId > 0) {
+        $where[] = $memberColumn . ' = :member_id';
+        $whereParams[':member_id'] = $memberId;
+    }
+
+    if (!empty($where)) {
+        $updateParts = array($codeColumn . ' = :code');
+        $updateParams = $whereParams;
+        $updateParams[':code'] = $code;
+
+        if ($nameColumn !== null && $displayName !== '') {
+            $updateParts[] = $nameColumn . ' = :display_name';
+            $updateParams[':display_name'] = $displayName;
+        }
+
+        if ($emailColumn !== null && $email !== '') {
+            $updateParts[] = $emailColumn . ' = :email';
+            $updateParams[':email'] = $email;
+        }
+
+        if ($updatedAtColumn !== null) {
+            $updateParts[] = $updatedAtColumn . ' = :updated_at';
+            $updateParams[':updated_at'] = date('Y-m-d H:i:s');
+        }
+
+        $stmt = $pdo->prepare('UPDATE ambassadors SET ' . implode(', ', $updateParts) . ' WHERE ' . implode(' OR ', $where));
+        if (safeExecute($stmt, $updateParams) && $stmt->rowCount() > 0) {
+            return true;
+        }
+    }
+
+    $data = array(
+        $codeColumn => $code,
+    );
+
+    if ($userColumn !== null && $userId > 0) {
+        $data[$userColumn] = $userId;
+    }
+
+    if ($memberColumn !== null && $memberId > 0) {
+        $data[$memberColumn] = $memberId;
+    }
+
+    if ($nameColumn !== null && $displayName !== '') {
+        $data[$nameColumn] = $displayName;
+    }
+
+    if ($emailColumn !== null && $email !== '') {
+        $data[$emailColumn] = $email;
+    }
+
+    if ($createdAtColumn !== null) {
+        $data[$createdAtColumn] = date('Y-m-d H:i:s');
+    }
+
+    if ($updatedAtColumn !== null) {
+        $data[$updatedAtColumn] = date('Y-m-d H:i:s');
+    }
+
+    if (empty($data)) {
+        return true;
+    }
+
+    $fields = array_keys($data);
+    $placeholders = array();
+    $params = array();
+
+    foreach ($fields as $field) {
+        $placeholders[] = ':' . $field;
+        $params[':' . $field] = $data[$field];
+    }
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO ambassadors (' . implode(', ', $fields) . ') VALUES (' . implode(', ', $placeholders) . ')'
+    );
+
+    return safeExecute($stmt, $params);
+}
+
+function findOtherUserByReferralCode(PDO $pdo, $code, $excludeUserId, $excludeMemberId = 0)
 {
     $excludeUserId = (int) $excludeUserId;
+    $excludeMemberId = (int) $excludeMemberId;
     $code = trim((string) $code);
 
     if ($code === '') {
         return null;
     }
 
-    $tables = array('users', 'members', 'client_profiles');
+    $tables = array('users', 'members', 'client_profiles', 'ambassadors');
 
     foreach ($tables as $table) {
         if (!hasTable($pdo, $table)) {
             continue;
         }
 
-        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
-        if ($idCol === null) {
+        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id', 'referring_user_id', 'referrer_user_id', 'referring_member_id', 'referrer_member_id'));
+        $refCol = firstExistingColumn($pdo, $table, array('referral_code', 'ambassador_code', 'affiliate_code', 'custom_referral_code', 'custom_code', 'promo_code', 'code'));
+
+        if ($idCol === null || $refCol === null) {
             continue;
         }
 
-        $refCol = firstExistingColumn($pdo, $table, array('referral_code', 'ambassador_code', 'affiliate_code'));
-        if ($refCol === null) {
+        $sql = "SELECT * FROM {$table} WHERE UPPER({$refCol}) = UPPER(:code)";
+        $params = array(':code' => $code);
+
+        if ($excludeUserId > 0) {
+            $sql .= " AND ({$idCol} != :exclude_user_id OR {$idCol} IS NULL)";
+            $params[':exclude_user_id'] = $excludeUserId;
+        }
+
+        $sql .= ' ORDER BY rowid DESC LIMIT 1';
+        $row = fetchOne($pdo, $sql, $params);
+
+        if ($row === null) {
             continue;
         }
 
-        $sql = "SELECT * FROM {$table} WHERE UPPER({$refCol}) = UPPER(:code) AND {$idCol} != :id LIMIT 1";
-        $row = fetchOne($pdo, $sql, array(':code' => $code, ':id' => $excludeUserId));
+        $rowUserId = 0;
+        $rowMemberId = 0;
 
-        if ($row !== null) {
-            return $row;
+        foreach (array('user_id', 'referring_user_id', 'referrer_user_id', 'owner_user_id', 'id') as $candidate) {
+            if (isset($row[$candidate]) && is_numeric($row[$candidate])) {
+                $rowUserId = (int) $row[$candidate];
+                break;
+            }
         }
+
+        foreach (array('member_id', 'referring_member_id', 'referrer_member_id') as $candidate) {
+            if (isset($row[$candidate]) && is_numeric($row[$candidate])) {
+                $rowMemberId = (int) $row[$candidate];
+                break;
+            }
+        }
+
+        if ($table === 'members' && $rowMemberId <= 0 && isset($row['id']) && is_numeric($row['id'])) {
+            $rowMemberId = (int) $row['id'];
+        }
+
+        if ($table === 'users' && $rowUserId <= 0 && isset($row['id']) && is_numeric($row['id'])) {
+            $rowUserId = (int) $row['id'];
+        }
+
+        if (($excludeUserId > 0 && $rowUserId === $excludeUserId) || ($excludeMemberId > 0 && $rowMemberId === $excludeMemberId)) {
+            continue;
+        }
+
+        return $row;
     }
 
     return null;
 }
 
-function ensureUserHasReferralCode(PDO $pdo, array $user)
+function ensureUserHasReferralCode(PDO $pdo, array $user, $userId, $memberId)
 {
+    $userId = (int) $userId;
+    $memberId = (int) $memberId;
+
     $current = getCurrentReferralCode($user);
+
+    if ($current === '') {
+        $current = getAmbassadorTableCodeForActor($pdo, $userId, $memberId);
+    }
+
     if ($current !== '') {
+        saveReferralCodeToUser($pdo, $user, $current);
+        upsertAmbassadorRecord($pdo, $userId, $memberId, getUserEmailFromUser($user), getDisplayNameFromUser($user), $current);
         return $current;
     }
 
@@ -368,8 +693,9 @@ function ensureUserHasReferralCode(PDO $pdo, array $user)
 
     for ($i = 0; $i < 25; $i++) {
         $candidate = generateReferralCodeLocal($seed);
-        if (findOtherUserByReferralCode($pdo, $candidate, (int) $user[$user['_id_col']]) === null) {
+        if (findOtherUserByReferralCode($pdo, $candidate, $userId, $memberId) === null) {
             if (saveReferralCodeToUser($pdo, $user, $candidate)) {
+                upsertAmbassadorRecord($pdo, $userId, $memberId, getUserEmailFromUser($user), getDisplayNameFromUser($user), $candidate);
                 return $candidate;
             }
         }
@@ -442,14 +768,53 @@ function createNotificationIfPossible(PDO $pdo, $userId, $title, $message)
     safeExecute($stmt, $params);
 }
 
-function getReferralStats(PDO $pdo, $userId)
+function referralOwnerFilter(PDO $pdo, $table, $userId, $memberId)
 {
     $userId = (int) $userId;
+    $memberId = (int) $memberId;
+    $columns = getTableColumns($pdo, $table);
 
+    if (empty($columns)) {
+        return null;
+    }
+
+    $userColumns = array('referrer_user_id', 'ambassador_user_id', 'user_id', 'owner_user_id');
+    $memberColumns = array('referring_member_id', 'referrer_member_id', 'member_id', 'owner_member_id', 'referrer_id');
+
+    $conditions = array();
+    $params = array();
+
+    foreach ($userColumns as $candidate) {
+        if ($userId > 0 && in_array($candidate, $columns, true)) {
+            $conditions[] = $candidate . ' = :user_id';
+            $params[':user_id'] = $userId;
+        }
+    }
+
+    foreach ($memberColumns as $candidate) {
+        if ($memberId > 0 && in_array($candidate, $columns, true)) {
+            $conditions[] = $candidate . ' = :member_id';
+            $params[':member_id'] = $memberId;
+        }
+    }
+
+    if (empty($conditions)) {
+        return null;
+    }
+
+    return array(
+        'sql' => '(' . implode(' OR ', array_unique($conditions)) . ')',
+        'params' => $params,
+    );
+}
+
+function getReferralStats(PDO $pdo, $userId, $memberId = 0)
+{
     $stats = array(
         'total_referrals' => 0,
         'pending_referrals' => 0,
         'completed_referrals' => 0,
+        'blocked_referrals' => 0,
         'total_rewards' => 0.00,
     );
 
@@ -457,24 +822,28 @@ function getReferralStats(PDO $pdo, $userId)
         return $stats;
     }
 
-    $ownerCol = firstExistingColumn($pdo, 'referrals', array('referrer_user_id', 'ambassador_user_id', 'user_id', 'referrer_id', 'owner_user_id'));
-    if ($ownerCol === null) {
+    $ownerFilter = referralOwnerFilter($pdo, 'referrals', $userId, $memberId);
+    if ($ownerFilter === null) {
         return $stats;
     }
 
     $statusCol = firstExistingColumn($pdo, 'referrals', array('status', 'referral_status', 'state'));
-    $rewardCol = firstExistingColumn($pdo, 'referrals', array('reward_amount', 'commission_amount', 'credit_amount', 'payout_amount', 'amount'));
+    $rewardCol = firstExistingColumn($pdo, 'referrals', array('reward_amount', 'ambassador_credit_amount', 'referral_reward_amount', 'credit_amount', 'commission_amount', 'payout_amount', 'amount'));
 
     $pendingExpr = '0';
     $completedExpr = '0';
+    $blockedExpr = '0';
     $rewardExpr = '0';
 
     if ($statusCol !== null) {
         $pendingExpr = "SUM(CASE WHEN LOWER(COALESCE({$statusCol}, '')) IN ('pending','new','awaiting','processing') OR COALESCE({$statusCol}, '') = '' THEN 1 ELSE 0 END)";
         $completedExpr = "SUM(CASE WHEN LOWER(COALESCE({$statusCol}, '')) IN ('completed','complete','paid','approved','converted') THEN 1 ELSE 0 END)";
+        $blockedExpr = "SUM(CASE WHEN LOWER(COALESCE({$statusCol}, '')) IN ('blocked','rejected','void','failed','cancelled','canceled') THEN 1 ELSE 0 END)";
     }
 
-    if ($rewardCol !== null) {
+    if ($rewardCol !== null && $statusCol !== null) {
+        $rewardExpr = "COALESCE(SUM(CASE WHEN LOWER(COALESCE({$statusCol}, '')) IN ('completed','complete','paid','approved','converted') AND {$rewardCol} IS NOT NULL THEN {$rewardCol} ELSE 0 END), 0)";
+    } elseif ($rewardCol !== null) {
         $rewardExpr = "COALESCE(SUM(CASE WHEN {$rewardCol} IS NOT NULL THEN {$rewardCol} ELSE 0 END), 0)";
     }
 
@@ -482,52 +851,54 @@ function getReferralStats(PDO $pdo, $userId)
         COUNT(*) AS total_referrals,
         {$pendingExpr} AS pending_referrals,
         {$completedExpr} AS completed_referrals,
+        {$blockedExpr} AS blocked_referrals,
         {$rewardExpr} AS total_rewards
         FROM referrals
-        WHERE {$ownerCol} = :user_id";
+        WHERE {$ownerFilter['sql']}";
 
-    $row = fetchOne($pdo, $sql, array(':user_id' => $userId));
+    $row = fetchOne($pdo, $sql, $ownerFilter['params']);
 
     if ($row !== null) {
         $stats['total_referrals'] = (int) (isset($row['total_referrals']) ? $row['total_referrals'] : 0);
         $stats['pending_referrals'] = (int) (isset($row['pending_referrals']) ? $row['pending_referrals'] : 0);
         $stats['completed_referrals'] = (int) (isset($row['completed_referrals']) ? $row['completed_referrals'] : 0);
+        $stats['blocked_referrals'] = (int) (isset($row['blocked_referrals']) ? $row['blocked_referrals'] : 0);
         $stats['total_rewards'] = (float) (isset($row['total_rewards']) ? $row['total_rewards'] : 0);
     }
 
     return $stats;
 }
 
-function getRecentReferrals(PDO $pdo, $userId)
+function getRecentReferrals(PDO $pdo, $userId, $memberId = 0)
 {
-    $userId = (int) $userId;
-
     if (!hasTable($pdo, 'referrals')) {
         return array();
     }
 
-    $ownerCol = firstExistingColumn($pdo, 'referrals', array('referrer_user_id', 'ambassador_user_id', 'user_id', 'referrer_id', 'owner_user_id'));
-    if ($ownerCol === null) {
+    $ownerFilter = referralOwnerFilter($pdo, 'referrals', $userId, $memberId);
+    if ($ownerFilter === null) {
         return array();
     }
 
     $statusCol = firstExistingColumn($pdo, 'referrals', array('status', 'referral_status', 'state'));
-    $rewardCol = firstExistingColumn($pdo, 'referrals', array('reward_amount', 'commission_amount', 'credit_amount', 'payout_amount', 'amount'));
-    $codeCol = firstExistingColumn($pdo, 'referrals', array('referral_code', 'code', 'used_code'));
-    $createdCol = firstExistingColumn($pdo, 'referrals', array('created_at', 'referred_at', 'date_created'));
-    $bookingCol = firstExistingColumn($pdo, 'referrals', array('booking_id', 'booking_reference', 'order_id'));
-    $nameCol = firstExistingColumn($pdo, 'referrals', array('referred_name', 'customer_name', 'client_name', 'guest_name', 'name'));
+    $rewardCol = firstExistingColumn($pdo, 'referrals', array('reward_amount', 'ambassador_credit_amount', 'referral_reward_amount', 'credit_amount', 'commission_amount', 'payout_amount', 'amount'));
+    $codeCol = firstExistingColumn($pdo, 'referrals', array('ambassador_code', 'referral_code', 'code', 'promo_code', 'used_code'));
+    $createdCol = firstExistingColumn($pdo, 'referrals', array('completed_at', 'updated_at', 'created_at', 'referred_at', 'date_created', 'pending_at'));
+    $bookingCol = firstExistingColumn($pdo, 'referrals', array('booking_id', 'non_member_booking_id', 'request_id', 'booking_reference', 'order_id'));
+    $nameCol = firstExistingColumn($pdo, 'referrals', array('referred_name', 'customer_name', 'client_name', 'guest_name', 'full_name', 'name', 'email', 'client_email', 'referred_email'));
+    $discountCol = firstExistingColumn($pdo, 'referrals', array('discount_amount', 'ambassador_discount_amount'));
 
     $select = array(
         ($nameCol !== null ? $nameCol : "''") . ' AS referred_name',
         ($codeCol !== null ? $codeCol : "''") . ' AS used_code',
         ($statusCol !== null ? $statusCol : "''") . ' AS referral_status',
         ($rewardCol !== null ? $rewardCol : '0') . ' AS reward_amount',
+        ($discountCol !== null ? $discountCol : '0') . ' AS discount_amount',
         ($bookingCol !== null ? $bookingCol : "''") . ' AS booking_ref',
         ($createdCol !== null ? $createdCol : "''") . ' AS created_at'
     );
 
-    $sql = 'SELECT ' . implode(', ', $select) . ' FROM referrals WHERE ' . $ownerCol . ' = :user_id';
+    $sql = 'SELECT ' . implode(', ', $select) . ' FROM referrals WHERE ' . $ownerFilter['sql'];
 
     if ($createdCol !== null) {
         $sql .= ' ORDER BY ' . $createdCol . ' DESC';
@@ -537,7 +908,7 @@ function getRecentReferrals(PDO $pdo, $userId)
 
     $sql .= ' LIMIT 12';
 
-    return fetchAllRows($pdo, $sql, array(':user_id' => $userId));
+    return fetchAllRows($pdo, $sql, $ownerFilter['params']);
 }
 
 $userId = currentUserId();
@@ -549,15 +920,26 @@ if ($user === null) {
     exit;
 }
 
+$actorIds = resolveActorIds($pdo, $user, $userId);
+$resolvedUserId = (int) $actorIds['user_id'];
+$resolvedMemberId = (int) $actorIds['member_id'];
 $displayName = getDisplayNameFromUser($user);
-$currentCode = ensureUserHasReferralCode($pdo, $user);
+$currentCode = ensureUserHasReferralCode($pdo, $user, $resolvedUserId, $resolvedMemberId);
+$csrfToken = (string) $_SESSION['csrf_token'];
 
 $flash = isset($_SESSION['ambassador_flash']) ? (string) $_SESSION['ambassador_flash'] : '';
 $flashType = isset($_SESSION['ambassador_flash_type']) ? (string) $_SESSION['ambassador_flash_type'] : '';
 unset($_SESSION['ambassador_flash'], $_SESSION['ambassador_flash_type']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $postedCsrf = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
     $submittedCode = normalizeReferralCodeLocal(isset($_POST['custom_referral_code']) ? $_POST['custom_referral_code'] : '');
+
+    if ($postedCsrf === '' || !hash_equals($csrfToken, $postedCsrf)) {
+        $_SESSION['ambassador_flash_type'] = 'error';
+        $_SESSION['ambassador_flash'] = 'Your session expired. Please refresh the page and try again.';
+        redirectTo('ambassadors.php');
+    }
 
     if ($submittedCode === '') {
         $_SESSION['ambassador_flash_type'] = 'error';
@@ -571,14 +953,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirectTo('ambassadors.php');
     }
 
-    $existing = findOtherUserByReferralCode($pdo, $submittedCode, $userId);
+    $existing = findOtherUserByReferralCode($pdo, $submittedCode, $resolvedUserId, $resolvedMemberId);
     if ($existing !== null) {
         $_SESSION['ambassador_flash_type'] = 'error';
         $_SESSION['ambassador_flash'] = 'That referral code is already taken.';
         redirectTo('ambassadors.php');
     }
 
-    if (saveReferralCodeToUser($pdo, $user, $submittedCode)) {
+    $savedToUser = saveReferralCodeToUser($pdo, $user, $submittedCode);
+    $savedToAmbassadors = upsertAmbassadorRecord(
+        $pdo,
+        $resolvedUserId,
+        $resolvedMemberId,
+        getUserEmailFromUser($user),
+        $displayName,
+        $submittedCode
+    );
+
+    if ($savedToUser || $savedToAmbassadors) {
         createNotificationIfPossible(
             $pdo,
             $userId,
@@ -597,11 +989,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $unreadNotifications = countUnreadNotificationsForUser($pdo, $userId);
-$stats = getReferralStats($pdo, $userId);
-$recentReferrals = getRecentReferrals($pdo, $userId);
+$stats = getReferralStats($pdo, $resolvedUserId, $resolvedMemberId);
+$recentReferrals = getRecentReferrals($pdo, $resolvedUserId, $resolvedMemberId);
 
-$shareUrl = 'https://dorianspetcare.com/book-service.php';
-$shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($currentCode) : $shareUrl;
+$shareUrl = 'https://dorianspetcare.com/non-member-booking.php';
+$shareWithCodeUrl = $shareUrl;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -908,6 +1300,16 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
             color: #d7f1dd;
         }
 
+        .status.blocked,
+        .status.rejected,
+        .status.failed,
+        .status.void,
+        .status.cancelled,
+        .status.canceled {
+            background: rgba(214,123,123,0.14);
+            color: #ffd5d5;
+        }
+
         .empty {
             padding: 20px;
             border-radius: 18px;
@@ -979,7 +1381,7 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                 <div class="eyebrow">Referral Program</div>
                 <h1>Ambassador Center</h1>
                 <div class="sub">
-                    Manage your code, share your booking link, and track referral activity in one clean member dashboard.
+                    Manage your code, share the public booking page, and track pending versus completed referral activity in one clean member dashboard.
                 </div>
 
                 <div class="code-badge">
@@ -1001,7 +1403,7 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                         <div class="stat-value"><?php echo (int) $stats['completed_referrals']; ?></div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Tracked Rewards</div>
+                        <div class="stat-label">Completed Rewards</div>
                         <div class="stat-value">$<?php echo h(number_format((float) $stats['total_rewards'], 2)); ?></div>
                     </div>
                 </div>
@@ -1018,7 +1420,7 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                 </div>
 
                 <div class="helper">
-                    Share your booking link directly, or tell clients to use your ambassador code during booking.
+                    Send clients to the public non-member booking page and have them enter your ambassador code there. The $10 client discount and your $5 reward are enforced securely on the server.
                 </div>
             </div>
         </section>
@@ -1032,6 +1434,7 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                 </div>
 
                 <form method="post" action="ambassadors.php" novalidate>
+                    <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
                     <div>
                         <label for="custom_referral_code">Custom Ambassador Code</label>
                         <input
@@ -1059,7 +1462,7 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                 <div class="eyebrow">How To Use It</div>
                 <h2>Turn your code into bookings</h2>
                 <div class="sub" style="margin-bottom:18px;">
-                    Use your ambassador code anywhere you promote Doggie Dorian’s. Your personal booking link already includes it.
+                    Use your ambassador code anywhere you promote Doggie Dorian’s. Clients should use the public non-member booking page and enter your code there.
                 </div>
 
                 <div class="table-wrap">
@@ -1077,18 +1480,18 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                             </tr>
                             <tr>
                                 <td>Direct message</td>
-                                <td><?php echo h($shareWithCodeUrl); ?></td>
+                                <td><?php echo h($shareUrl); ?> · Use code <strong><?php echo h($currentCode); ?></strong></td>
                             </tr>
                             <tr>
                                 <td>Referral post</td>
-                                <td>Book with Doggie Dorian’s using my code when you schedule.</td>
+                                <td>Book on our public booking page and use code <strong><?php echo h($currentCode); ?></strong> for your discount.</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
 
                 <div class="btn-row">
-                    <a class="btn btn-light" href="book-service.php?ref=<?php echo rawurlencode($currentCode); ?>">Test My Booking Link</a>
+                    <a class="btn btn-light" href="non-member-booking.php">Open Public Booking Page</a>
                     <a class="btn btn-light" href="notifications.php">View Notifications</a>
                 </div>
             </div>
@@ -1120,12 +1523,21 @@ $shareWithCodeUrl = $currentCode !== '' ? $shareUrl . '?ref=' . rawurlencode($cu
                                 if ($status === '') {
                                     $status = 'pending';
                                 }
+
+                                $rewardAmount = (float) (isset($row['reward_amount']) ? $row['reward_amount'] : 0);
+                                $rewardDisplay = '$' . number_format($rewardAmount, 2);
+
+                                if (in_array($status, array('pending', 'new', 'awaiting', 'processing'), true) && $rewardAmount > 0) {
+                                    $rewardDisplay .= ' pending';
+                                } elseif (in_array($status, array('blocked', 'rejected', 'failed', 'void', 'cancelled', 'canceled'), true)) {
+                                    $rewardDisplay = '—';
+                                }
                                 ?>
                                 <tr>
                                     <td><?php echo h((isset($row['referred_name']) && trim((string) $row['referred_name']) !== '') ? $row['referred_name'] : '—'); ?></td>
                                     <td><?php echo h((isset($row['used_code']) && trim((string) $row['used_code']) !== '') ? $row['used_code'] : $currentCode); ?></td>
                                     <td><span class="status <?php echo h($status); ?>"><?php echo h($status); ?></span></td>
-                                    <td>$<?php echo h(number_format((float) (isset($row['reward_amount']) ? $row['reward_amount'] : 0), 2)); ?></td>
+                                    <td><?php echo h($rewardDisplay); ?></td>
                                     <td><?php echo h((isset($row['booking_ref']) && trim((string) $row['booking_ref']) !== '') ? $row['booking_ref'] : '—'); ?></td>
                                     <td><?php echo h((isset($row['created_at']) && trim((string) $row['created_at']) !== '') ? $row['created_at'] : '—'); ?></td>
                                 </tr>

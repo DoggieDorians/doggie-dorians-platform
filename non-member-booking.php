@@ -580,6 +580,14 @@ $clientPricingData = [
       font-family: Arial, sans-serif;
     }
 
+    .quote-box .quote-disclaimer {
+      margin-top: 10px;
+      color: rgba(255,255,255,0.60);
+      font-size: 0.84rem;
+      line-height: 1.5;
+      font-family: Arial, sans-serif;
+    }
+
     .booking-form {
       display: grid;
       gap: 16px;
@@ -828,6 +836,12 @@ $clientPricingData = [
       return '$' + Number(value || 0).toFixed(2);
     }
 
+    function trimmedValue(id) {
+      const el = document.getElementById(id);
+      if (!el) return '';
+      return String(el.value || '').trim();
+    }
+
     function setFieldRequired(id, required) {
       const el = document.getElementById(id);
       if (!el) return;
@@ -900,15 +914,20 @@ $clientPricingData = [
       const daycareProvideFood = document.getElementById('daycare_provide_food').checked;
       const daycareExtraWalks = parseInt(document.getElementById('daycare_extra_walks').value || '0', 10);
       const sittingExtraWalks = parseInt(document.getElementById('sitting_extra_walks').value || '0', 10);
+      const ambassadorCode = trimmedValue('ambassador_code');
 
       const dogSize = String(dogSizeValue || '').toLowerCase();
       const estimateField = document.getElementById('estimated_price');
+      const originalPriceField = document.getElementById('original_price');
+      const ambassadorDiscountAmountField = document.getElementById('ambassador_discount_amount');
+      const finalPriceField = document.getElementById('final_price');
       const estimateText = document.getElementById('estimated_price_text');
       const pricingTypeField = document.getElementById('pricing_type');
       const discountLabelField = document.getElementById('discount_label');
       const unitPriceField = document.getElementById('unit_price');
       const quantityField = document.getElementById('quantity');
       const quoteMeta = document.getElementById('quote_meta');
+      const quoteDisclaimer = document.getElementById('quote_disclaimer');
 
       let total = 0;
       let unitPrice = 0;
@@ -917,6 +936,9 @@ $clientPricingData = [
       let pricingType = 'non_member';
       let discountLabel = 'standard_non_member';
       let meta = '';
+      let originalTotal = 0;
+      let ambassadorDiscount = 0;
+      let finalTotal = 0;
 
       if (serviceType === 'Walk') {
         if (DD_PRICING.walk[walkDuration]) {
@@ -1005,8 +1027,30 @@ $clientPricingData = [
         }
       }
 
+      originalTotal = total > 0 ? total : 0;
+      finalTotal = originalTotal;
+
+      if (ambassadorCode !== '' && originalTotal > 0) {
+        ambassadorDiscount = Math.min(10, originalTotal);
+        finalTotal = Math.max(0, originalTotal - ambassadorDiscount);
+        label = money(finalTotal) + ' estimated total with ambassador savings preview.';
+        meta = money(originalTotal) + ' original total · -' + money(ambassadorDiscount) + ' ambassador savings preview';
+      }
+
       if (estimateField) {
-        estimateField.value = total > 0 ? total.toFixed(2) : '';
+        estimateField.value = originalTotal > 0 ? originalTotal.toFixed(2) : '';
+      }
+
+      if (originalPriceField) {
+        originalPriceField.value = originalTotal > 0 ? originalTotal.toFixed(2) : '';
+      }
+
+      if (ambassadorDiscountAmountField) {
+        ambassadorDiscountAmountField.value = ambassadorDiscount > 0 ? ambassadorDiscount.toFixed(2) : '0.00';
+      }
+
+      if (finalPriceField) {
+        finalPriceField.value = finalTotal > 0 ? finalTotal.toFixed(2) : '';
       }
 
       if (pricingTypeField) {
@@ -1014,7 +1058,7 @@ $clientPricingData = [
       }
 
       if (discountLabelField) {
-        discountLabelField.value = discountLabel;
+        discountLabelField.value = ambassadorDiscount > 0 ? 'ambassador_referral_preview' : discountLabel;
       }
 
       if (unitPriceField) {
@@ -1031,6 +1075,12 @@ $clientPricingData = [
 
       if (quoteMeta) {
         quoteMeta.textContent = meta;
+      }
+
+      if (quoteDisclaimer) {
+        quoteDisclaimer.textContent = ambassadorCode !== ''
+          ? 'Ambassador code savings shown here are only a preview. Final eligibility, self-referral blocking, repeat-use blocking by IP, and ambassador crediting are validated securely on the server before payment is finalized.'
+          : 'Promo and ambassador codes are validated securely on the server before payment. Self-referrals and repeat promo use from the same IP can be blocked even if a code is entered here.';
       }
     }
 
@@ -1090,7 +1140,8 @@ $clientPricingData = [
         'drop_in_add_walk',
         'daycare_provide_food',
         'daycare_extra_walks',
-        'sitting_extra_walks'
+        'sitting_extra_walks',
+        'ambassador_code'
       ].forEach(function(id) {
         const el = document.getElementById(id);
         if (!el) return;
@@ -1285,11 +1336,15 @@ $clientPricingData = [
                 <strong id="estimated_price_text">Select service details to view live pricing.</strong>
                 <span>This live total will carry into the non-member payment portal before Stripe checkout. Daycare is one 6-hour session. Sitting is priced as one session. Boarding totals use nights and still depend on dog size.</span>
                 <div class="quote-meta" id="quote_meta"></div>
+                <div class="quote-disclaimer" id="quote_disclaimer">Promo and ambassador codes are validated securely on the server before payment. Self-referrals and repeat promo use from the same IP can be blocked even if a code is entered here.</div>
               </div>
             </div>
 
             <form class="booking-form" id="non_member_booking_form" action="process-non-member-booking.php" method="post">
               <input type="hidden" id="estimated_price" name="estimated_price" value="<?php echo old_value($formData, 'estimated_price'); ?>">
+              <input type="hidden" id="original_price" name="original_price" value="<?php echo old_value($formData, 'original_price'); ?>">
+              <input type="hidden" id="ambassador_discount_amount" name="ambassador_discount_amount" value="<?php echo old_value($formData, 'ambassador_discount_amount') !== '' ? old_value($formData, 'ambassador_discount_amount') : '0.00'; ?>">
+              <input type="hidden" id="final_price" name="final_price" value="<?php echo old_value($formData, 'final_price'); ?>">
               <input type="hidden" id="pricing_type" name="pricing_type" value="<?php echo old_value($formData, 'pricing_type') !== '' ? old_value($formData, 'pricing_type') : 'non_member'; ?>">
               <input type="hidden" id="discount_label" name="discount_label" value="<?php echo old_value($formData, 'discount_label') !== '' ? old_value($formData, 'discount_label') : 'standard_non_member'; ?>">
               <input type="hidden" id="unit_price" name="unit_price" value="<?php echo old_value($formData, 'unit_price'); ?>">
@@ -1472,6 +1527,12 @@ $clientPricingData = [
                     <option value="Email" <?php echo old_value($formData, 'preferred_contact') === 'Email' ? 'selected' : ''; ?>>Email</option>
                   </select>
                 </div>
+              </div>
+
+              <div class="field-group">
+                <label for="ambassador_code">Ambassador Code <span style="font-weight: 400; color: rgba(255,255,255,0.58);">(Optional)</span></label>
+                <input type="text" id="ambassador_code" name="ambassador_code" maxlength="64" placeholder="Enter ambassador code" value="<?php echo old_value($formData, 'ambassador_code'); ?>" autocomplete="off" spellcheck="false">
+                <div class="helper">Valid ambassador codes can preview a $10 savings here, but final approval happens securely on the server. Self-referrals and repeat promo use from the same IP are blocked during validation.</div>
               </div>
 
               <div class="field-group">

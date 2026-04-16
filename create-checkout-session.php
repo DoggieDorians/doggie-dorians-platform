@@ -1118,12 +1118,42 @@ if ($mode === 'non_member') {
         );
     }
 
-    $amount = (float) ($pricing['total_price'] ?? 0);
+    $originalAmount = (float) ($pricing['total_price'] ?? 0);
     $unitPrice = (float) ($pricing['unit_price'] ?? 0);
     $quantity = (int) ($pricing['quantity'] ?? 0);
 
-    if ($amount <= 0 || $quantity <= 0) {
+    if ($originalAmount <= 0 || $quantity <= 0) {
         failPage('Invalid non-member total.', 400, 'non-member-booking.php');
+    }
+
+    $ambassadorCode = strtoupper(trim((string) ($sessionPortal['ambassador_code'] ?? '')));
+    $referringMemberId = (int) ($sessionPortal['referring_member_id'] ?? 0);
+    $referringUserId = (int) ($sessionPortal['referring_user_id'] ?? 0);
+    $referralStatus = trim((string) ($sessionPortal['referral_status'] ?? ''));
+    $referralRewardAmount = round((float) ($sessionPortal['referral_reward_amount'] ?? 0), 2);
+    $referralIp = trim((string) ($sessionPortal['referral_ip'] ?? ''));
+    $sessionOriginalAmount = round((float) ($sessionPortal['original_total_amount'] ?? 0), 2);
+    $sessionDiscountAmount = round((float) ($sessionPortal['discount_amount'] ?? 0), 2);
+    $sessionFinalAmount = round((float) ($sessionPortal['final_total_amount'] ?? $sessionPortal['total_amount'] ?? 0), 2);
+
+    $discountAmount = 0.00;
+    $amount = round($originalAmount, 2);
+
+    if ($ambassadorCode !== '' && $referringMemberId > 0 && $sessionDiscountAmount > 0) {
+        $discountAmount = min($sessionDiscountAmount, $amount);
+        $amount = round($amount - $discountAmount, 2);
+    }
+
+    if ($sessionOriginalAmount > 0 && abs($sessionOriginalAmount - $originalAmount) < 0.01) {
+        $originalAmount = $sessionOriginalAmount;
+    }
+
+    if ($sessionFinalAmount > 0 && abs($sessionFinalAmount - $amount) < 0.01) {
+        $amount = $sessionFinalAmount;
+    }
+
+    if ($amount <= 0) {
+        failPage('Invalid payment amount.', 400, 'non-member-booking.php');
     }
 
     $amountCents = (int) round($amount * 100);
@@ -1142,6 +1172,10 @@ if ($mode === 'non_member') {
         $checkoutName .= ' - ' . ucfirst($dogSize);
     }
 
+    if ($ambassadorCode !== '' && $discountAmount > 0) {
+        $checkoutName .= ' - Ambassador Applied';
+    }
+
     $cancelUrl = buildCancelUrl('non_member', $baseUrl, ['request_id' => $requestId > 0 ? (string) $requestId : null]);
 
     if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -1156,7 +1190,16 @@ if ($mode === 'non_member') {
         'discount_label' => $discountLabel,
         'quantity' => (string) $quantity,
         'unit_price' => number_format($unitPrice, 2, '.', ''),
+        'original_total_amount' => number_format($originalAmount, 2, '.', ''),
+        'discount_amount' => number_format($discountAmount, 2, '.', ''),
         'total_amount' => number_format($amount, 2, '.', ''),
+        'final_total_amount' => number_format($amount, 2, '.', ''),
+        'ambassador_code' => $ambassadorCode,
+        'referring_member_id' => $referringMemberId > 0 ? (string) $referringMemberId : '',
+        'referring_user_id' => $referringUserId > 0 ? (string) $referringUserId : '',
+        'referral_status' => $referralStatus,
+        'referral_reward_amount' => $referralRewardAmount > 0 ? number_format($referralRewardAmount, 2, '.', '') : '',
+        'referral_ip' => $referralIp,
         'full_name' => $fullName,
         'email' => $email,
         'phone' => $phone,

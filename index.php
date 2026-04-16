@@ -433,6 +433,7 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
                 <a class="top-link" href="memberships.php#founders">Founder Memberships</a>
                 <a class="top-link" href="non-member-booking.php">Book Now</a>
                 <a class="top-link" href="group-walks.php">Group Walks</a>
+                <a class="top-link" href="testimonials.php">Testimonials</a>
                 <a class="top-link" href="contact.php">Contact</a>
                 <?php if ($isLoggedIn): ?>
                     <a class="top-link" href="dashboard.php">Dashboard</a>

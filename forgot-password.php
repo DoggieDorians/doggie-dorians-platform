@@ -95,7 +95,6 @@ function ensurePasswordResetsTable(PDO $pdo): void
 $error = '';
 $success = '';
 $email = '';
-$resetLink = '';
 
 try {
     if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -160,15 +159,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':token_hash' => $tokenHash,
                     ':expires_at' => $expiresAt,
                 ]);
-
-                $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-                $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-                $basePath = rtrim(str_replace('\\', '/', dirname($_SERVER['PHP_SELF'] ?? '/')), '/');
-                $resetPath = ($basePath === '' ? '' : $basePath) . '/reset-password.php';
-                $resetLink = $scheme . '://' . $host . $resetPath . '?token=' . urlencode($token);
             }
 
-            $success = 'If that email exists in our system, a password reset link has been created.';
+            $success = 'If that email exists in our system, a password reset request has been received. For security, reset links are not displayed on this page.';
         } catch (Throwable $e) {
             $error = 'Something went wrong while processing your request. Please try again.';
         }
@@ -343,43 +336,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .help a,
-        .links a,
-        .reset-box a {
+        .links a {
             color: #f0cf8a;
             text-decoration: none;
         }
 
         .help a:hover,
-        .links a:hover,
-        .reset-box a:hover {
+        .links a:hover {
             text-decoration: underline;
-        }
-
-        .reset-box {
-            margin-top: 18px;
-            background: var(--panel-2);
-            border: 1px solid rgba(214, 179, 106, 0.2);
-            border-radius: 16px;
-            padding: 16px;
-        }
-
-        .reset-box strong {
-            display: block;
-            margin-bottom: 8px;
-            color: #fff2cf;
-        }
-
-        .reset-box p {
-            margin: 0 0 10px;
-            color: var(--muted);
-            line-height: 1.6;
-            font-size: 14px;
-        }
-
-        .reset-link {
-            word-break: break-word;
-            line-height: 1.6;
-            font-size: 14px;
         }
 
         .links {
@@ -410,7 +374,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <p class="brand">Doggie Dorian's</p>
                 <h1>Forgot Password</h1>
                 <p class="subtitle">
-                    Enter the email address connected to your account and we’ll create a secure password reset link.
+                    Enter the email address connected to your account and we’ll create a secure password reset request.
                 </p>
             </div>
 
@@ -437,24 +401,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         >
                     </div>
 
-                    <button type="submit" class="btn">Create Reset Link</button>
+                    <button type="submit" class="btn">Request Password Reset</button>
                 </form>
 
-                <?php if ($resetLink !== ''): ?>
-                    <div class="reset-box">
-                        <strong>Testing Reset Link</strong>
-                        <p>
-                            Email sending is not connected yet, so your reset link is shown below for testing.
-                            Later, this can be replaced with real email delivery.
-                        </p>
-                        <div class="reset-link">
-                            <a href="<?php echo h($resetLink); ?>"><?php echo h($resetLink); ?></a>
-                        </div>
-                    </div>
-                <?php endif; ?>
-
                 <div class="help">
-                    For security, the reset link expires after 1 hour and becomes invalid after it is used.
+                    For security, reset links expire after 1 hour and are never displayed directly on this page.
                 </div>
 
                 <div class="links">

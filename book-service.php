@@ -420,14 +420,20 @@ function writeNotification(PDO $pdo, $userId, $bookingId, $title, $message)
 
 function lookupReferralOwnerName(PDO $pdo, $referralCode)
 {
-    $referralCode = (string) $referralCode;
+    $referralCode = normalizeReferralCodeLocal($referralCode);
 
-    if ($referralCode === '' || !hasTable($pdo, 'users')) {
+    if ($referralCode === '') {
         return '';
     }
 
-    $idCol = firstExistingColumn($pdo, 'users', array('id', 'user_id'));
-    if ($idCol === null) {
+    if (function_exists('lookupAmbassadorCodeLocal')) {
+        $owner = lookupAmbassadorCodeLocal($pdo, $referralCode);
+        if (is_array($owner) && trim((string) (isset($owner['owner_name']) ? $owner['owner_name'] : '')) !== '') {
+            return trim((string) $owner['owner_name']);
+        }
+    }
+
+    if (!hasTable($pdo, 'users')) {
         return '';
     }
 
@@ -436,8 +442,13 @@ function lookupReferralOwnerName(PDO $pdo, $referralCode)
         return '';
     }
 
+    $codeCol = firstExistingColumn($pdo, 'users', array('ambassador_code', 'referral_code', 'custom_referral_code', 'custom_code', 'promo_code'));
+    if ($codeCol === null) {
+        return '';
+    }
+
     try {
-        $stmt = $pdo->prepare("SELECT {$nameCol} AS display_name FROM users WHERE UPPER(referral_code) = UPPER(:code) LIMIT 1");
+        $stmt = $pdo->prepare("SELECT {$nameCol} AS display_name FROM users WHERE UPPER(TRIM({$codeCol})) = UPPER(:code) LIMIT 1");
         if (!$stmt->execute(array(':code' => $referralCode))) {
             return '';
         }
@@ -450,6 +461,416 @@ function lookupReferralOwnerName(PDO $pdo, $referralCode)
         return '';
     } catch (Exception $e) {
         return '';
+    }
+}
+
+if (!defined('DD_AMBASSADOR_DISCOUNT_AMOUNT')) {
+    define('DD_AMBASSADOR_DISCOUNT_AMOUNT', 10.00);
+}
+
+if (!defined('DD_AMBASSADOR_REWARD_AMOUNT')) {
+    define('DD_AMBASSADOR_REWARD_AMOUNT', 5.00);
+}
+
+function getClientIpAddressLocal()
+{
+    $candidates = array(
+        isset($_SERVER['HTTP_CF_CONNECTING_IP']) ? (string) $_SERVER['HTTP_CF_CONNECTING_IP'] : '',
+        isset($_SERVER['HTTP_X_FORWARDED_FOR']) ? (string) $_SERVER['HTTP_X_FORWARDED_FOR'] : '',
+        isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '',
+    );
+
+    foreach ($candidates as $candidate) {
+        if ($candidate === '') {
+            continue;
+        }
+
+        $parts = array_map('trim', explode(',', (string) $candidate));
+        foreach ($parts as $part) {
+            if (filter_var($part, FILTER_VALIDATE_IP)) {
+                return $part;
+            }
+        }
+    }
+
+    return '';
+}
+
+function findMemberIdByUserIdLocal(PDO $pdo, $userId)
+{
+    $userId = (int) $userId;
+
+    if ($userId <= 0 || !hasTable($pdo, 'members') || !hasColumn($pdo, 'members', 'user_id')) {
+        return 0;
+    }
+
+    try {
+        $stmt = $pdo->prepare('SELECT id FROM members WHERE user_id = :user_id ORDER BY id ASC LIMIT 1');
+        $stmt->execute(array(':user_id' => $userId));
+        $value = $stmt->fetchColumn();
+        return $value !== false ? (int) $value : 0;
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function findUserIdByMemberIdLocal(PDO $pdo, $memberId)
+{
+    $memberId = (int) $memberId;
+
+    if ($memberId <= 0 || !hasTable($pdo, 'members') || !hasColumn($pdo, 'members', 'user_id')) {
+        return 0;
+    }
+
+    try {
+        $stmt = $pdo->prepare('SELECT user_id FROM members WHERE id = :id LIMIT 1');
+        $stmt->execute(array(':id' => $memberId));
+        $value = $stmt->fetchColumn();
+        return $value !== false ? (int) $value : 0;
+    } catch (Throwable $e) {
+        return 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function findEmailForMemberLocal(PDO $pdo, $memberId)
+{
+    $memberId = (int) $memberId;
+
+    if ($memberId <= 0) {
+        return '';
+    }
+
+    if (hasTable($pdo, 'members') && hasColumn($pdo, 'members', 'email')) {
+        try {
+            $stmt = $pdo->prepare('SELECT email FROM members WHERE id = :id LIMIT 1');
+            $stmt->execute(array(':id' => $memberId));
+            $value = $stmt->fetchColumn();
+            if (is_string($value) && trim($value) !== '') {
+                return trim((string) $value);
+            }
+        } catch (Throwable $e) {
+        } catch (Exception $e) {
+        }
+    }
+
+    $userId = findUserIdByMemberIdLocal($pdo, $memberId);
+    if ($userId > 0 && hasTable($pdo, 'users') && hasColumn($pdo, 'users', 'email')) {
+        try {
+            $stmt = $pdo->prepare('SELECT email FROM users WHERE id = :id LIMIT 1');
+            $stmt->execute(array(':id' => $userId));
+            $value = $stmt->fetchColumn();
+            if (is_string($value) && trim($value) !== '') {
+                return trim((string) $value);
+            }
+        } catch (Throwable $e) {
+        } catch (Exception $e) {
+        }
+    }
+
+    return '';
+}
+
+function currentUserEmailLocal(PDO $pdo, $userId, array $memberRecord = array())
+{
+    if (!empty($memberRecord['email']) && filter_var((string) $memberRecord['email'], FILTER_VALIDATE_EMAIL)) {
+        return trim((string) $memberRecord['email']);
+    }
+
+    $tables = array('users', 'members', 'client_profiles');
+    foreach ($tables as $table) {
+        if (!hasTable($pdo, $table)) {
+            continue;
+        }
+
+        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
+        $emailCol = firstExistingColumn($pdo, $table, array('email', 'member_email', 'client_email', 'user_email'));
+        if ($idCol === null || $emailCol === null) {
+            continue;
+        }
+
+        try {
+            $stmt = $pdo->prepare("SELECT {$emailCol} FROM {$table} WHERE {$idCol} = :id LIMIT 1");
+            $stmt->execute(array(':id' => (int) $userId));
+            $value = $stmt->fetchColumn();
+            if (is_string($value) && filter_var(trim((string) $value), FILTER_VALIDATE_EMAIL)) {
+                return trim((string) $value);
+            }
+        } catch (Throwable $e) {
+        } catch (Exception $e) {
+        }
+    }
+
+    return '';
+}
+
+function lookupAmbassadorCodeLocal(PDO $pdo, $code)
+{
+    $code = normalizeReferralCodeLocal($code);
+
+    if ($code === '') {
+        return null;
+    }
+
+    $sources = array(
+        array(
+            'table' => 'members',
+            'code_columns' => array('ambassador_code', 'referral_code', 'custom_referral_code', 'custom_code', 'promo_code'),
+            'member_id_columns' => array('id', 'member_id'),
+            'user_id_columns' => array('user_id'),
+            'email_columns' => array('email'),
+            'name_columns' => array('full_name', 'name'),
+        ),
+        array(
+            'table' => 'users',
+            'code_columns' => array('ambassador_code', 'referral_code', 'custom_referral_code', 'custom_code', 'promo_code'),
+            'member_id_columns' => array(),
+            'user_id_columns' => array('id', 'user_id'),
+            'email_columns' => array('email'),
+            'name_columns' => array('full_name', 'name', 'username'),
+        ),
+        array(
+            'table' => 'ambassadors',
+            'code_columns' => array('ambassador_code', 'referral_code', 'code', 'custom_code', 'promo_code'),
+            'member_id_columns' => array('referring_member_id', 'referrer_member_id', 'member_id'),
+            'user_id_columns' => array('user_id', 'referring_user_id', 'referrer_user_id'),
+            'email_columns' => array('email', 'member_email'),
+            'name_columns' => array('full_name', 'name', 'member_name'),
+        ),
+        array(
+            'table' => 'referrals',
+            'code_columns' => array('ambassador_code', 'referral_code', 'code', 'custom_code', 'promo_code'),
+            'member_id_columns' => array('referring_member_id', 'referrer_member_id', 'member_id'),
+            'user_id_columns' => array('user_id', 'referring_user_id', 'referrer_user_id'),
+            'email_columns' => array('email', 'member_email', 'referrer_email'),
+            'name_columns' => array('full_name', 'name', 'member_name', 'referrer_name'),
+        ),
+    );
+
+    foreach ($sources as $config) {
+        $table = (string) $config['table'];
+        if (!hasTable($pdo, $table)) {
+            continue;
+        }
+
+        $codeCol = firstExistingColumn($pdo, $table, $config['code_columns']);
+        if ($codeCol === null) {
+            continue;
+        }
+
+        $selectParts = array($codeCol . ' AS ambassador_code');
+
+        $memberIdCol = firstExistingColumn($pdo, $table, $config['member_id_columns']);
+        $userIdCol = firstExistingColumn($pdo, $table, $config['user_id_columns']);
+        $emailCol = firstExistingColumn($pdo, $table, $config['email_columns']);
+        $nameCol = firstExistingColumn($pdo, $table, $config['name_columns']);
+
+        if ($memberIdCol !== null) {
+            $selectParts[] = $memberIdCol . ' AS raw_member_id';
+        }
+        if ($userIdCol !== null) {
+            $selectParts[] = $userIdCol . ' AS raw_user_id';
+        }
+        if ($emailCol !== null) {
+            $selectParts[] = $emailCol . ' AS owner_email';
+        }
+        if ($nameCol !== null) {
+            $selectParts[] = $nameCol . ' AS owner_name';
+        }
+
+        $sql = 'SELECT ' . implode(', ', $selectParts)
+            . ' FROM ' . $table
+            . ' WHERE UPPER(TRIM(' . $codeCol . ')) = UPPER(:code)'
+            . ' ORDER BY rowid DESC LIMIT 1';
+
+        try {
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute(array(':code' => $code));
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$row) {
+                continue;
+            }
+
+            $memberId = isset($row['raw_member_id']) ? (int) $row['raw_member_id'] : 0;
+            $userId = isset($row['raw_user_id']) ? (int) $row['raw_user_id'] : 0;
+
+            if ($memberId <= 0 && $userId > 0) {
+                $memberId = findMemberIdByUserIdLocal($pdo, $userId);
+            }
+            if ($userId <= 0 && $memberId > 0) {
+                $userId = findUserIdByMemberIdLocal($pdo, $memberId);
+            }
+
+            $ownerEmail = trim((string) (isset($row['owner_email']) ? $row['owner_email'] : ''));
+            if ($ownerEmail === '' && $memberId > 0) {
+                $ownerEmail = findEmailForMemberLocal($pdo, $memberId);
+            }
+
+            return array(
+                'code' => normalizeReferralCodeLocal(isset($row['ambassador_code']) ? $row['ambassador_code'] : $code),
+                'member_id' => $memberId,
+                'user_id' => $userId,
+                'owner_email' => $ownerEmail,
+                'owner_name' => trim((string) (isset($row['owner_name']) ? $row['owner_name'] : '')),
+                'source_table' => $table,
+            );
+        } catch (Throwable $e) {
+            continue;
+        } catch (Exception $e) {
+            continue;
+        }
+    }
+
+    return null;
+}
+
+function hasPriorReferralIpUsageLocal(PDO $pdo, $ipAddress)
+{
+    $ipAddress = trim((string) $ipAddress);
+
+    if ($ipAddress === '') {
+        return false;
+    }
+
+    $bookingTables = array('non_member_bookings', 'public_booking_requests', 'bookings', 'walks');
+
+    foreach ($bookingTables as $table) {
+        if (!hasTable($pdo, $table)) {
+            continue;
+        }
+
+        $ipColumn = firstExistingColumn($pdo, $table, array('referral_ip', 'client_ip', 'ip_address'));
+        if ($ipColumn === null) {
+            continue;
+        }
+
+        $codeColumn = firstExistingColumn($pdo, $table, array('ambassador_code', 'referral_code', 'promo_code', 'ref_code'));
+        $discountColumn = firstExistingColumn($pdo, $table, array('ambassador_discount_amount', 'discount_amount'));
+        $statusColumn = firstExistingColumn($pdo, $table, array('referral_status', 'status'));
+
+        $conditions = array($ipColumn . ' = :ip');
+        if ($codeColumn !== null) {
+            $conditions[] = "TRIM(COALESCE(" . $codeColumn . ", '')) <> ''";
+        }
+        if ($discountColumn !== null) {
+            $conditions[] = '(' . $discountColumn . ' > 0';
+            if ($statusColumn !== null) {
+                $conditions[count($conditions) - 1] .= ' OR LOWER(TRIM(COALESCE(' . $statusColumn . ", ''))) IN ('pending','completed','discount_applied_no_payment')";
+            }
+            $conditions[count($conditions) - 1] .= ')';
+        } elseif ($statusColumn !== null) {
+            $conditions[] = "LOWER(TRIM(COALESCE(" . $statusColumn . ", ''))) IN ('pending','completed','discount_applied_no_payment')";
+        }
+
+        try {
+            $stmt = $pdo->prepare('SELECT COUNT(*) FROM ' . $table . ' WHERE ' . implode(' AND ', $conditions));
+            $stmt->execute(array(':ip' => $ipAddress));
+            if ((int) $stmt->fetchColumn() > 0) {
+                return true;
+            }
+        } catch (Throwable $e) {
+        } catch (Exception $e) {
+        }
+    }
+
+    if (hasTable($pdo, 'referrals')) {
+        $ipColumn = firstExistingColumn($pdo, 'referrals', array('referral_ip', 'used_ip', 'client_ip', 'ip_address'));
+        $statusColumn = firstExistingColumn($pdo, 'referrals', array('status', 'referral_status'));
+        $codeColumn = firstExistingColumn($pdo, 'referrals', array('ambassador_code', 'referral_code', 'code', 'promo_code'));
+
+        if ($ipColumn !== null) {
+            $conditions = array($ipColumn . ' = :ip');
+            if ($codeColumn !== null) {
+                $conditions[] = "TRIM(COALESCE(" . $codeColumn . ", '')) <> ''";
+            }
+            if ($statusColumn !== null) {
+                $conditions[] = "LOWER(TRIM(COALESCE(" . $statusColumn . ", ''))) IN ('pending','completed','discount_applied_no_payment')";
+            }
+
+            try {
+                $stmt = $pdo->prepare('SELECT COUNT(*) FROM referrals WHERE ' . implode(' AND ', $conditions));
+                $stmt->execute(array(':ip' => $ipAddress));
+                if ((int) $stmt->fetchColumn() > 0) {
+                    return true;
+                }
+            } catch (Throwable $e) {
+            } catch (Exception $e) {
+            }
+        }
+    }
+
+    return false;
+}
+
+function saveMemberPendingReferralRecord(PDO $pdo, array $payload)
+{
+    if (!hasTable($pdo, 'referrals')) {
+        return;
+    }
+
+    $columns = getTableColumns($pdo, 'referrals');
+    if (empty($columns)) {
+        return;
+    }
+
+    $data = array(
+        'booking_id' => isset($payload['booking_id']) ? (int) $payload['booking_id'] : 0,
+        'service_type' => isset($payload['service_type']) ? (string) $payload['service_type'] : '',
+        'ambassador_code' => isset($payload['ambassador_code']) ? (string) $payload['ambassador_code'] : '',
+        'referral_code' => isset($payload['ambassador_code']) ? (string) $payload['ambassador_code'] : '',
+        'code' => isset($payload['ambassador_code']) ? (string) $payload['ambassador_code'] : '',
+        'promo_code' => isset($payload['ambassador_code']) ? (string) $payload['ambassador_code'] : '',
+        'referred_user_id' => isset($payload['referred_user_id']) ? (int) $payload['referred_user_id'] : 0,
+        'referred_member_id' => isset($payload['referred_member_id']) ? (int) $payload['referred_member_id'] : 0,
+        'referring_user_id' => isset($payload['referring_user_id']) ? (int) $payload['referring_user_id'] : 0,
+        'referrer_user_id' => isset($payload['referring_user_id']) ? (int) $payload['referring_user_id'] : 0,
+        'referring_member_id' => isset($payload['referring_member_id']) ? (int) $payload['referring_member_id'] : 0,
+        'referrer_member_id' => isset($payload['referring_member_id']) ? (int) $payload['referring_member_id'] : 0,
+        'original_total_amount' => isset($payload['original_total_amount']) ? number_format((float) $payload['original_total_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'ambassador_discount_amount' => isset($payload['discount_amount']) ? number_format((float) $payload['discount_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'discount_amount' => isset($payload['discount_amount']) ? number_format((float) $payload['discount_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'final_total_amount' => isset($payload['final_total_amount']) ? number_format((float) $payload['final_total_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'total_amount' => isset($payload['final_total_amount']) ? number_format((float) $payload['final_total_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'ambassador_credit_amount' => isset($payload['reward_amount']) ? number_format((float) $payload['reward_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'reward_amount' => isset($payload['reward_amount']) ? number_format((float) $payload['reward_amount'], 2, '.', '') : number_format(0, 2, '.', ''),
+        'status' => isset($payload['status']) ? (string) $payload['status'] : 'pending',
+        'referral_status' => isset($payload['status']) ? (string) $payload['status'] : 'pending',
+        'referral_ip' => isset($payload['referral_ip']) ? (string) $payload['referral_ip'] : '',
+        'used_ip' => isset($payload['referral_ip']) ? (string) $payload['referral_ip'] : '',
+        'client_ip' => isset($payload['referral_ip']) ? (string) $payload['referral_ip'] : '',
+        'notes' => 'Pending member ambassador referral created before payment.',
+        'created_at' => date('Y-m-d H:i:s'),
+        'updated_at' => date('Y-m-d H:i:s'),
+    );
+
+    $insertData = array();
+    foreach ($data as $column => $value) {
+        if (in_array($column, $columns, true)) {
+            $insertData[$column] = $value;
+        }
+    }
+
+    if (empty($insertData)) {
+        return;
+    }
+
+    $fields = array_keys($insertData);
+    $placeholders = array();
+    $params = array();
+
+    foreach ($fields as $field) {
+        $placeholders[] = ':' . $field;
+        $params[':' . $field] = $insertData[$field];
+    }
+
+    try {
+        $stmt = $pdo->prepare('INSERT INTO referrals (' . implode(', ', $fields) . ') VALUES (' . implode(', ', $placeholders) . ')');
+        $stmt->execute($params);
+    } catch (Throwable $e) {
+    } catch (Exception $e) {
     }
 }
 
@@ -859,6 +1280,14 @@ function insertBooking(PDO $pdo, array $payload)
     $quantity = isset($payload['quantity']) ? (int) $payload['quantity'] : 1;
     $unitPrice = isset($payload['unit_price']) ? (float) $payload['unit_price'] : $price;
     $paymentStatus = isset($payload['payment_status']) ? (string) $payload['payment_status'] : 'pending';
+    $originalTotalAmount = isset($payload['original_total_amount']) ? (float) $payload['original_total_amount'] : $price;
+    $ambassadorDiscountAmount = isset($payload['ambassador_discount_amount']) ? (float) $payload['ambassador_discount_amount'] : 0.00;
+    $finalTotalAmount = isset($payload['final_total_amount']) ? (float) $payload['final_total_amount'] : $price;
+    $referringMemberId = isset($payload['referring_member_id']) ? (int) $payload['referring_member_id'] : 0;
+    $referringUserId = isset($payload['referring_user_id']) ? (int) $payload['referring_user_id'] : 0;
+    $referralStatus = isset($payload['referral_status']) ? (string) $payload['referral_status'] : '';
+    $referralIp = isset($payload['referral_ip']) ? (string) $payload['referral_ip'] : '';
+    $referralRewardAmount = isset($payload['referral_reward_amount']) ? (float) $payload['referral_reward_amount'] : 0.00;
     $bookingMeta = isset($payload['booking_meta']) && is_array($payload['booking_meta']) ? $payload['booking_meta'] : array();
     $metaJson = !empty($bookingMeta) ? serializeBookingMeta($bookingMeta) : '';
 
@@ -928,6 +1357,10 @@ function insertBooking(PDO $pdo, array $payload)
         'amount' => $price,
         'amount_due' => $price,
         'unit_price' => $unitPrice,
+        'original_total_amount' => $originalTotalAmount,
+        'ambassador_discount_amount' => $ambassadorDiscountAmount,
+        'discount_amount' => $ambassadorDiscountAmount,
+        'final_total_amount' => $finalTotalAmount,
 
         'status' => 'pending',
         'booking_status' => 'pending',
@@ -945,6 +1378,17 @@ function insertBooking(PDO $pdo, array $payload)
 
         'referral_code' => $referralCode !== '' ? $referralCode : null,
         'ref_code' => $referralCode !== '' ? $referralCode : null,
+        'ambassador_code' => $referralCode !== '' ? $referralCode : null,
+        'promo_code' => $referralCode !== '' ? $referralCode : null,
+        'referring_member_id' => $referringMemberId > 0 ? $referringMemberId : null,
+        'referrer_member_id' => $referringMemberId > 0 ? $referringMemberId : null,
+        'referring_user_id' => $referringUserId > 0 ? $referringUserId : null,
+        'referrer_user_id' => $referringUserId > 0 ? $referringUserId : null,
+        'referral_status' => $referralStatus !== '' ? $referralStatus : null,
+        'referral_ip' => $referralIp !== '' ? $referralIp : null,
+        'client_ip' => $referralIp !== '' ? $referralIp : null,
+        'referral_reward_amount' => $referralRewardAmount > 0 ? $referralRewardAmount : null,
+        'ambassador_credit_amount' => $referralRewardAmount > 0 ? $referralRewardAmount : null,
 
         'created_at' => date('Y-m-d H:i:s'),
         'updated_at' => date('Y-m-d H:i:s'),
@@ -1137,7 +1581,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
-            $paymentRequired = $overageUnits > 0 && $overageTotal > 0;
+            $initialPaymentRequired = $overageUnits > 0 && $overageTotal > 0;
+            $originalChargeAmount = $initialPaymentRequired ? round((float) $overageTotal, 2) : 0.00;
+            $ambassadorDiscountAmount = 0.00;
+            $finalChargeAmount = $originalChargeAmount;
+            $referringMemberId = 0;
+            $referringUserId = 0;
+            $referralStatus = '';
+            $referralRewardAmount = 0.00;
+            $referralIp = getClientIpAddressLocal();
+            $referralCodeForStorage = '';
+            $referralApplied = false;
+
+            if ($initialPaymentRequired && $referralCode !== '') {
+                $ambassadorOwner = lookupAmbassadorCodeLocal($pdo, $referralCode);
+
+                if (!is_array($ambassadorOwner)) {
+                    throw new InvalidArgumentException('That ambassador code could not be validated.');
+                }
+
+                $referringMemberId = isset($ambassadorOwner['member_id']) ? (int) $ambassadorOwner['member_id'] : 0;
+                $referringUserId = isset($ambassadorOwner['user_id']) ? (int) $ambassadorOwner['user_id'] : 0;
+                $ownerEmail = trim((string) (isset($ambassadorOwner['owner_email']) ? $ambassadorOwner['owner_email'] : ''));
+                $currentUserEmail = currentUserEmailLocal($pdo, $userId, $memberRecord);
+
+                if ($referringUserId > 0 && $referringUserId === $userId) {
+                    throw new InvalidArgumentException('You cannot use your own ambassador code.');
+                }
+
+                if ($ownerEmail !== '' && $currentUserEmail !== '' && strcasecmp($ownerEmail, $currentUserEmail) === 0) {
+                    throw new InvalidArgumentException('You cannot use your own ambassador code.');
+                }
+
+                if ($referralIp !== '' && hasPriorReferralIpUsageLocal($pdo, $referralIp)) {
+                    throw new InvalidArgumentException('This IP address has already used an ambassador discount.');
+                }
+
+                $referralCodeForStorage = (string) $ambassadorOwner['code'];
+                $ambassadorDiscountAmount = min((float) DD_AMBASSADOR_DISCOUNT_AMOUNT, $originalChargeAmount);
+                $finalChargeAmount = max(0, round($originalChargeAmount - $ambassadorDiscountAmount, 2));
+                $referralApplied = $ambassadorDiscountAmount > 0;
+
+                if ($referralApplied && $finalChargeAmount > 0) {
+                    $referralStatus = 'pending';
+                    $referralRewardAmount = (float) DD_AMBASSADOR_REWARD_AMOUNT;
+                } elseif ($referralApplied) {
+                    $referralStatus = 'discount_applied_no_payment';
+                }
+            }
+
+            $paymentRequired = $overageUnits > 0 && $finalChargeAmount > 0;
             $memberPlanSlug = isset($creditState['plan_slug']) ? (string) $creditState['plan_slug'] : '';
             $durationLabel = '';
 
@@ -1160,8 +1653,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'overage_units' => $overageUnits,
                 'full_service_total' => round($fullServiceTotal, 2),
                 'overage_total' => round($overageTotal, 2),
+                'original_total_amount' => round($originalChargeAmount, 2),
+                'discount_amount' => round($ambassadorDiscountAmount, 2),
+                'final_total_amount' => round($finalChargeAmount, 2),
                 'payment_required' => $paymentRequired ? 1 : 0,
             );
+
+            if ($referralCodeForStorage !== '') {
+                $bookingMeta['ambassador_code'] = $referralCodeForStorage;
+                $bookingMeta['referring_member_id'] = $referringMemberId;
+                $bookingMeta['referring_user_id'] = $referringUserId;
+                $bookingMeta['referral_status'] = $referralStatus;
+                $bookingMeta['referral_reward_amount'] = round((float) $referralRewardAmount, 2);
+                $bookingMeta['referral_ip'] = $referralIp;
+            }
 
             if ($serviceType === 'drop-in') {
                 $bookingMeta['drop_in_hours'] = $dropInHours;
@@ -1191,13 +1696,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'service_time' => $serviceTime,
                 'duration_minutes' => (int) $pricingResult['duration'],
                 'notes' => $notes,
-                'price' => $paymentRequired ? $overageTotal : 0.00,
-                'pricing_type' => $paymentRequired ? 'member_overage' : 'member_credits',
-                'discount_label' => (string) $pricingResult['discount_label'],
+                'price' => $paymentRequired ? $finalChargeAmount : 0.00,
+                'pricing_type' => $paymentRequired ? ($referralApplied ? 'member_overage_ambassador' : 'member_overage') : 'member_credits',
+                'discount_label' => $referralApplied ? 'ambassador_code' : (string) $pricingResult['discount_label'],
                 'quantity' => $requiredUnits,
                 'unit_price' => $paymentRequired ? $overageUnitPrice : 0.00,
                 'payment_status' => $paymentRequired ? 'pending' : 'paid',
-                'referral_code' => $referralCode,
+                'original_total_amount' => $originalChargeAmount,
+                'ambassador_discount_amount' => $ambassadorDiscountAmount,
+                'final_total_amount' => $paymentRequired ? $finalChargeAmount : 0.00,
+                'referral_code' => $referralCodeForStorage,
+                'referring_member_id' => $referringMemberId,
+                'referring_user_id' => $referringUserId,
+                'referral_status' => $referralStatus,
+                'referral_ip' => $referralIp,
+                'referral_reward_amount' => $referralRewardAmount,
                 'booking_meta' => $bookingMeta,
             ));
 
@@ -1207,22 +1720,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $bookingId = (int) $insert['booking_id'];
                 $bookingReference = $bookingId > 0 ? ('#' . $bookingId) : 'Pending';
 
-                if (
-                    $bookingId > 0
-                    && $referralCode !== ''
-                    && function_exists('attachReferralToBooking')
-                ) {
-                    try {
-                        attachReferralToBooking(
-                            $pdo,
-                            $bookingId,
-                            $userId,
-                            $referralCode,
-                            $serviceType,
-                            $paymentRequired ? $overageTotal : 0.00
-                        );
-                    } catch (Throwable $e) {
-                    } catch (Exception $e) {
+                if ($bookingId > 0 && $referralCodeForStorage !== '' && $referralStatus === 'pending') {
+                    if (function_exists('attachReferralToBooking')) {
+                        try {
+                            attachReferralToBooking(
+                                $pdo,
+                                $bookingId,
+                                $userId,
+                                $referralCodeForStorage,
+                                $serviceType,
+                                $finalChargeAmount
+                            );
+                        } catch (Throwable $e) {
+                        } catch (Exception $e) {
+                        }
+                    } else {
+                        saveMemberPendingReferralRecord($pdo, array(
+                            'booking_id' => $bookingId,
+                            'service_type' => $serviceType,
+                            'ambassador_code' => $referralCodeForStorage,
+                            'referred_user_id' => $userId,
+                            'referred_member_id' => findMemberIdByUserIdLocal($pdo, $userId),
+                            'referring_user_id' => $referringUserId,
+                            'referring_member_id' => $referringMemberId,
+                            'original_total_amount' => $originalChargeAmount,
+                            'discount_amount' => $ambassadorDiscountAmount,
+                            'final_total_amount' => $finalChargeAmount,
+                            'reward_amount' => $referralRewardAmount,
+                            'status' => $referralStatus,
+                            'referral_ip' => $referralIp,
+                        ));
                     }
                 }
 
@@ -1237,7 +1764,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'quantity' => $requiredUnits,
                         'overage_units' => $overageUnits,
                         'unit_price' => round((float) $overageUnitPrice, 2),
-                        'total_amount' => round((float) $overageTotal, 2),
+                        'original_total_amount' => round((float) $originalChargeAmount, 2),
+                        'discount_amount' => round((float) $ambassadorDiscountAmount, 2),
+                        'total_amount' => round((float) $finalChargeAmount, 2),
+                        'final_total_amount' => round((float) $finalChargeAmount, 2),
+                        'ambassador_code' => $referralCodeForStorage,
+                        'referring_member_id' => $referringMemberId,
+                        'referring_user_id' => $referringUserId,
+                        'referral_status' => $referralStatus,
+                        'referral_reward_amount' => round((float) $referralRewardAmount, 2),
+                        'referral_ip' => $referralIp,
                         'booking_date' => $serviceDate,
                         'booking_time' => $serviceTime,
                         'pet_name' => (string) $selectedPet['pet_name'],
@@ -1248,12 +1784,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
 
                     if ($bookingId > 0) {
+                        $paymentMessage = 'Your ' . serviceLabel($serviceType) . ' booking was created, but additional payment is required before checkout is complete.';
+                        if ($referralApplied && $ambassadorDiscountAmount > 0) {
+                            $paymentMessage .= ' Ambassador discount applied: ' . dd_format_money((float) $ambassadorDiscountAmount) . '.';
+                        }
+
                         writeNotification(
                             $pdo,
                             $userId,
                             $bookingId,
                             'Payment Required',
-                            'Your ' . serviceLabel($serviceType) . ' booking was created, but additional payment is required before checkout is complete.'
+                            $paymentMessage
                         );
                     }
 
@@ -1265,8 +1806,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($creditsApplied > 0) {
                         $message .= ' Included member credits were applied to this booking.';
                     }
-                    if ($referralCode !== '') {
-                        $message .= ' Referral code ' . $referralCode . ' was applied.';
+                    if ($referralApplied && $ambassadorDiscountAmount > 0 && $originalChargeAmount > 0 && $finalChargeAmount <= 0) {
+                        $message .= ' Ambassador discount fully covered the remaining amount due.';
                     }
 
                     writeNotification(
@@ -1279,8 +1820,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $_SESSION['dashboard_flash'] = 'Your ' . serviceLabel($serviceType) . ' booking request was submitted successfully.';
+                if ($referralApplied && $ambassadorDiscountAmount > 0 && $originalChargeAmount > 0 && $finalChargeAmount <= 0) {
+                    $_SESSION['dashboard_flash'] = 'Your ' . serviceLabel($serviceType) . ' booking request was submitted successfully. Your ambassador discount fully covered the remaining balance.';
+                }
                 redirectTo('my-bookings.php');
             }
+        } catch (InvalidArgumentException $e) {
+            $error = trim((string) $e->getMessage()) !== ''
+                ? (string) $e->getMessage()
+                : 'Please review your booking details and try again.';
+        } catch (RuntimeException $e) {
+            $error = trim((string) $e->getMessage()) !== ''
+                ? (string) $e->getMessage()
+                : 'Please review your booking details and try again.';
         } catch (Throwable $e) {
             $error = 'Something went wrong while submitting your booking. Please try again.';
         } catch (Exception $e) {
@@ -1954,6 +2506,7 @@ $pricingMatrix = dd_pricing_matrix();
                                 placeholder="Optional code"
                                 value="<?php echo old('referral_code', $formData); ?>"
                             >
+                            <div class="helper-note">Ambassador codes are validated server-side. For member bookings, discounts apply to any eligible amount due after member credits, self-referrals are blocked, and the same IP cannot use an ambassador discount more than once.</div>
                         </div>
 
                         <div class="field-shell">
