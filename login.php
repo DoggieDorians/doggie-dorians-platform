@@ -427,6 +427,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             background: rgba(255,255,255,0.06);
         }
 
+        .password-wrap {
+            position: relative;
+        }
+
+        .password-wrap input {
+            padding-right: 96px;
+        }
+
+        .password-toggle {
+            position: absolute;
+            top: 50%;
+            right: 8px;
+            transform: translateY(-50%);
+            min-height: 40px;
+            padding: 8px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.06);
+            color: #fff;
+            font-size: .82rem;
+            font-weight: 800;
+            cursor: pointer;
+        }
+
+        .password-toggle:hover {
+            background: rgba(255,255,255,0.10);
+        }
+
+        .password-toggle:focus {
+            outline: none;
+            border-color: rgba(215,178,106,0.55);
+            box-shadow: 0 0 0 4px rgba(215,178,106,0.10);
+        }
+
         .actions {
             display: flex;
             gap: 12px;
@@ -541,13 +575,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     <div class="field">
                         <label for="password">Password</label>
-                        <input
-                            type="password"
-                            id="password"
-                            name="password"
-                            autocomplete="current-password"
-                            required
-                        >
+                        <div class="password-wrap">
+                            <input
+                                type="password"
+                                id="password"
+                                name="password"
+                                autocomplete="current-password"
+                                required
+                            >
+                            <button
+                                type="button"
+                                class="password-toggle"
+                                id="passwordToggle"
+                                aria-controls="password"
+                                aria-label="Show password"
+                                aria-pressed="false"
+                            >
+                                Show
+                            </button>
+                        </div>
                     </div>
 
                     <div class="actions">
@@ -562,5 +608,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </section>
         </div>
     </div>
+
+    <script>
+        (function () {
+            var passwordInput = document.getElementById('password');
+            var passwordToggle = document.getElementById('passwordToggle');
+
+            if (!passwordInput || !passwordToggle) {
+                return;
+            }
+
+            passwordToggle.addEventListener('click', function () {
+                var isShowing = passwordInput.type === 'text';
+
+                passwordInput.type = isShowing ? 'password' : 'text';
+                passwordToggle.textContent = isShowing ? 'Show' : 'Hide';
+                passwordToggle.setAttribute('aria-label', isShowing ? 'Show password' : 'Hide password');
+                passwordToggle.setAttribute('aria-pressed', isShowing ? 'false' : 'true');
+            });
+        })();
+    </script>
 </body>
 </html>

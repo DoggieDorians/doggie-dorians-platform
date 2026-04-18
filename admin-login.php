@@ -324,6 +324,43 @@ $csrfToken = dd_admin_login_csrf_token();
             box-shadow:0 0 0 4px rgba(212,175,55,0.08);
         }
 
+        .password-wrap{
+            position:relative;
+        }
+
+        .password-wrap input{
+            padding-right:110px;
+        }
+
+        .password-toggle{
+            position:absolute;
+            top:50%;
+            right:10px;
+            transform:translateY(-50%);
+            border:1px solid rgba(212,175,55,0.22);
+            background:rgba(212,175,55,0.08);
+            color:var(--gold-soft);
+            border-radius:12px;
+            padding:9px 12px;
+            font-size:12px;
+            font-weight:800;
+            letter-spacing:0.3px;
+            cursor:pointer;
+            min-width:78px;
+            transition:all 0.18s ease;
+        }
+
+        .password-toggle:hover{
+            background:rgba(212,175,55,0.16);
+            border-color:rgba(212,175,55,0.35);
+        }
+
+        .password-toggle:focus{
+            outline:none;
+            box-shadow:0 0 0 4px rgba(212,175,55,0.08);
+            border-color:rgba(212,175,55,0.45);
+        }
+
         .btn{
             width:100%;
             border:none;
@@ -367,6 +404,13 @@ $csrfToken = dd_admin_login_csrf_token();
             .left,.right{padding:32px 22px;}
             h1{font-size:36px;}
             .card-title{font-size:26px;}
+            .password-wrap input{padding-right:98px;}
+            .password-toggle{
+                right:8px;
+                min-width:72px;
+                padding:8px 10px;
+                font-size:11px;
+            }
         }
     </style>
 </head>
@@ -422,14 +466,26 @@ $csrfToken = dd_admin_login_csrf_token();
 
                 <div class="field">
                     <label for="password">Admin Password</label>
-                    <input
-                        type="password"
-                        id="password"
-                        name="password"
-                        placeholder="Enter your password"
-                        required
-                        autocomplete="current-password"
-                    >
+                    <div class="password-wrap">
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            placeholder="Enter your password"
+                            required
+                            autocomplete="current-password"
+                        >
+                        <button
+                            type="button"
+                            class="password-toggle"
+                            id="passwordToggle"
+                            aria-controls="password"
+                            aria-label="Show password"
+                            aria-pressed="false"
+                        >
+                            Show
+                        </button>
+                    </div>
                 </div>
 
                 <button class="btn" type="submit">Enter Admin Dashboard</button>
@@ -440,5 +496,25 @@ $csrfToken = dd_admin_login_csrf_token();
             </div>
         </section>
     </div>
+
+    <script>
+        (function () {
+            var passwordInput = document.getElementById('password');
+            var passwordToggle = document.getElementById('passwordToggle');
+
+            if (!passwordInput || !passwordToggle) {
+                return;
+            }
+
+            passwordToggle.addEventListener('click', function () {
+                var isHidden = passwordInput.type === 'password';
+
+                passwordInput.type = isHidden ? 'text' : 'password';
+                passwordToggle.textContent = isHidden ? 'Hide' : 'Show';
+                passwordToggle.setAttribute('aria-label', isHidden ? 'Hide password' : 'Show password');
+                passwordToggle.setAttribute('aria-pressed', isHidden ? 'true' : 'false');
+            });
+        })();
+    </script>
 </body>
 </html>

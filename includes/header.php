@@ -9,12 +9,97 @@ if (!isset($metaDescription) || trim((string)$metaDescription) === '') {
     $metaDescription = "Luxury dog care, memberships, walks, daycare, boarding, and concierge-level pet services from Doggie Dorian's.";
 }
 
+if (!isset($siteName) || trim((string)$siteName) === '') {
+    $siteName = "Doggie Dorian's";
+}
+
 if (!function_exists('dd_h')) {
     function dd_h(string $value): string
     {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
     }
 }
+
+if (!function_exists('dd_detect_scheme')) {
+    function dd_detect_scheme(): string
+    {
+        $https = strtolower((string)($_SERVER['HTTPS'] ?? ''));
+
+        if ($https !== '' && $https !== 'off') {
+            return 'https';
+        }
+
+        if ((string)($_SERVER['SERVER_PORT'] ?? '') === '443') {
+            return 'https';
+        }
+
+        $forwardedProto = strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+        if ($forwardedProto === 'https') {
+            return 'https';
+        }
+
+        return 'http';
+    }
+}
+
+if (!function_exists('dd_absolute_url')) {
+    function dd_absolute_url(string $baseUrl, string $path): string
+    {
+        if (preg_match('~^https?://~i', $path) === 1) {
+            return $path;
+        }
+
+        return rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
+    }
+}
+
+$resolvedHost = trim((string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'dorianspetcare.com'));
+if ($resolvedHost === '') {
+    $resolvedHost = 'dorianspetcare.com';
+}
+
+if (!isset($siteBaseUrl) || trim((string)$siteBaseUrl) === '') {
+    $siteBaseUrl = dd_detect_scheme() . '://' . $resolvedHost;
+}
+
+$currentRequestUri = (string)($_SERVER['REQUEST_URI'] ?? '/');
+if ($currentRequestUri === '') {
+    $currentRequestUri = '/';
+}
+
+if (!isset($canonicalUrl) || trim((string)$canonicalUrl) === '') {
+    $canonicalUrl = dd_absolute_url((string)$siteBaseUrl, $currentRequestUri);
+}
+
+if (!isset($ogTitle) || trim((string)$ogTitle) === '') {
+    $ogTitle = $pageTitle;
+}
+
+if (!isset($ogDescription) || trim((string)$ogDescription) === '') {
+    $ogDescription = $metaDescription;
+}
+
+if (!isset($ogType) || trim((string)$ogType) === '') {
+    $ogType = 'website';
+}
+
+if (!isset($ogImagePath) || trim((string)$ogImagePath) === '') {
+    $ogImagePath = '/assets/images/doggie-dorians-share.jpeg';
+}
+
+if (!isset($ogImageType) || trim((string)$ogImageType) === '') {
+    $ogImageType = 'image/jpeg';
+}
+
+if (!isset($ogImageWidth) || trim((string)$ogImageWidth) === '') {
+    $ogImageWidth = '1200';
+}
+
+if (!isset($ogImageHeight) || trim((string)$ogImageHeight) === '') {
+    $ogImageHeight = '630';
+}
+
+$ogImageUrl = dd_absolute_url((string)$siteBaseUrl, (string)$ogImagePath);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -24,6 +109,24 @@ if (!function_exists('dd_h')) {
   <title><?= dd_h($pageTitle) ?></title>
   <meta name="description" content="<?= dd_h($metaDescription) ?>">
   <meta name="theme-color" content="#07080b">
+  <link rel="canonical" href="<?= dd_h((string)$canonicalUrl) ?>">
+
+  <meta property="og:site_name" content="<?= dd_h((string)$siteName) ?>">
+  <meta property="og:type" content="<?= dd_h((string)$ogType) ?>">
+  <meta property="og:title" content="<?= dd_h((string)$ogTitle) ?>">
+  <meta property="og:description" content="<?= dd_h((string)$ogDescription) ?>">
+  <meta property="og:url" content="<?= dd_h((string)$canonicalUrl) ?>">
+  <meta property="og:image" content="<?= dd_h((string)$ogImageUrl) ?>">
+  <meta property="og:image:secure_url" content="<?= dd_h((string)$ogImageUrl) ?>">
+  <meta property="og:image:type" content="<?= dd_h((string)$ogImageType) ?>">
+  <meta property="og:image:width" content="<?= dd_h((string)$ogImageWidth) ?>">
+  <meta property="og:image:height" content="<?= dd_h((string)$ogImageHeight) ?>">
+  <meta property="og:image:alt" content="Doggie Dorian's">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="<?= dd_h((string)$ogTitle) ?>">
+  <meta name="twitter:description" content="<?= dd_h((string)$ogDescription) ?>">
+  <meta name="twitter:image" content="<?= dd_h((string)$ogImageUrl) ?>">
 
   <style>
     :root{

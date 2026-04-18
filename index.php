@@ -63,6 +63,11 @@ $primaryLink = $isLoggedIn ? 'dashboard.php' : 'non-member-booking.php';
 $primaryText = $isLoggedIn ? 'Open Member Dashboard' : 'Book Without an Account';
 $secondaryLink = $isLoggedIn ? 'book-service.php' : 'login.php';
 $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
+
+$remainingMembershipSlots = 33;
+$remainingFounderElite = 4;
+$remainingFounderCare = 7;
+$remainingFounderWalk = 13;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -71,6 +76,26 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Doggie Dorian’s | Premium Dog Care</title>
     <meta name="description" content="Premium dog walks, daycare, boarding, sitting, founder memberships, and group walk applications with Doggie Dorian’s.">
+    <meta name="theme-color" content="#09090d">
+    <link rel="canonical" href="https://dorianspetcare.com/">
+
+    <meta property="og:site_name" content="Doggie Dorian's">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Doggie Dorian’s | Premium Dog Care">
+    <meta property="og:description" content="Premium dog walks, daycare, boarding, sitting, founder memberships, and group walk applications with Doggie Dorian’s.">
+    <meta property="og:url" content="https://dorianspetcare.com/">
+    <meta property="og:image" content="https://dorianspetcare.com/assets/images/doggie-dorians-share.jpeg">
+    <meta property="og:image:secure_url" content="https://dorianspetcare.com/assets/images/doggie-dorians-share.jpeg">
+    <meta property="og:image:type" content="image/jpeg">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Doggie Dorian's">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Doggie Dorian’s | Premium Dog Care">
+    <meta name="twitter:description" content="Premium dog walks, daycare, boarding, sitting, founder memberships, and group walk applications with Doggie Dorian’s.">
+    <meta name="twitter:image" content="https://dorianspetcare.com/assets/images/doggie-dorians-share.jpeg">
+
     <style>
         * { box-sizing: border-box; }
 
@@ -186,6 +211,36 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
 
         .notice-banner strong {
             color: #fff4dc;
+        }
+
+        .availability-board {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .availability-item {
+            padding: 16px;
+            border-radius: 18px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(226,196,141,0.18);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+        }
+
+        .availability-number {
+            font-size: 1.6rem;
+            font-weight: 900;
+            color: #fff4dc;
+            line-height: 1;
+            margin-bottom: 8px;
+        }
+
+        .availability-label {
+            color: rgba(244,241,234,0.78);
+            font-size: .86rem;
+            line-height: 1.45;
+            font-weight: 700;
         }
 
         .cta-row {
@@ -379,7 +434,8 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
             .hero,
             .group-callout,
             .grid-3,
-            .founder-highlight-grid {
+            .founder-highlight-grid,
+            .availability-board {
                 grid-template-columns: 1fr;
             }
 
@@ -454,7 +510,29 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
                 </div>
 
                 <div class="notice-banner">
-                    <strong>Membership release:</strong> We are accepting only <strong>50 regular memberships</strong>. Once all membership spots are filled, new clients will be placed on a waitlist.
+                    <strong>Membership release:</strong> Only <strong><?php echo h($remainingMembershipSlots); ?> membership slots remain</strong>.
+                    Founder inventory currently shows <strong><?php echo h($remainingFounderElite); ?> Founder Elite Club packages remaining</strong>,
+                    <strong><?php echo h($remainingFounderCare); ?> Founder Care Club packages remaining</strong>, and
+                    <strong><?php echo h($remainingFounderWalk); ?> Founder Walk Club packages remaining</strong>.
+                </div>
+
+                <div class="availability-board">
+                    <div class="availability-item">
+                        <div class="availability-number"><?php echo h($remainingMembershipSlots); ?></div>
+                        <div class="availability-label">Remaining membership slots</div>
+                    </div>
+                    <div class="availability-item">
+                        <div class="availability-number"><?php echo h($remainingFounderElite); ?></div>
+                        <div class="availability-label">Founder Elite Club packages remain</div>
+                    </div>
+                    <div class="availability-item">
+                        <div class="availability-number"><?php echo h($remainingFounderCare); ?></div>
+                        <div class="availability-label">Founder Care Club packages remain</div>
+                    </div>
+                    <div class="availability-item">
+                        <div class="availability-number"><?php echo h($remainingFounderWalk); ?></div>
+                        <div class="availability-label">Founder Walk Club packages remain</div>
+                    </div>
                 </div>
 
                 <div class="cta-row">
@@ -473,7 +551,7 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
                     </div>
                     <div class="stat">
                         <div class="stat-label">Membership Access</div>
-                        <div class="stat-value">50 Members Only</div>
+                        <div class="stat-value"><?php echo h($remainingMembershipSlots); ?> Remaining</div>
                     </div>
                     <div class="stat">
                         <div class="stat-label">Experience</div>
@@ -576,16 +654,16 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
 
                         <div class="founder-highlight-grid">
                             <div class="founder-highlight">
-                                <strong>Founder experience</strong>
-                                <span>Founder memberships are reserved for clients who want a more private, premium, and high-touch care relationship.</span>
+                                <strong>Founder Elite Club</strong>
+                                <span><?php echo h($remainingFounderElite); ?> packages remain for clients who want the highest level of recurring care and top-tier access.</span>
                             </div>
                             <div class="founder-highlight">
-                                <strong>Premium value</strong>
-                                <span>Each founder tier includes elevated care value, quarterly service credit, and more exclusive perks.</span>
+                                <strong>Founder Care Club</strong>
+                                <span><?php echo h($remainingFounderCare); ?> packages remain for clients who want stronger recurring coverage across multiple services.</span>
                             </div>
                             <div class="founder-highlight">
-                                <strong>Private access</strong>
-                                <span>Founder members receive a private contact path and a higher-touch care experience.</span>
+                                <strong>Founder Walk Club</strong>
+                                <span><?php echo h($remainingFounderWalk); ?> packages remain for clients focused on recurring walks and founder-only access.</span>
                             </div>
                         </div>
 
@@ -615,16 +693,16 @@ $secondaryText = $isLoggedIn ? 'Book Service' : 'Member Login';
 
                             <div class="list">
                                 <div class="list-item">
-                                    <strong>Application-based entry</strong>
-                                    Founder memberships are requested first, then reviewed before approval.
+                                    <strong><?php echo h($remainingFounderElite); ?> Founder Elite Club packages remain</strong>
+                                    Limited top-tier founder availability for clients who want the most elevated care experience.
                                 </div>
                                 <div class="list-item">
-                                    <strong>Quarterly credit included</strong>
-                                    Founder tiers include recurring service credit that can also be used toward renewal.
+                                    <strong><?php echo h($remainingFounderCare); ?> Founder Care Club packages remain</strong>
+                                    Strong recurring coverage with broader care value across multiple service types.
                                 </div>
                                 <div class="list-item">
-                                    <strong>Luxury positioning</strong>
-                                    These are curated premium memberships designed for a more exclusive client experience.
+                                    <strong><?php echo h($remainingFounderWalk); ?> Founder Walk Club packages remain</strong>
+                                    Ideal for recurring walk clients who want founder access and premium consistency.
                                 </div>
                             </div>
 

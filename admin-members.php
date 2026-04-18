@@ -468,10 +468,55 @@ function fetchMembers(PDO $pdo): array
     return fetchMembersFallback($pdo);
 }
 
+function buildAdminMembersNotice(): array
+{
+    $notice = trim((string) ($_GET['notice'] ?? ''));
+    $memberName = trim((string) ($_GET['member'] ?? ''));
+
+    if ($notice === 'member_deleted') {
+        $message = 'Member deleted successfully.';
+        if ($memberName !== '') {
+            $message = 'Member deleted successfully: ' . $memberName . '.';
+        }
+
+        return [
+            'type' => 'success',
+            'message' => $message,
+        ];
+    }
+
+    if ($notice === 'member_delete_failed') {
+        return [
+            'type' => 'error',
+            'message' => 'Member could not be deleted. Please try again.',
+        ];
+    }
+
+    if ($notice === 'member_not_found') {
+        return [
+            'type' => 'error',
+            'message' => 'That member record could not be found.',
+        ];
+    }
+
+    if ($notice === 'member_delete_cancelled') {
+        return [
+            'type' => 'info',
+            'message' => 'Member deletion was cancelled.',
+        ];
+    }
+
+    return [
+        'type' => '',
+        'message' => '',
+    ];
+}
+
 $members = fetchMembers($pdo);
 $totalMembers = count($members);
 
 $search = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
+$notice = buildAdminMembersNotice();
 
 if ($search !== '') {
     $filtered = [];
@@ -693,6 +738,32 @@ foreach ($members as $member) {
             border: 1px solid rgba(255,255,255,0.12);
         }
 
+        .flash {
+            margin-bottom: 22px;
+            padding: 16px 18px;
+            border-radius: 18px;
+            font-weight: 700;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .flash-success {
+            background: rgba(102, 197, 132, 0.12);
+            border-color: rgba(102, 197, 132, 0.26);
+            color: #dff7e6;
+        }
+
+        .flash-error {
+            background: rgba(214,123,123,0.14);
+            border-color: rgba(214,123,123,0.30);
+            color: #ffd5d5;
+        }
+
+        .flash-info {
+            background: rgba(111, 156, 255, 0.12);
+            border-color: rgba(111, 156, 255, 0.28);
+            color: #d9e5ff;
+        }
+
         .table-wrap {
             overflow-x: auto;
             border-radius: 18px;
@@ -704,7 +775,7 @@ foreach ($members as $member) {
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 1400px;
+            min-width: 1500px;
         }
 
         th, td {
@@ -777,6 +848,16 @@ foreach ($members as $member) {
             border: 1px solid rgba(255,255,255,0.10);
         }
 
+        .action-link-danger {
+            background: rgba(214,123,123,0.14);
+            border-color: rgba(214,123,123,0.26);
+            color: #ffd5d5;
+        }
+
+        .action-link-danger:hover {
+            background: rgba(214,123,123,0.20);
+        }
+
         @media (max-width: 1180px) {
             .hero,
             .grid {
@@ -815,12 +896,18 @@ foreach ($members as $member) {
             </div>
         </div>
 
+        <?php if ($notice['message'] !== ''): ?>
+            <div class="flash flash-<?php echo h($notice['type'] !== '' ? $notice['type'] : 'info'); ?>">
+                <?php echo h($notice['message']); ?>
+            </div>
+        <?php endif; ?>
+
         <section class="hero">
             <div class="card hero-card">
                 <div class="eyebrow">Member Directory</div>
                 <h1>Admin Members</h1>
                 <div class="sub">
-                    View everyone who signed up as a member, review their contact details, and open each full member profile from one centralized admin directory.
+                    View everyone who signed up as a member, review their contact details, open each full member profile, and safely route into the member deletion confirmation flow from one centralized admin directory.
                 </div>
             </div>
 
@@ -921,6 +1008,7 @@ foreach ($members as $member) {
                                         <a class="action-link" href="admin-member-view.php?id=<?php echo $memberId; ?>">View</a>
                                         <a class="action-link" href="admin-add-dog.php?user_id=<?php echo $memberId; ?>">Add Dog</a>
                                         <a class="action-link" href="admin-create-booking.php?user_id=<?php echo $memberId; ?>">Create Booking</a>
+                                        <a class="action-link action-link-danger" href="admin-delete-member.php?id=<?php echo $memberId; ?>">Delete</a>
                                     </div>
                                 </td>
                             </tr>
