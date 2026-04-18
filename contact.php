@@ -13,6 +13,11 @@ function h($value): string
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+if (empty($_SESSION['contact_form_csrf']) || !is_string($_SESSION['contact_form_csrf'])) {
+    $_SESSION['contact_form_csrf'] = bin2hex(random_bytes(32));
+}
+
+$csrfToken = (string) $_SESSION['contact_form_csrf'];
 $successMessage = '';
 $errorMessage = '';
 $errors = [];
@@ -25,16 +30,19 @@ $formData = [
     'dog_name' => '',
     'preferred_contact' => '',
     'message' => '',
+    'website' => '',
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $formData['full_name'] = trim((string)($_POST['full_name'] ?? ''));
-    $formData['phone'] = trim((string)($_POST['phone'] ?? ''));
-    $formData['email'] = trim((string)($_POST['email'] ?? ''));
-    $formData['service_type'] = trim((string)($_POST['service_type'] ?? ''));
-    $formData['dog_name'] = trim((string)($_POST['dog_name'] ?? ''));
-    $formData['preferred_contact'] = trim((string)($_POST['preferred_contact'] ?? ''));
-    $formData['message'] = trim((string)($_POST['message'] ?? ''));
+    $postedToken = (string) ($_POST['csrf_token'] ?? '');
+    $formData['full_name'] = trim((string) ($_POST['full_name'] ?? ''));
+    $formData['phone'] = trim((string) ($_POST['phone'] ?? ''));
+    $formData['email'] = trim((string) ($_POST['email'] ?? ''));
+    $formData['service_type'] = trim((string) ($_POST['service_type'] ?? ''));
+    $formData['dog_name'] = trim((string) ($_POST['dog_name'] ?? ''));
+    $formData['preferred_contact'] = trim((string) ($_POST['preferred_contact'] ?? ''));
+    $formData['message'] = trim((string) ($_POST['message'] ?? ''));
+    $formData['website'] = trim((string) ($_POST['website'] ?? ''));
 
     $allowedServices = [
         'Dog Walking',
@@ -52,6 +60,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'Text',
         'Email',
     ];
+
+    if (!hash_equals($csrfToken, $postedToken)) {
+        $errors[] = 'Your session expired. Please refresh the page and try again.';
+    }
+
+    if ($formData['website'] !== '') {
+        $errors[] = 'Your message could not be submitted. Please try again.';
+    }
 
     if ($formData['full_name'] === '') {
         $errors[] = 'Full name is required.';
@@ -96,8 +112,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!$errors) {
-        $to = 'doggie.dorians@gmail.com';
-        $subject = 'New Contact Inquiry - Doggie Dorian’s';
+        $to = 'admin@doggiedorians.com';
+        $subjectService = $formData['service_type'] !== '' ? $formData['service_type'] : 'Inquiry';
+        $subjectName = $formData['full_name'] !== '' ? $formData['full_name'] : 'Website Visitor';
+        $subject = 'New Contact Inquiry - ' . $subjectService . ' - ' . $subjectName;
 
         $safeName = preg_replace("/[\r\n]+/", ' ', $formData['full_name']) ?? '';
         $safeEmail = filter_var($formData['email'], FILTER_SANITIZE_EMAIL) ?: '';
@@ -106,9 +124,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $safeService = preg_replace("/[\r\n]+/", ' ', $formData['service_type']) ?? '';
         $safePreferred = preg_replace("/[\r\n]+/", ' ', $formData['preferred_contact']) ?? '';
         $safeMessage = str_replace(["\r\n", "\r"], "\n", $formData['message']);
+        $safeHost = preg_replace('/[^a-z0-9.-]/i', '', (string) ($_SERVER['HTTP_HOST'] ?? 'doggiedorians.com'));
+        $safeHost = $safeHost !== '' ? $safeHost : 'doggiedorians.com';
+        $submittedAt = date('Y-m-d H:i:s');
+        $remoteIp = preg_replace('/[^0-9a-fA-F:., ]/', '', (string) ($_SERVER['REMOTE_ADDR'] ?? 'Unknown'));
 
         $emailBody = "Doggie Dorian’s Contact Inquiry\n";
         $emailBody .= "=================================\n\n";
+        $emailBody .= "Submitted At: {$submittedAt}\n";
+        $emailBody .= "Website Host: {$safeHost}\n";
+        $emailBody .= "Visitor IP: " . ($remoteIp !== '' ? $remoteIp : 'Unknown') . "\n\n";
         $emailBody .= "Full Name: {$safeName}\n";
         $emailBody .= "Email Address: {$safeEmail}\n";
         $emailBody .= "Phone Number: " . ($safePhone !== '' ? $safePhone : 'Not provided') . "\n";
@@ -120,10 +145,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $headers = [];
         $headers[] = 'MIME-Version: 1.0';
         $headers[] = 'Content-Type: text/plain; charset=UTF-8';
-        $headers[] = 'From: Doggie Dorian\'s Website <no-reply@' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . '>';
+        $headers[] = 'From: Doggie Dorian\'s <admin@doggiedorians.com>';
         $headers[] = 'Reply-To: ' . $safeName . ' <' . $safeEmail . '>';
+        $headers[] = 'X-Mailer: PHP/' . phpversion();
 
-        $mailSent = @mail($to, $subject, $emailBody, implode("\r\n", $headers));
+        $mailSent = mail($to, $subject, $emailBody, implode("\r\n", $headers));
 
         if ($mailSent) {
             $successMessage = 'Your inquiry has been sent successfully. We’ll get back to you as soon as possible.';
@@ -135,7 +161,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'dog_name' => '',
                 'preferred_contact' => '',
                 'message' => '',
+                'website' => '',
             ];
+            $_SESSION['contact_form_csrf'] = bin2hex(random_bytes(32));
+            $csrfToken = (string) $_SESSION['contact_form_csrf'];
         } else {
             $errorMessage = 'Your message could not be sent right now. Please try again shortly or contact us directly by phone or email.';
         }
@@ -526,6 +555,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       resize: vertical;
     }
 
+    .field-group--hidden {
+      position: absolute;
+      left: -9999px;
+      opacity: 0;
+      pointer-events: none;
+      height: 0;
+      overflow: hidden;
+    }
+
     .form-note {
       font-family: Arial, sans-serif;
       font-size: 0.88rem;
@@ -745,7 +783,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="contact-card">
               <small>Email</small>
               <strong>General Inquiries</strong>
-              <a href="mailto:doggie.dorians@gmail.com">doggie.dorians@gmail.com</a>
+              <a href="mailto:admin@doggiedorians.com">admin@doggiedorians.com</a>
             </div>
 
             <div class="contact-card">
@@ -790,22 +828,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <?php endif; ?>
 
           <form class="contact-form" action="" method="post" novalidate>
+            <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
+
+            <div class="field-group field-group--hidden" aria-hidden="true">
+              <label for="website">Website</label>
+              <input type="text" id="website" name="website" tabindex="-1" autocomplete="off" value="<?php echo h($formData['website']); ?>">
+            </div>
+
             <div class="form-row">
               <div class="field-group">
                 <label for="full_name">Full Name</label>
-                <input type="text" id="full_name" name="full_name" placeholder="Your full name" value="<?php echo h($formData['full_name']); ?>" required>
+                <input type="text" id="full_name" name="full_name" placeholder="Your full name" value="<?php echo h($formData['full_name']); ?>" maxlength="120" autocomplete="name" required>
               </div>
 
               <div class="field-group">
                 <label for="phone">Phone Number</label>
-                <input type="tel" id="phone" name="phone" placeholder="Your phone number" value="<?php echo h($formData['phone']); ?>">
+                <input type="tel" id="phone" name="phone" placeholder="Your phone number" value="<?php echo h($formData['phone']); ?>" maxlength="40" autocomplete="tel">
               </div>
             </div>
 
             <div class="form-row">
               <div class="field-group">
                 <label for="email">Email Address</label>
-                <input type="email" id="email" name="email" placeholder="Your email address" value="<?php echo h($formData['email']); ?>" required>
+                <input type="email" id="email" name="email" placeholder="Your email address" value="<?php echo h($formData['email']); ?>" maxlength="190" autocomplete="email" required>
               </div>
 
               <div class="field-group">
@@ -826,7 +871,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="form-row">
               <div class="field-group">
                 <label for="dog_name">Dog Name</label>
-                <input type="text" id="dog_name" name="dog_name" placeholder="Your dog's name" value="<?php echo h($formData['dog_name']); ?>">
+                <input type="text" id="dog_name" name="dog_name" placeholder="Your dog's name" value="<?php echo h($formData['dog_name']); ?>" maxlength="100" autocomplete="off">
               </div>
 
               <div class="field-group">
@@ -842,11 +887,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <div class="field-group">
               <label for="message">Tell Us More</label>
-              <textarea id="message" name="message" placeholder="Tell us about the services you’re interested in, your dog, your schedule, or any premium care needs you have." required><?php echo h($formData['message']); ?></textarea>
+              <textarea id="message" name="message" placeholder="Tell us about the services you’re interested in, your dog, your schedule, or any premium care needs you have." maxlength="5000" required><?php echo h($formData['message']); ?></textarea>
             </div>
 
             <div class="form-note">
-              This upgraded form now submits through your website instead of opening the visitor’s email app. Before launch, test server mail delivery on your hosting account to make sure messages are arriving correctly.
+              This upgraded form now submits through your website instead of opening the visitor’s email app. It now sends directly to admin@doggiedorians.com and includes a couple of quiet anti-spam and form-protection improvements.
             </div>
 
             <button type="submit" class="btn btn-gold">Send Inquiry</button>
