@@ -4,15 +4,6 @@ declare(strict_types=1);
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/db.php';
 
-/**
- * Doggie Dorian's
- * dashboard.php
- *
- * Full replacement
- * Upgraded schema-tolerant member dashboard
- * with visible payment status support
- */
-
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     http_response_code(500);
     echo 'Database connection is not available.';
@@ -28,6 +19,11 @@ function redirectTo($url)
 {
     header('Location: ' . $url);
     exit;
+}
+
+function quotedIdentifier($value)
+{
+    return '"' . str_replace('"', '""', (string) $value) . '"';
 }
 
 function currentUserRole()
@@ -92,9 +88,6 @@ function hasTable(PDO $pdo, $table)
     } catch (Throwable $e) {
         $cache[$table] = false;
         return false;
-    } catch (Exception $e) {
-        $cache[$table] = false;
-        return false;
     }
 }
 
@@ -112,7 +105,8 @@ function getTableColumns(PDO $pdo, $table)
     }
 
     try {
-        $stmt = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $safeTable = str_replace('"', '""', (string) $table);
+        $stmt = $pdo->query('PRAGMA table_info("' . $safeTable . '")');
         $columns = array();
 
         if ($stmt) {
@@ -127,9 +121,6 @@ function getTableColumns(PDO $pdo, $table)
         $cache[$table] = $columns;
         return $columns;
     } catch (Throwable $e) {
-        $cache[$table] = array();
-        return array();
-    } catch (Exception $e) {
         $cache[$table] = array();
         return array();
     }
@@ -168,8 +159,117 @@ function safeExecute(PDOStatement $stmt, array $params = array())
         return $stmt->execute($params);
     } catch (Throwable $e) {
         return false;
-    } catch (Exception $e) {
-        return false;
+    }
+}
+
+function safeFetchAll(PDO $pdo, $sql, array $params = array())
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return array();
+        }
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : array();
+    } catch (Throwable $e) {
+        return array();
+    }
+}
+
+function safeFetchOne(PDO $pdo, $sql, array $params = array())
+{
+    try {
+        $stmt = $pdo->prepare($sql);
+        if (!$stmt->execute($params)) {
+            return null;
+        }
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) ? $row : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function ensureTableColumn(PDO $pdo, $table, $column, $definition)
+{
+    if (!hasTable($pdo, $table)) {
+        return;
+    }
+
+    if (hasColumn($pdo, $table, $column)) {
+        return;
+    }
+
+    try {
+        $pdo->exec('ALTER TABLE ' . quotedIdentifier($table) . ' ADD COLUMN ' . quotedIdentifier($column) . ' ' . $definition);
+    } catch (Throwable $e) {
+    }
+}
+
+function ensureDogJourneySchema(PDO $pdo)
+{
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS dog_journey_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                pet_id INTEGER NOT NULL DEFAULT 0,
+                baseline_walks INTEGER NOT NULL DEFAULT 0,
+                baseline_daycare_sessions INTEGER NOT NULL DEFAULT 0,
+                baseline_boarding_nights INTEGER NOT NULL DEFAULT 0,
+                baseline_drop_in_sessions INTEGER NOT NULL DEFAULT 0,
+                baseline_sitting_sessions INTEGER NOT NULL DEFAULT 0,
+                favorite_service TEXT DEFAULT '',
+                milestone_badge TEXT DEFAULT '',
+                journey_note TEXT DEFAULT '',
+                journey_highlight TEXT DEFAULT '',
+                last_service_date TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+    } catch (Throwable $e) {
+    }
+
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_walks', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_daycare_sessions', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_boarding_nights', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_drop_in_sessions', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_sitting_sessions', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'favorite_service', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'milestone_badge', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'journey_note', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'journey_highlight', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'last_service_date', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'updated_at', "TEXT DEFAULT CURRENT_TIMESTAMP");
+
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS dog_journey_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                pet_id INTEGER NOT NULL DEFAULT 0,
+                entry_type TEXT NOT NULL DEFAULT 'note',
+                service_type TEXT DEFAULT '',
+                entry_title TEXT DEFAULT '',
+                entry_body TEXT DEFAULT '',
+                entry_date TEXT DEFAULT '',
+                created_by_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+    } catch (Throwable $e) {
+    }
+
+    try {
+        $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_dog_journey_user_pet ON dog_journey_profiles(user_id, pet_id)');
+    } catch (Throwable $e) {
+    }
+
+    try {
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_dog_journey_entries_user_pet ON dog_journey_entries(user_id, pet_id)');
+    } catch (Throwable $e) {
     }
 }
 
@@ -481,6 +581,42 @@ function loadMemberName(PDO $pdo, $userId)
     return '';
 }
 
+function loadMemberCreatedAt(PDO $pdo, $userId)
+{
+    $userId = (int) $userId;
+
+    if ($userId <= 0) {
+        return '';
+    }
+
+    $tables = array('users', 'members', 'client_profiles');
+
+    foreach ($tables as $table) {
+        if (!hasTable($pdo, $table)) {
+            continue;
+        }
+
+        $idCol = firstExistingColumn($pdo, $table, array('id', 'user_id', 'member_id', 'client_id'));
+        $createdCol = firstExistingColumn($pdo, $table, array('created_at', 'joined_at', 'registered_at', 'date_created'));
+
+        if ($idCol === null || $createdCol === null) {
+            continue;
+        }
+
+        $stmt = $pdo->prepare("SELECT {$createdCol} FROM {$table} WHERE {$idCol} = :id LIMIT 1");
+        if (!safeExecute($stmt, array(':id' => $userId))) {
+            continue;
+        }
+
+        $value = $stmt->fetchColumn();
+        if ($value !== false && trim((string) $value) !== '') {
+            return (string) $value;
+        }
+    }
+
+    return '';
+}
+
 function countUnreadNotificationsForUser(PDO $pdo, $userId)
 {
     $userId = (int) $userId;
@@ -499,28 +635,85 @@ function countUnreadNotificationsForUser(PDO $pdo, $userId)
             continue;
         }
 
-        try {
-            if ($userCol !== null) {
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$userCol} = :id AND COALESCE({$readCol}, 0) = 0");
-                if (safeExecute($stmt, array(':id' => $userId))) {
-                    return (int) $stmt->fetchColumn();
-                }
+        if ($userCol !== null) {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$userCol} = :id AND COALESCE({$readCol}, 0) = 0");
+            if (safeExecute($stmt, array(':id' => $userId))) {
+                return (int) $stmt->fetchColumn();
             }
+        }
 
-            if ($memberCol !== null) {
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$memberCol} = :id AND COALESCE({$readCol}, 0) = 0");
-                if (safeExecute($stmt, array(':id' => $userId))) {
-                    return (int) $stmt->fetchColumn();
-                }
+        if ($memberCol !== null) {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$memberCol} = :id AND COALESCE({$readCol}, 0) = 0");
+            if (safeExecute($stmt, array(':id' => $userId))) {
+                return (int) $stmt->fetchColumn();
             }
-        } catch (Throwable $e) {
-            continue;
-        } catch (Exception $e) {
-            continue;
         }
     }
 
     return 0;
+}
+
+function fetchMemberPetsDetailed(PDO $pdo, $userId)
+{
+    $userId = (int) $userId;
+    $pets = array();
+    $seen = array();
+
+    foreach (array('pets', 'dogs') as $table) {
+        if (!hasTable($pdo, $table)) {
+            continue;
+        }
+
+        $ownerCol = firstExistingColumn($pdo, $table, array('user_id', 'member_id', 'owner_id', 'client_id'));
+        $idCol = firstExistingColumn($pdo, $table, array('id', 'pet_id', 'dog_id'));
+        $nameCol = firstExistingColumn($pdo, $table, array('name', 'pet_name', 'dog_name'));
+        $breedCol = firstExistingColumn($pdo, $table, array('breed'));
+        $ageCol = firstExistingColumn($pdo, $table, array('age', 'dog_age'));
+        $notesCol = firstExistingColumn($pdo, $table, array('notes', 'care_notes'));
+        $createdCol = firstExistingColumn($pdo, $table, array('created_at', 'created_on'));
+
+        if ($ownerCol === null || $idCol === null || $nameCol === null) {
+            continue;
+        }
+
+        $select = array(
+            quotedIdentifier($idCol) . ' AS pet_id',
+            quotedIdentifier($nameCol) . ' AS pet_name',
+            ($breedCol !== null ? quotedIdentifier($breedCol) : "''") . ' AS breed',
+            ($ageCol !== null ? quotedIdentifier($ageCol) : "''") . ' AS age',
+            ($notesCol !== null ? quotedIdentifier($notesCol) : "''") . ' AS notes',
+            ($createdCol !== null ? quotedIdentifier($createdCol) : "''") . ' AS created_at',
+        );
+
+        $sql = 'SELECT ' . implode(', ', $select) . ' FROM ' . quotedIdentifier($table) . ' WHERE ' . quotedIdentifier($ownerCol) . ' = :user_id ORDER BY ' . quotedIdentifier($idCol) . ' DESC';
+        $rows = safeFetchAll($pdo, $sql, array(':user_id' => $userId));
+
+        foreach ($rows as $row) {
+            $petId = (int) valueFromRow($row, array('pet_id'), 0);
+            $petName = trim((string) valueFromRow($row, array('pet_name'), ''));
+
+            if ($petId <= 0 || $petName === '') {
+                continue;
+            }
+
+            if (isset($seen[$petId])) {
+                continue;
+            }
+
+            $seen[$petId] = true;
+            $pets[] = array(
+                'pet_id' => $petId,
+                'pet_name' => $petName,
+                'breed' => (string) valueFromRow($row, array('breed'), ''),
+                'age' => (string) valueFromRow($row, array('age'), ''),
+                'notes' => (string) valueFromRow($row, array('notes'), ''),
+                'created_at' => (string) valueFromRow($row, array('created_at'), ''),
+                'source_table' => $table,
+            );
+        }
+    }
+
+    return $pets;
 }
 
 function fetchMemberBookings(PDO $pdo, $userId)
@@ -568,13 +761,20 @@ function fetchMemberBookings(PDO $pdo, $userId)
 
         $price = valueFromRow($row, array('price', 'total_price', 'amount'), '');
         $paymentRaw = valueFromRow($row, array('payment_status', 'payment_state'), '');
+        $serviceType = normalizeServiceType((string) valueFromRow($row, array('service_type', 'type', 'booking_type', 'category'), 'service'));
+        $quantity = 1;
+
+        if ($serviceType === 'boarding') {
+            $quantityCandidate = valueFromRow($row, array('quantity', 'nights', 'boarding_nights', 'total_nights'), 1);
+            $quantity = is_numeric($quantityCandidate) ? max(1, (int) $quantityCandidate) : 1;
+        }
 
         $normalized[] = array(
             'id' => $id,
             'user_id' => $userId,
             'worker_id' => $workerId,
             'worker_name' => $workerId > 0 ? loadWorkerName($pdo, $workerId) : '',
-            'service_type' => normalizeServiceType((string) valueFromRow($row, array('service_type', 'type', 'booking_type', 'category'), 'service')),
+            'service_type' => $serviceType,
             'status' => normalizeStatus((string) valueFromRow($row, array('status', 'booking_status', 'service_status', 'walk_status'), 'pending')),
             'payment_status' => normalizePaymentStatus($paymentRaw, $price),
             'service_date' => (string) valueFromRow($row, array('service_date', 'booking_date', 'walk_date', 'date', 'start_date', 'scheduled_date'), ''),
@@ -582,7 +782,9 @@ function fetchMemberBookings(PDO $pdo, $userId)
             'duration' => (string) valueFromRow($row, array('duration_minutes', 'duration', 'minutes'), ''),
             'price' => $price,
             'notes' => (string) valueFromRow($row, array('notes', 'special_instructions', 'instructions', 'care_notes'), ''),
+            'pet_id' => $petId,
             'pet_name' => $petName,
+            'quantity' => $quantity,
         );
     }
 
@@ -591,37 +793,7 @@ function fetchMemberBookings(PDO $pdo, $userId)
 
 function countMemberPets(PDO $pdo, $userId)
 {
-    $userId = (int) $userId;
-
-    if ($userId <= 0) {
-        return 0;
-    }
-
-    $tables = array('pets', 'dogs');
-
-    foreach ($tables as $table) {
-        if (!hasTable($pdo, $table)) {
-            continue;
-        }
-
-        $ownerCol = firstExistingColumn($pdo, $table, array('user_id', 'member_id', 'owner_id', 'client_id'));
-        if ($ownerCol === null) {
-            continue;
-        }
-
-        try {
-            $stmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE {$ownerCol} = :id");
-            if (safeExecute($stmt, array(':id' => $userId))) {
-                return (int) $stmt->fetchColumn();
-            }
-        } catch (Throwable $e) {
-            continue;
-        } catch (Exception $e) {
-            continue;
-        }
-    }
-
-    return 0;
+    return count(fetchMemberPetsDetailed($pdo, $userId));
 }
 
 function hasActiveTracking(PDO $pdo, array $booking)
@@ -647,20 +819,14 @@ function hasActiveTracking(PDO $pdo, array $booking)
             continue;
         }
 
-        try {
-            $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE {$bookingCol} = :id ORDER BY rowid DESC LIMIT 1");
-            if (!safeExecute($stmt, array(':id' => (int) (isset($booking['id']) ? $booking['id'] : 0)))) {
-                continue;
-            }
+        $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE {$bookingCol} = :id ORDER BY rowid DESC LIMIT 1");
+        if (!safeExecute($stmt, array(':id' => (int) (isset($booking['id']) ? $booking['id'] : 0)))) {
+            continue;
+        }
 
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            if ($row) {
-                return true;
-            }
-        } catch (Throwable $e) {
-            continue;
-        } catch (Exception $e) {
-            continue;
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            return true;
         }
     }
 
@@ -759,7 +925,7 @@ function founderPlanDefaults()
     );
 }
 
-function getMembershipSummary(PDO $pdo, int $userId): array
+function getMembershipSummary(PDO $pdo, int $userId)
 {
     $result = array(
         'membership_name' => 'No Membership',
@@ -792,119 +958,308 @@ function getMembershipSummary(PDO $pdo, int $userId): array
 
     $orderBy = $createdCol !== null ? $createdCol : $membershipIdCol;
 
-    try {
-        $stmt = $pdo->prepare("
-            SELECT *
-            FROM member_memberships
-            WHERE {$memberIdCol} = :member_id
-            ORDER BY {$orderBy} DESC, rowid DESC
-            LIMIT 1
-        ");
-        if (!safeExecute($stmt, array(':member_id' => $userId))) {
-            return $result;
-        }
+    $stmt = $pdo->prepare("
+        SELECT *
+        FROM member_memberships
+        WHERE {$memberIdCol} = :member_id
+        ORDER BY {$orderBy} DESC, rowid DESC
+        LIMIT 1
+    ");
+    if (!safeExecute($stmt, array(':member_id' => $userId))) {
+        return $result;
+    }
 
-        $membership = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!$membership) {
-            return $result;
-        }
+    $membership = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$membership) {
+        return $result;
+    }
 
-        $membershipId = (int) valueFromRow($membership, array($membershipIdCol), 0);
-        $planId = (int) valueFromRow($membership, array($planIdCol), 0);
+    $membershipId = (int) valueFromRow($membership, array($membershipIdCol), 0);
+    $planId = (int) valueFromRow($membership, array($planIdCol), 0);
 
-        $result['membership_id'] = $membershipId;
-        $result['renewal_count'] = (int) valueFromRow($membership, array('renewal_count'), 0);
+    $result['membership_id'] = $membershipId;
+    $result['renewal_count'] = (int) valueFromRow($membership, array('renewal_count'), 0);
 
-        $planSlug = '';
-        if ($planId > 0 && hasTable($pdo, 'membership_plans')) {
-            $planNameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
-            $planSlugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
-            $planIdLookupCol = firstExistingColumn($pdo, 'membership_plans', array('id', 'plan_id'));
+    if ($planId > 0 && hasTable($pdo, 'membership_plans')) {
+        $planNameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
+        $planSlugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
+        $planIdLookupCol = firstExistingColumn($pdo, 'membership_plans', array('id', 'plan_id'));
 
-            if ($planIdLookupCol !== null) {
-                $planStmt = $pdo->prepare("SELECT * FROM membership_plans WHERE {$planIdLookupCol} = :plan_id LIMIT 1");
-                if (safeExecute($planStmt, array(':plan_id' => $planId))) {
-                    $planRow = $planStmt->fetch(PDO::FETCH_ASSOC);
+        if ($planIdLookupCol !== null) {
+            $planStmt = $pdo->prepare("SELECT * FROM membership_plans WHERE {$planIdLookupCol} = :plan_id LIMIT 1");
+            if (safeExecute($planStmt, array(':plan_id' => $planId))) {
+                $planRow = $planStmt->fetch(PDO::FETCH_ASSOC);
 
-                    if ($planRow) {
-                        if ($planNameCol !== null && !empty($planRow[$planNameCol])) {
-                            $result['membership_name'] = (string) $planRow[$planNameCol];
-                        }
+                if ($planRow) {
+                    if ($planNameCol !== null && !empty($planRow[$planNameCol])) {
+                        $result['membership_name'] = (string) $planRow[$planNameCol];
+                    }
 
-                        if ($planSlugCol !== null && !empty($planRow[$planSlugCol])) {
-                            $planSlug = strtolower(trim((string) $planRow[$planSlugCol]));
-                            $result['plan_slug'] = $planSlug;
-                        }
+                    if ($planSlugCol !== null && !empty($planRow[$planSlugCol])) {
+                        $result['plan_slug'] = strtolower(trim((string) $planRow[$planSlugCol]));
                     }
                 }
             }
         }
+    }
 
-        $hasEntitlementRows = false;
+    $hasEntitlementRows = false;
 
-        if ($membershipId > 0 && hasTable($pdo, 'membership_entitlements')) {
-            $entMembershipCol = firstExistingColumn($pdo, 'membership_entitlements', array('membership_id'));
-            $serviceCol = firstExistingColumn($pdo, 'membership_entitlements', array('entitlement_type', 'service_type', 'type'));
-            $remainingCol = firstExistingColumn($pdo, 'membership_entitlements', array('remaining_units', 'units_remaining', 'balance'));
-            $totalCol = firstExistingColumn($pdo, 'membership_entitlements', array('total'));
-            $usedCol = firstExistingColumn($pdo, 'membership_entitlements', array('used'));
+    if ($membershipId > 0 && hasTable($pdo, 'membership_entitlements')) {
+        $entMembershipCol = firstExistingColumn($pdo, 'membership_entitlements', array('membership_id'));
+        $serviceCol = firstExistingColumn($pdo, 'membership_entitlements', array('entitlement_type', 'service_type', 'type'));
+        $remainingCol = firstExistingColumn($pdo, 'membership_entitlements', array('remaining_units', 'units_remaining', 'balance'));
+        $totalCol = firstExistingColumn($pdo, 'membership_entitlements', array('total'));
+        $usedCol = firstExistingColumn($pdo, 'membership_entitlements', array('used'));
 
-            if ($entMembershipCol !== null && $serviceCol !== null) {
-                $entStmt = $pdo->prepare("SELECT * FROM membership_entitlements WHERE {$entMembershipCol} = :membership_id");
+        if ($entMembershipCol !== null && $serviceCol !== null) {
+            $entStmt = $pdo->prepare("SELECT * FROM membership_entitlements WHERE {$entMembershipCol} = :membership_id");
 
-                if (safeExecute($entStmt, array(':membership_id' => $membershipId))) {
-                    $entRows = $entStmt->fetchAll(PDO::FETCH_ASSOC);
+            if (safeExecute($entStmt, array(':membership_id' => $membershipId))) {
+                $entRows = $entStmt->fetchAll(PDO::FETCH_ASSOC);
 
-                    foreach ($entRows as $entRow) {
-                        $hasEntitlementRows = true;
+                foreach ($entRows as $entRow) {
+                    $hasEntitlementRows = true;
 
-                        $serviceType = normalizeEntitlementType((string) valueFromRow($entRow, array($serviceCol), ''));
-                        $remainingUnits = 0;
+                    $serviceType = normalizeEntitlementType((string) valueFromRow($entRow, array($serviceCol), ''));
+                    $remainingUnits = 0;
 
-                        if ($remainingCol !== null && isset($entRow[$remainingCol]) && $entRow[$remainingCol] !== '') {
-                            $remainingUnits = (int) $entRow[$remainingCol];
-                        } else {
-                            $totalUnits = $totalCol !== null ? (int) valueFromRow($entRow, array($totalCol), 0) : 0;
-                            $usedUnits = $usedCol !== null ? (int) valueFromRow($entRow, array($usedCol), 0) : 0;
-                            $remainingUnits = max(0, $totalUnits - $usedUnits);
-                        }
+                    if ($remainingCol !== null && isset($entRow[$remainingCol]) && $entRow[$remainingCol] !== '') {
+                        $remainingUnits = (int) $entRow[$remainingCol];
+                    } else {
+                        $totalUnits = $totalCol !== null ? (int) valueFromRow($entRow, array($totalCol), 0) : 0;
+                        $usedUnits = $usedCol !== null ? (int) valueFromRow($entRow, array($usedCol), 0) : 0;
+                        $remainingUnits = max(0, $totalUnits - $usedUnits);
+                    }
 
-                        if ($serviceType === 'walk') {
-                            $result['walk'] = $remainingUnits;
-                        } elseif ($serviceType === 'daycare') {
-                            $result['daycare'] = $remainingUnits;
-                        } elseif ($serviceType === 'drop_in') {
-                            $result['drop-in'] = $remainingUnits;
-                        } elseif ($serviceType === 'boarding_night') {
-                            $result['boarding_night'] = $remainingUnits;
-                        } elseif ($serviceType === 'service_credit') {
-                            $result['service_credit'] = $remainingUnits;
-                        }
+                    if ($serviceType === 'walk') {
+                        $result['walk'] = $remainingUnits;
+                    } elseif ($serviceType === 'daycare') {
+                        $result['daycare'] = $remainingUnits;
+                    } elseif ($serviceType === 'drop_in') {
+                        $result['drop-in'] = $remainingUnits;
+                    } elseif ($serviceType === 'boarding_night') {
+                        $result['boarding_night'] = $remainingUnits;
+                    } elseif ($serviceType === 'service_credit') {
+                        $result['service_credit'] = $remainingUnits;
                     }
                 }
             }
         }
+    }
 
-        if (!$hasEntitlementRows && $result['plan_slug'] !== '') {
-            $defaults = founderPlanDefaults();
-            if (isset($defaults[$result['plan_slug']])) {
-                $defaultPlan = $defaults[$result['plan_slug']];
-                $result['membership_name'] = $defaultPlan['name'];
-                $result['walk'] = (int) $defaultPlan['walk'];
-                $result['daycare'] = (int) $defaultPlan['daycare'];
-                $result['drop-in'] = (int) $defaultPlan['drop_in'];
-                $result['boarding_night'] = (int) $defaultPlan['boarding_night'];
-                $result['service_credit'] = (int) $defaultPlan['service_credit'];
-            }
+    if (!$hasEntitlementRows && $result['plan_slug'] !== '') {
+        $defaults = founderPlanDefaults();
+        if (isset($defaults[$result['plan_slug']])) {
+            $defaultPlan = $defaults[$result['plan_slug']];
+            $result['membership_name'] = $defaultPlan['name'];
+            $result['walk'] = (int) $defaultPlan['walk'];
+            $result['daycare'] = (int) $defaultPlan['daycare'];
+            $result['drop-in'] = (int) $defaultPlan['drop_in'];
+            $result['boarding_night'] = (int) $defaultPlan['boarding_night'];
+            $result['service_credit'] = (int) $defaultPlan['service_credit'];
         }
-    } catch (Throwable $e) {
-        return $result;
-    } catch (Exception $e) {
-        return $result;
     }
 
     return $result;
 }
+
+function normalizePetKey($value)
+{
+    return strtolower(trim(preg_replace('/\s+/', ' ', (string) $value)));
+}
+
+function fetchDogJourneyProfileMap(PDO $pdo, $userId)
+{
+    $rows = array();
+
+    if (!hasTable($pdo, 'dog_journey_profiles')) {
+        return $rows;
+    }
+
+    $items = safeFetchAll(
+        $pdo,
+        'SELECT * FROM dog_journey_profiles WHERE user_id = :user_id ORDER BY pet_id ASC, id ASC',
+        array(':user_id' => (int) $userId)
+    );
+
+    foreach ($items as $item) {
+        $rows[(int) valueFromRow($item, array('pet_id'), 0)] = $item;
+    }
+
+    return $rows;
+}
+
+function buildAutoJourneyBadge($totalServices)
+{
+    $totalServices = (int) $totalServices;
+
+    if ($totalServices >= 30) {
+        return 'Dorian’s Inner Circle';
+    }
+    if ($totalServices >= 15) {
+        return 'VIP Companion';
+    }
+    if ($totalServices >= 5) {
+        return 'Routine Favorite';
+    }
+    if ($totalServices >= 1) {
+        return 'First Strolls';
+    }
+
+    return 'Journey Begins';
+}
+
+function buildJourneyHighlight(array $counts, $petName)
+{
+    $totalServices =
+        (int) $counts['walk'] +
+        (int) $counts['daycare'] +
+        (int) $counts['boarding_night'] +
+        (int) $counts['drop_in'] +
+        (int) $counts['sitting'];
+
+    if ($totalServices <= 0) {
+        return $petName . ' is ready to begin their Dog Journey.';
+    }
+
+    arsort($counts);
+    $topKey = (string) key($counts);
+    $topValue = (int) current($counts);
+
+    return $petName . ' has ' . $totalServices . ' total recorded services so far, with ' . $topValue . ' in ' . formatServiceLabel($topKey) . '.';
+}
+
+function buildDogJourneyCards(PDO $pdo, $userId, array $pets, array $bookings, $memberCreatedAt = '')
+{
+    $profiles = fetchDogJourneyProfileMap($pdo, $userId);
+    $cards = array();
+
+    foreach ($pets as $pet) {
+        $petId = (int) valueFromRow($pet, array('pet_id'), 0);
+        $petName = (string) valueFromRow($pet, array('pet_name'), 'Dog');
+        $profile = isset($profiles[$petId]) ? $profiles[$petId] : array();
+
+        $liveCounts = array(
+            'walk' => 0,
+            'daycare' => 0,
+            'boarding_night' => 0,
+            'drop_in' => 0,
+            'sitting' => 0,
+        );
+
+        $latestLiveDate = '';
+
+        foreach ($bookings as $booking) {
+            $bookingPetId = (int) valueFromRow($booking, array('pet_id'), 0);
+            $bookingPetName = normalizePetKey((string) valueFromRow($booking, array('pet_name'), ''));
+            $matchesPet = false;
+
+            if ($petId > 0 && $bookingPetId > 0 && $petId === $bookingPetId) {
+                $matchesPet = true;
+            } elseif ($bookingPetId <= 0 && $bookingPetName !== '' && $bookingPetName === normalizePetKey($petName)) {
+                $matchesPet = true;
+            }
+
+            if (!$matchesPet) {
+                continue;
+            }
+
+            if ((string) valueFromRow($booking, array('status'), '') === 'cancelled') {
+                continue;
+            }
+
+            $serviceType = (string) valueFromRow($booking, array('service_type'), 'service');
+            $quantity = (int) valueFromRow($booking, array('quantity'), 1);
+            if ($quantity < 1) {
+                $quantity = 1;
+            }
+
+            if ($serviceType === 'walk') {
+                $liveCounts['walk'] += 1;
+            } elseif ($serviceType === 'daycare') {
+                $liveCounts['daycare'] += 1;
+            } elseif ($serviceType === 'boarding') {
+                $liveCounts['boarding_night'] += $quantity;
+            } elseif ($serviceType === 'drop-in') {
+                $liveCounts['drop_in'] += 1;
+            } elseif ($serviceType === 'sitting') {
+                $liveCounts['sitting'] += 1;
+            }
+
+            $serviceDate = trim((string) valueFromRow($booking, array('service_date'), ''));
+            if ($serviceDate !== '') {
+                if ($latestLiveDate === '' || strtotime($serviceDate) > strtotime($latestLiveDate)) {
+                    $latestLiveDate = $serviceDate;
+                }
+            }
+        }
+
+        $baselineCounts = array(
+            'walk' => (int) valueFromRow($profile, array('baseline_walks'), 0),
+            'daycare' => (int) valueFromRow($profile, array('baseline_daycare_sessions'), 0),
+            'boarding_night' => (int) valueFromRow($profile, array('baseline_boarding_nights'), 0),
+            'drop_in' => (int) valueFromRow($profile, array('baseline_drop_in_sessions'), 0),
+            'sitting' => (int) valueFromRow($profile, array('baseline_sitting_sessions'), 0),
+        );
+
+        $displayCounts = array(
+            'walk' => $baselineCounts['walk'] + $liveCounts['walk'],
+            'daycare' => $baselineCounts['daycare'] + $liveCounts['daycare'],
+            'boarding_night' => $baselineCounts['boarding_night'] + $liveCounts['boarding_night'],
+            'drop_in' => $baselineCounts['drop_in'] + $liveCounts['drop_in'],
+            'sitting' => $baselineCounts['sitting'] + $liveCounts['sitting'],
+        );
+
+        arsort($displayCounts);
+        $autoFavorite = (string) key($displayCounts);
+        $favoriteService = trim((string) valueFromRow($profile, array('favorite_service'), ''));
+        if ($favoriteService === '' || !in_array($favoriteService, array('walk', 'daycare', 'boarding_night', 'drop_in', 'sitting'), true)) {
+            $favoriteService = $displayCounts[$autoFavorite] > 0 ? $autoFavorite : '';
+        }
+
+        $totalServices =
+            (int) $displayCounts['walk'] +
+            (int) $displayCounts['daycare'] +
+            (int) $displayCounts['boarding_night'] +
+            (int) $displayCounts['drop_in'] +
+            (int) $displayCounts['sitting'];
+
+        $badge = trim((string) valueFromRow($profile, array('milestone_badge'), ''));
+        if ($badge === '') {
+            $badge = buildAutoJourneyBadge($totalServices);
+        }
+
+        $storedLastServiceDate = trim((string) valueFromRow($profile, array('last_service_date'), ''));
+        $lastServiceDate = $latestLiveDate !== '' ? $latestLiveDate : $storedLastServiceDate;
+
+        $journeyHighlight = trim((string) valueFromRow($profile, array('journey_highlight'), ''));
+        if ($journeyHighlight === '') {
+            $journeyHighlight = buildJourneyHighlight($displayCounts, $petName);
+        }
+
+        $cards[] = array(
+            'pet_id' => $petId,
+            'pet_name' => $petName,
+            'breed' => (string) valueFromRow($pet, array('breed'), ''),
+            'age' => (string) valueFromRow($pet, array('age'), ''),
+            'member_since' => $memberCreatedAt,
+            'last_service_date' => $lastServiceDate,
+            'favorite_service' => $favoriteService,
+            'milestone_badge' => $badge,
+            'journey_note' => (string) valueFromRow($profile, array('journey_note'), ''),
+            'journey_highlight' => $journeyHighlight,
+            'counts' => $displayCounts,
+            'baseline_counts' => $baselineCounts,
+            'live_counts' => $liveCounts,
+            'total_services' => $totalServices,
+        );
+    }
+
+    return $cards;
+}
+
+ensureDogJourneySchema($pdo);
 
 $userId = currentUserId();
 if ($userId <= 0 && !isAdmin()) {
@@ -913,14 +1268,17 @@ if ($userId <= 0 && !isAdmin()) {
 
 $memberName = loadMemberName($pdo, $userId);
 $memberName = $memberName !== '' ? $memberName : 'Member';
+$memberCreatedAt = loadMemberCreatedAt($pdo, $userId);
 
 $flash = isset($_SESSION['dashboard_flash']) ? $_SESSION['dashboard_flash'] : '';
 unset($_SESSION['dashboard_flash']);
 
 $bookings = fetchMemberBookings($pdo, $userId);
-$petCount = countMemberPets($pdo, $userId);
+$pets = fetchMemberPetsDetailed($pdo, $userId);
+$petCount = count($pets);
 $unreadNotifications = countUnreadNotificationsForUser($pdo, $userId);
 $membershipSummary = getMembershipSummary($pdo, $userId);
+$journeyCards = buildDogJourneyCards($pdo, $userId, $pets, $bookings, $memberCreatedAt);
 
 $statusCounts = array(
     'pending' => 0,
@@ -1105,7 +1463,7 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
         }
 
         .metric-value {
-            font-size: 1.5rem;
+            font-size: 1.4rem;
             font-weight: 900;
         }
 
@@ -1160,6 +1518,114 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             border: 1px solid rgba(198,178,139,0.3);
             color: #f3e5c2;
             font-weight: 700;
+        }
+
+        .journey-card {
+            margin-bottom: 22px;
+        }
+
+        .journey-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+            margin-top: 18px;
+        }
+
+        .journey-item {
+            padding: 18px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            display: grid;
+            gap: 14px;
+        }
+
+        .journey-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .journey-name {
+            font-size: 1.15rem;
+            font-weight: 900;
+            margin-bottom: 5px;
+        }
+
+        .journey-sub {
+            color: rgba(244,241,234,0.64);
+            font-size: .9rem;
+            line-height: 1.5;
+        }
+
+        .journey-badge {
+            padding: 9px 12px;
+            border-radius: 999px;
+            background: rgba(198,178,139,0.16);
+            color: #f3e5c7;
+            border: 1px solid rgba(198,178,139,0.22);
+            font-size: .82rem;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .journey-highlight {
+            color: rgba(244,241,234,0.76);
+            line-height: 1.65;
+            font-size: .95rem;
+        }
+
+        .journey-stats {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .journey-stat {
+            padding: 12px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.045);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .journey-stat-label {
+            color: rgba(244,241,234,0.54);
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            font-size: .68rem;
+            font-weight: 800;
+            margin-bottom: 8px;
+        }
+
+        .journey-stat-value {
+            font-size: 1.1rem;
+            font-weight: 900;
+        }
+
+        .journey-footer {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .journey-chip {
+            padding: 9px 12px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.08);
+            font-size: .82rem;
+            font-weight: 800;
+        }
+
+        .journey-note {
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: rgba(244,241,234,0.74);
+            line-height: 1.65;
         }
 
         .dashboard-grid {
@@ -1353,15 +1819,21 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
 
         @media (max-width: 1180px) {
             .hero,
-            .dashboard-grid {
+            .dashboard-grid,
+            .journey-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .journey-stats {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
 
         @media (max-width: 760px) {
             .metrics,
             .stats-grid,
-            .quick-grid {
+            .quick-grid,
+            .journey-stats {
                 grid-template-columns: 1fr;
             }
 
@@ -1392,7 +1864,7 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                 <a class="top-link" href="memberships.php">Memberships</a>
                 <a class="top-link" href="member-care-library.php">Care Library</a>
                 <a class="top-link" href="member-care-article.php">Featured Guide</a>
-                <a class="top-link" href="notifications.php">Notifications<?php echo $unreadNotifications > 0 ? ' (' . (int) $unreadNotifications . ')' : ''; ?></a>
+                <a class="top-link" href="notifications.php">Notifications</a>
                 <a class="top-link" href="profile.php">Profile</a>
                 <a class="top-link" href="logout.php">Logout</a>
             </div>
@@ -1404,33 +1876,13 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
 
         <section class="hero">
             <div class="card">
-                <div class="eyebrow">Member Hub</div>
-                <h1>Welcome back, <?php echo h($memberName); ?></h1>
+                <div class="eyebrow">Member Dashboard</div>
+                <h1>Welcome back, <?php echo h($memberName); ?>.</h1>
                 <div class="sub">
-                    Track your upcoming services, watch live walks when available, manage bookings, update your pets, and access upgrade options from one place.
+                    Review your membership, premium care activity, live service visibility, and your dog’s journey in one polished member dashboard.
                 </div>
 
                 <div class="metrics">
-                    <div class="metric">
-                        <div class="metric-label">Total Bookings</div>
-                        <div class="metric-value"><?php echo (int) $totalBookings; ?></div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Active Services</div>
-                        <div class="metric-value"><?php echo (int) $activeServices; ?></div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Pets</div>
-                        <div class="metric-value"><?php echo (int) $petCount; ?></div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Unread Notices</div>
-                        <div class="metric-value"><?php echo (int) $unreadNotifications; ?></div>
-                    </div>
-                    <div class="metric">
-                        <div class="metric-label">Membership</div>
-                        <div class="metric-value"><?php echo h($membershipSummary['membership_name']); ?></div>
-                    </div>
                     <div class="metric">
                         <div class="metric-label">Walk Credits</div>
                         <div class="metric-value"><?php echo (int) $membershipSummary['walk']; ?></div>
@@ -1454,7 +1906,12 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                 </div>
 
                 <div class="chips">
+                    <div class="chip">Plan: <?php echo h($membershipSummary['membership_name']); ?></div>
                     <div class="chip">Renewals: <?php echo (int) $membershipSummary['renewal_count']; ?></div>
+                    <div class="chip">Pets: <?php echo (int) $petCount; ?></div>
+                    <div class="chip">Total Bookings: <?php echo (int) $totalBookings; ?></div>
+                    <div class="chip">Active Services: <?php echo (int) $activeServices; ?></div>
+                    <div class="chip">Unread Alerts: <?php echo (int) $unreadNotifications; ?></div>
                     <div class="chip">Paid: <?php echo (int) $paymentCounts['paid']; ?></div>
                     <div class="chip">Pending Payment: <?php echo (int) $paymentCounts['pending']; ?></div>
                     <div class="chip">Unpaid: <?php echo (int) $paymentCounts['unpaid']; ?></div>
@@ -1532,76 +1989,93 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             </div>
         </section>
 
-        <section class="dashboard-grid">
-            <div class="card">
-                <div class="eyebrow">Status Overview</div>
-                <div class="panel-title">Booking Status Snapshot</div>
-                <div class="stats-grid">
-                    <div class="stat-box">
-                        <div class="stat-name">Pending</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['pending']; ?></div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-name">Available</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['available']; ?></div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-name">Accepted</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['accepted']; ?></div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-name">In Progress</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['in_progress']; ?></div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-name">Completed</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['completed']; ?></div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-name">Cancelled</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['cancelled']; ?></div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-name">Released</div>
-                        <div class="stat-value"><?php echo (int) $statusCounts['released']; ?></div>
-                    </div>
-                </div>
-
-                <div class="status-section-separator">
-                    <div class="status-subtitle">Payment Snapshot</div>
-                    <div class="stats-grid">
-                        <div class="stat-box">
-                            <div class="stat-name">Paid</div>
-                            <div class="stat-value"><?php echo (int) $paymentCounts['paid']; ?></div>
-                        </div>
-                        <div class="stat-box">
-                            <div class="stat-name">Pending Payment</div>
-                            <div class="stat-value"><?php echo (int) $paymentCounts['pending']; ?></div>
-                        </div>
-                        <div class="stat-box">
-                            <div class="stat-name">Unpaid</div>
-                            <div class="stat-value"><?php echo (int) $paymentCounts['unpaid']; ?></div>
-                        </div>
-                        <div class="stat-box">
-                            <div class="stat-name">No Payment Required</div>
-                            <div class="stat-value"><?php echo (int) $paymentCounts['not_required']; ?></div>
-                        </div>
-                    </div>
-                </div>
+        <section class="card journey-card">
+            <div class="eyebrow">Dog Journey</div>
+            <div class="panel-title">Your Dog Journey Dashboard</div>
+            <div class="sub">
+                This premium timeline combines manually seeded pre-launch history with live website bookings so each dog’s journey feels complete from day one.
             </div>
 
+            <?php if (empty($journeyCards)): ?>
+                <div class="empty" style="margin-top:18px;">
+                    No pet profiles are connected yet. Add a pet to begin building your dog’s journey.
+                </div>
+            <?php else: ?>
+                <div class="journey-grid">
+                    <?php foreach ($journeyCards as $card): ?>
+                        <div class="journey-item">
+                            <div class="journey-head">
+                                <div>
+                                    <div class="journey-name"><?php echo h($card['pet_name']); ?></div>
+                                    <div class="journey-sub">
+                                        <?php if ($card['breed'] !== ''): ?>
+                                            <?php echo h($card['breed']); ?>
+                                            <?php if ($card['age'] !== ''): ?> · <?php echo h($card['age']); ?><?php endif; ?>
+                                        <?php elseif ($card['age'] !== ''): ?>
+                                            <?php echo h($card['age']); ?>
+                                        <?php else: ?>
+                                            Dog Journey profile
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                                <div class="journey-badge"><?php echo h($card['milestone_badge']); ?></div>
+                            </div>
+
+                            <div class="journey-highlight"><?php echo h($card['journey_highlight']); ?></div>
+
+                            <div class="journey-stats">
+                                <div class="journey-stat">
+                                    <div class="journey-stat-label">Walks</div>
+                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['walk']; ?></div>
+                                </div>
+                                <div class="journey-stat">
+                                    <div class="journey-stat-label">Daycare</div>
+                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['daycare']; ?></div>
+                                </div>
+                                <div class="journey-stat">
+                                    <div class="journey-stat-label">Boarding</div>
+                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['boarding_night']; ?></div>
+                                </div>
+                                <div class="journey-stat">
+                                    <div class="journey-stat-label">Drop-Ins</div>
+                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['drop_in']; ?></div>
+                                </div>
+                                <div class="journey-stat">
+                                    <div class="journey-stat-label">Sitting</div>
+                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['sitting']; ?></div>
+                                </div>
+                            </div>
+
+                            <div class="journey-footer">
+                                <div class="journey-chip">Favorite: <?php echo h($card['favorite_service'] !== '' ? formatServiceLabel($card['favorite_service']) : 'Still unfolding'); ?></div>
+                                <div class="journey-chip">Last Service: <?php echo h($card['last_service_date'] !== '' ? formatDateDisplay($card['last_service_date']) : 'Not yet recorded'); ?></div>
+                                <div class="journey-chip">Total Services: <?php echo (int) $card['total_services']; ?></div>
+                                <div class="journey-chip">Member Since: <?php echo h($card['member_since'] !== '' ? formatDateDisplay($card['member_since']) : 'Welcome'); ?></div>
+                            </div>
+
+                            <?php if (trim((string) $card['journey_note']) !== ''): ?>
+                                <div class="journey-note"><?php echo h($card['journey_note']); ?></div>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </section>
+
+        <section class="dashboard-grid">
             <div class="card">
-                <div class="eyebrow">Live Tracking</div>
-                <div class="panel-title">Walks With Tracking Visibility</div>
+                <div class="eyebrow">Live Services</div>
+                <div class="panel-title">Active Walks</div>
+
                 <div class="list">
                     <?php if ($activeWalks === array()): ?>
-                        <div class="empty">No walk tracking is visible right now.</div>
+                        <div class="empty">There are no active walk tracking sessions right now.</div>
                     <?php else: ?>
                         <?php foreach ($activeWalks as $row): ?>
                             <div class="row">
                                 <div class="row-top">
                                     <div class="row-title">
-                                        #<?php echo (int) $row['id']; ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Walk'); ?>
+                                        #<?php echo (int) $row['id']; ?> · Walk · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Walk'); ?>
                                     </div>
                                     <div class="row-badges">
                                         <span class="badge <?php echo h(statusBadgeClass($row['status'])); ?>">
@@ -1659,7 +2133,7 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                                 <div class="row-links">
                                     <a class="mini-link" href="booking-details.php?id=<?php echo (int) $row['id']; ?>">Details</a>
                                     <?php if ($row['service_type'] === 'walk' && hasActiveTracking($pdo, $row)): ?>
-                                        <a class="mini-link" href="client-map.php?booking_id=<?php echo (int) $row['id']; ?>">Track Walk</a>
+                                        <a class="mini-link" href="client-map.php?booking_id=<?php echo (int) $row['id']; ?>">Track</a>
                                     <?php endif; ?>
                                 </div>
                             </div>
@@ -1669,56 +2143,47 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             </div>
 
             <div class="card">
-                <div class="eyebrow">Recent Activity</div>
-                <div class="panel-title">Recently Completed Services</div>
-                <div class="list">
-                    <?php if ($recentCompleted === array()): ?>
-                        <div class="empty">No completed services are available yet.</div>
-                    <?php else: ?>
-                        <?php foreach ($recentCompleted as $row): ?>
-                            <div class="row">
-                                <div class="row-top">
-                                    <div class="row-title">
-                                        #<?php echo (int) $row['id']; ?> · <?php echo h(formatServiceLabel($row['service_type'])); ?> · <?php echo h($row['pet_name'] !== '' ? $row['pet_name'] : 'Pet not listed'); ?>
-                                    </div>
-                                    <div class="row-badges">
-                                        <span class="badge badge-complete">Completed</span>
-                                        <span class="badge <?php echo h(paymentBadgeClass($row['payment_status'])); ?>">
-                                            <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
-                                        </span>
-                                    </div>
-                                </div>
-                                <div class="row-meta">
-                                    <?php echo h(formatDateDisplay($row['service_date'])); ?> at <?php echo h(formatTimeDisplay($row['service_time'])); ?> ·
-                                    Walker: <?php echo h($row['worker_name'] !== '' ? $row['worker_name'] : 'Not listed'); ?> ·
-                                    Payment: <?php echo h(paymentBadgeLabel($row['payment_status'])); ?>
-                                </div>
-                                <div class="row-links">
-                                    <a class="mini-link" href="booking-details.php?id=<?php echo (int) $row['id']; ?>">Details</a>
-                                    <?php if ($row['service_type'] === 'walk'): ?>
-                                        <a class="mini-link" href="client-map.php?booking_id=<?php echo (int) $row['id']; ?>">View Walk Map</a>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
+                <div class="eyebrow">Service Status</div>
+                <div class="panel-title">Dashboard Overview</div>
+
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-name">Pending</div>
+                        <div class="stat-value"><?php echo (int) $statusCounts['pending']; ?></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-name">Available</div>
+                        <div class="stat-value"><?php echo (int) $statusCounts['available']; ?></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-name">Accepted</div>
+                        <div class="stat-value"><?php echo (int) $statusCounts['accepted']; ?></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-name">In Progress</div>
+                        <div class="stat-value"><?php echo (int) $statusCounts['in_progress']; ?></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-name">Completed</div>
+                        <div class="stat-value"><?php echo (int) $statusCounts['completed']; ?></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-name">Cancelled</div>
+                        <div class="stat-value"><?php echo (int) $statusCounts['cancelled']; ?></div>
+                    </div>
                 </div>
-            </div>
-        </section>
 
-        <footer class="footer">
-            <div class="footer-copy">
-                Doggie Dorian’s member dashboard — premium client access, live visibility, and cleaner service management.
-            </div>
-
-            <div class="footer-links">
-                <a class="footer-link" href="memberships.php">Memberships</a>
-                <a class="footer-link" href="customize-plan.php">Customize Plan</a>
-                <a class="footer-link" href="contact.php">Contact</a>
-                <a class="footer-link" href="privacy-policy.php">Privacy Policy</a>
-                <a class="footer-link" href="legal-notice.php">Legal Notice</a>
-            </div>
-        </footer>
-    </div>
-</body>
-</html>
+                <div class="status-section-separator">
+                    <div class="status-subtitle">Payment Visibility</div>
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <div class="stat-name">Paid</div>
+                            <div class="stat-value"><?php echo (int) $paymentCounts['paid']; ?></div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-name">Pending Payment</div>
+                            <div class="stat-value"><?php echo (int) $paymentCounts['pending']; ?></div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-name">Unpaid</div>
+                            <div class="stat

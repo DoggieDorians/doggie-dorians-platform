@@ -178,6 +178,595 @@ function buildFullNameExpression(string $alias, ?string $nameCol, ?string $first
     return "COALESCE(NULLIF(TRIM($first || ' ' || $last), ''), $fallback)";
 }
 
+
+function valueFromRow(array $row, array $candidates, mixed $default = null): mixed
+{
+    foreach ($candidates as $candidate) {
+        if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
+            return $row[$candidate];
+        }
+    }
+
+    return $default;
+}
+
+function firstExistingColumn(PDO $pdo, string $table, array $choices): ?string
+{
+    return pickExistingColumn(getColumns($pdo, $table), $choices);
+}
+
+function ensureTableColumn(PDO $pdo, string $table, string $column, string $definition): void
+{
+    if (!tableExists($pdo, $table)) {
+        return;
+    }
+
+    $columns = getColumns($pdo, $table);
+    if (in_array($column, $columns, true)) {
+        return;
+    }
+
+    try {
+        $pdo->exec('ALTER TABLE ' . quotedIdentifier($table) . ' ADD COLUMN ' . quotedIdentifier($column) . ' ' . $definition);
+    } catch (Throwable $e) {
+    }
+}
+
+function normalizeServiceType(?string $type): string
+{
+    $type = strtolower(trim((string) $type));
+    $type = str_replace(['-', ' '], '_', $type);
+
+    if ($type === '') {
+        return 'service';
+    }
+    if (str_contains($type, 'walk')) {
+        return 'walk';
+    }
+    if (str_contains($type, 'board')) {
+        return 'boarding';
+    }
+    if (str_contains($type, 'daycare') || str_contains($type, 'day_care')) {
+        return 'daycare';
+    }
+    if (str_contains($type, 'sit')) {
+        return 'sitting';
+    }
+    if (str_contains($type, 'drop')) {
+        return 'drop_in';
+    }
+
+    return $type;
+}
+
+function formatJourneyServiceLabel(?string $serviceType): string
+{
+    $serviceType = trim((string) $serviceType);
+
+    return match ($serviceType) {
+        'walk' => 'Walks',
+        'daycare' => 'Daycare Sessions',
+        'boarding_night' => 'Boarding Nights',
+        'drop_in' => 'Drop-Ins',
+        'sitting' => 'Sitting Sessions',
+        'boarding' => 'Boarding',
+        'drop-in' => 'Drop-Ins',
+        '' => 'Auto Calculate',
+        default => ucwords(str_replace(['_', '-'], ' ', $serviceType)),
+    };
+}
+
+function normalizePetKey(?string $value): string
+{
+    return strtolower(trim(preg_replace('/\s+/', ' ', (string) $value)));
+}
+
+function ensureDogJourneySchema(PDO $pdo): void
+{
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS dog_journey_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                pet_id INTEGER NOT NULL DEFAULT 0,
+                baseline_walks INTEGER NOT NULL DEFAULT 0,
+                baseline_daycare_sessions INTEGER NOT NULL DEFAULT 0,
+                baseline_boarding_nights INTEGER NOT NULL DEFAULT 0,
+                baseline_drop_in_sessions INTEGER NOT NULL DEFAULT 0,
+                baseline_sitting_sessions INTEGER NOT NULL DEFAULT 0,
+                favorite_service TEXT DEFAULT '',
+                milestone_badge TEXT DEFAULT '',
+                journey_note TEXT DEFAULT '',
+                journey_highlight TEXT DEFAULT '',
+                last_service_date TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+    } catch (Throwable $e) {
+    }
+
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_walks', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_daycare_sessions', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_boarding_nights', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_drop_in_sessions', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'baseline_sitting_sessions', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'favorite_service', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'milestone_badge', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'journey_note', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'journey_highlight', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'last_service_date', "TEXT DEFAULT ''");
+    ensureTableColumn($pdo, 'dog_journey_profiles', 'updated_at', "TEXT DEFAULT CURRENT_TIMESTAMP");
+
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS dog_journey_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                pet_id INTEGER NOT NULL DEFAULT 0,
+                entry_type TEXT NOT NULL DEFAULT 'note',
+                service_type TEXT DEFAULT '',
+                entry_title TEXT DEFAULT '',
+                entry_body TEXT DEFAULT '',
+                entry_date TEXT DEFAULT '',
+                created_by_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+    } catch (Throwable $e) {
+    }
+
+    try {
+        $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_dog_journey_user_pet ON dog_journey_profiles(user_id, pet_id)');
+    } catch (Throwable $e) {
+    }
+
+    try {
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_dog_journey_entries_user_pet ON dog_journey_entries(user_id, pet_id)');
+    } catch (Throwable $e) {
+    }
+}
+
+function fetchMemberPetsDetailed(PDO $pdo, int $userId): array
+{
+    $pets = [];
+    $seen = [];
+
+    foreach (['pets', 'dogs'] as $table) {
+        if (!tableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = getColumns($pdo, $table);
+        $ownerCol = pickExistingColumn($columns, ['user_id', 'member_id', 'owner_id', 'client_id']);
+        $idCol = pickExistingColumn($columns, ['id', 'pet_id', 'dog_id']);
+        $nameCol = pickExistingColumn($columns, ['name', 'pet_name', 'dog_name']);
+        $breedCol = pickExistingColumn($columns, ['breed']);
+        $ageCol = pickExistingColumn($columns, ['age', 'dog_age']);
+        $notesCol = pickExistingColumn($columns, ['notes', 'care_notes']);
+        $createdCol = pickExistingColumn($columns, ['created_at', 'created_on']);
+
+        if ($ownerCol === null || $idCol === null || $nameCol === null) {
+            continue;
+        }
+
+        $sql = "
+            SELECT
+                " . quotedIdentifier($idCol) . " AS " . quotedIdentifier('pet_id') . ",
+                " . quotedIdentifier($nameCol) . " AS " . quotedIdentifier('pet_name') . ",
+                " . ($breedCol !== null ? quotedIdentifier($breedCol) : "''") . " AS " . quotedIdentifier('breed') . ",
+                " . ($ageCol !== null ? quotedIdentifier($ageCol) : "''") . " AS " . quotedIdentifier('age') . ",
+                " . ($notesCol !== null ? quotedIdentifier($notesCol) : "''") . " AS " . quotedIdentifier('notes') . ",
+                " . ($createdCol !== null ? quotedIdentifier($createdCol) : "''") . " AS " . quotedIdentifier('created_at') . "
+            FROM " . quotedIdentifier($table) . "
+            WHERE " . quotedIdentifier($ownerCol) . " = :user_id
+            ORDER BY " . quotedIdentifier($idCol) . " DESC
+        ";
+
+        $rows = fetchAllSafe($pdo, $sql, [':user_id' => $userId]);
+
+        foreach ($rows as $row) {
+            $petId = (int) valueFromRow($row, ['pet_id'], 0);
+            $petName = trim((string) valueFromRow($row, ['pet_name'], ''));
+
+            if ($petId <= 0 || $petName === '' || isset($seen[$petId])) {
+                continue;
+            }
+
+            $seen[$petId] = true;
+            $pets[] = [
+                'pet_id' => $petId,
+                'pet_name' => $petName,
+                'breed' => (string) valueFromRow($row, ['breed'], ''),
+                'age' => (string) valueFromRow($row, ['age'], ''),
+                'notes' => (string) valueFromRow($row, ['notes'], ''),
+                'created_at' => (string) valueFromRow($row, ['created_at'], ''),
+                'display_name' => $petName,
+                'display_breed' => (string) valueFromRow($row, ['breed'], ''),
+                'display_age' => (string) valueFromRow($row, ['age'], ''),
+                'display_notes' => (string) valueFromRow($row, ['notes'], ''),
+                'display_created' => (string) valueFromRow($row, ['created_at'], ''),
+                'source_table' => $table,
+            ];
+        }
+    }
+
+    return $pets;
+}
+
+function loadPetNameById(PDO $pdo, int $petId): string
+{
+    if ($petId <= 0) {
+        return '';
+    }
+
+    foreach (['pets', 'dogs'] as $table) {
+        if (!tableExists($pdo, $table)) {
+            continue;
+        }
+
+        $columns = getColumns($pdo, $table);
+        $idCol = pickExistingColumn($columns, ['id', 'pet_id', 'dog_id']);
+        $nameCol = pickExistingColumn($columns, ['name', 'pet_name', 'dog_name']);
+
+        if ($idCol === null || $nameCol === null) {
+            continue;
+        }
+
+        $sql = 'SELECT ' . quotedIdentifier($nameCol) . ' FROM ' . quotedIdentifier($table) . ' WHERE ' . quotedIdentifier($idCol) . ' = :pet_id LIMIT 1';
+        $row = fetchOneSafe($pdo, $sql, [':pet_id' => $petId]);
+
+        if ($row) {
+            $name = trim((string) array_values($row)[0]);
+            if ($name !== '') {
+                return $name;
+            }
+        }
+    }
+
+    return '';
+}
+
+function bookingBaseTable(PDO $pdo): ?string
+{
+    foreach (['bookings', 'walks'] as $table) {
+        if (tableExists($pdo, $table)) {
+            return $table;
+        }
+    }
+
+    return null;
+}
+
+function normalizeJourneyStatus(?string $status): string
+{
+    $status = strtolower(trim((string) $status));
+
+    return match ($status) {
+        'canceled', 'cancelled', 'cancelled by client', 'cancelled by walker', 'void' => 'cancelled',
+        'done', 'finished', 'closed' => 'completed',
+        'assigned', 'confirmed' => 'confirmed',
+        'active', 'walking', 'started', 'in progress' => 'in_progress',
+        'new', 'open', 'unassigned' => 'requested',
+        default => $status !== '' ? $status : 'requested',
+    };
+}
+
+function fetchJourneyBookings(PDO $pdo, int $userId): array
+{
+    $table = bookingBaseTable($pdo);
+
+    if ($table === null || $userId <= 0) {
+        return [];
+    }
+
+    $columns = getColumns($pdo, $table);
+    $userCol = pickExistingColumn($columns, ['user_id', 'member_id', 'client_id', 'owner_id']);
+    $orderCol = pickExistingColumn($columns, ['service_date', 'booking_date', 'walk_date', 'date', 'scheduled_date', 'created_at', 'id']);
+
+    if ($userCol === null) {
+        return [];
+    }
+
+    $orderBy = $orderCol !== null ? quotedIdentifier($orderCol) : quotedIdentifier('id');
+
+    $sql = 'SELECT * FROM ' . quotedIdentifier($table) . ' WHERE ' . quotedIdentifier($userCol) . ' = :user_id ORDER BY ' . $orderBy . ' ASC, rowid DESC';
+    $rows = fetchAllSafe($pdo, $sql, [':user_id' => $userId]);
+
+    $normalized = [];
+
+    foreach ($rows as $row) {
+        $petId = (int) valueFromRow($row, ['pet_id', 'dog_id'], 0);
+        $petName = trim((string) valueFromRow($row, ['pet_name', 'dog_name', 'name'], ''));
+        if ($petName === '' && $petId > 0) {
+            $petName = loadPetNameById($pdo, $petId);
+        }
+
+        $serviceType = normalizeServiceType((string) valueFromRow($row, ['service_type', 'service', 'booking_type', 'type', 'category'], 'service'));
+        $quantity = 1;
+        if ($serviceType === 'boarding') {
+            $quantityValue = valueFromRow($row, ['quantity', 'nights', 'boarding_nights', 'total_nights'], 1);
+            $quantity = is_numeric($quantityValue) ? max(1, (int) $quantityValue) : 1;
+        }
+
+        $normalized[] = [
+            'pet_id' => $petId,
+            'pet_name' => $petName,
+            'service_type' => $serviceType,
+            'status' => normalizeJourneyStatus((string) valueFromRow($row, ['status', 'booking_status', 'service_status', 'walk_status'], 'requested')),
+            'service_date' => (string) valueFromRow($row, ['service_date', 'booking_date', 'walk_date', 'date', 'start_date', 'scheduled_date'], ''),
+            'quantity' => $quantity,
+        ];
+    }
+
+    return $normalized;
+}
+
+function fetchDogJourneyProfileMap(PDO $pdo, int $userId): array
+{
+    if (!tableExists($pdo, 'dog_journey_profiles')) {
+        return [];
+    }
+
+    $profiles = fetchAllSafe(
+        $pdo,
+        'SELECT * FROM dog_journey_profiles WHERE user_id = :user_id ORDER BY pet_id ASC, id ASC',
+        [':user_id' => $userId]
+    );
+
+    $map = [];
+    foreach ($profiles as $profile) {
+        $map[(int) valueFromRow($profile, ['pet_id'], 0)] = $profile;
+    }
+
+    return $map;
+}
+
+function buildAutoJourneyBadge(int $totalServices): string
+{
+    if ($totalServices >= 30) {
+        return 'Dorian’s Inner Circle';
+    }
+    if ($totalServices >= 15) {
+        return 'VIP Companion';
+    }
+    if ($totalServices >= 5) {
+        return 'Routine Favorite';
+    }
+    if ($totalServices >= 1) {
+        return 'First Strolls';
+    }
+
+    return 'Journey Begins';
+}
+
+function buildJourneyHighlight(array $counts, string $petName): string
+{
+    $totalServices =
+        (int) ($counts['walk'] ?? 0) +
+        (int) ($counts['daycare'] ?? 0) +
+        (int) ($counts['boarding_night'] ?? 0) +
+        (int) ($counts['drop_in'] ?? 0) +
+        (int) ($counts['sitting'] ?? 0);
+
+    if ($totalServices <= 0) {
+        return $petName . ' is ready to begin their Dog Journey.';
+    }
+
+    arsort($counts);
+    $topKey = (string) key($counts);
+    $topValue = (int) current($counts);
+
+    return $petName . ' has ' . $totalServices . ' total recorded services so far, with ' . $topValue . ' in ' . formatJourneyServiceLabel($topKey) . '.';
+}
+
+function buildDogJourneyCards(PDO $pdo, int $userId, array $pets, array $bookings, string $memberCreatedAt = ''): array
+{
+    $profiles = fetchDogJourneyProfileMap($pdo, $userId);
+    $cards = [];
+
+    foreach ($pets as $pet) {
+        $petId = (int) valueFromRow($pet, ['pet_id'], 0);
+        $petName = (string) valueFromRow($pet, ['pet_name', 'display_name'], 'Dog');
+        $profile = $profiles[$petId] ?? [];
+
+        $liveCounts = [
+            'walk' => 0,
+            'daycare' => 0,
+            'boarding_night' => 0,
+            'drop_in' => 0,
+            'sitting' => 0,
+        ];
+
+        $latestLiveDate = '';
+
+        foreach ($bookings as $booking) {
+            $bookingPetId = (int) valueFromRow($booking, ['pet_id'], 0);
+            $bookingPetName = normalizePetKey((string) valueFromRow($booking, ['pet_name'], ''));
+            $matchesPet = false;
+
+            if ($petId > 0 && $bookingPetId > 0 && $petId === $bookingPetId) {
+                $matchesPet = true;
+            } elseif ($bookingPetId <= 0 && $bookingPetName !== '' && $bookingPetName === normalizePetKey($petName)) {
+                $matchesPet = true;
+            }
+
+            if (!$matchesPet || (string) valueFromRow($booking, ['status'], '') === 'cancelled') {
+                continue;
+            }
+
+            $serviceType = (string) valueFromRow($booking, ['service_type'], 'service');
+            $quantity = max(1, (int) valueFromRow($booking, ['quantity'], 1));
+
+            if ($serviceType === 'walk') {
+                $liveCounts['walk'] += 1;
+            } elseif ($serviceType === 'daycare') {
+                $liveCounts['daycare'] += 1;
+            } elseif ($serviceType === 'boarding') {
+                $liveCounts['boarding_night'] += $quantity;
+            } elseif ($serviceType === 'drop_in') {
+                $liveCounts['drop_in'] += 1;
+            } elseif ($serviceType === 'sitting') {
+                $liveCounts['sitting'] += 1;
+            }
+
+            $serviceDate = trim((string) valueFromRow($booking, ['service_date'], ''));
+            if ($serviceDate !== '' && ($latestLiveDate === '' || strtotime($serviceDate) > strtotime($latestLiveDate))) {
+                $latestLiveDate = $serviceDate;
+            }
+        }
+
+        $baselineCounts = [
+            'walk' => (int) valueFromRow($profile, ['baseline_walks'], 0),
+            'daycare' => (int) valueFromRow($profile, ['baseline_daycare_sessions'], 0),
+            'boarding_night' => (int) valueFromRow($profile, ['baseline_boarding_nights'], 0),
+            'drop_in' => (int) valueFromRow($profile, ['baseline_drop_in_sessions'], 0),
+            'sitting' => (int) valueFromRow($profile, ['baseline_sitting_sessions'], 0),
+        ];
+
+        $displayCounts = [
+            'walk' => $baselineCounts['walk'] + $liveCounts['walk'],
+            'daycare' => $baselineCounts['daycare'] + $liveCounts['daycare'],
+            'boarding_night' => $baselineCounts['boarding_night'] + $liveCounts['boarding_night'],
+            'drop_in' => $baselineCounts['drop_in'] + $liveCounts['drop_in'],
+            'sitting' => $baselineCounts['sitting'] + $liveCounts['sitting'],
+        ];
+
+        arsort($displayCounts);
+        $autoFavorite = (string) key($displayCounts);
+        $favoriteService = trim((string) valueFromRow($profile, ['favorite_service'], ''));
+        if ($favoriteService === '' || !in_array($favoriteService, ['walk', 'daycare', 'boarding_night', 'drop_in', 'sitting'], true)) {
+            $favoriteService = $displayCounts[$autoFavorite] > 0 ? $autoFavorite : '';
+        }
+
+        $totalServices =
+            (int) $displayCounts['walk'] +
+            (int) $displayCounts['daycare'] +
+            (int) $displayCounts['boarding_night'] +
+            (int) $displayCounts['drop_in'] +
+            (int) $displayCounts['sitting'];
+
+        $milestoneBadge = trim((string) valueFromRow($profile, ['milestone_badge'], ''));
+        if ($milestoneBadge === '') {
+            $milestoneBadge = buildAutoJourneyBadge($totalServices);
+        }
+
+        $storedLastServiceDate = trim((string) valueFromRow($profile, ['last_service_date'], ''));
+        $lastServiceDate = $latestLiveDate !== '' ? $latestLiveDate : $storedLastServiceDate;
+
+        $journeyHighlight = trim((string) valueFromRow($profile, ['journey_highlight'], ''));
+        if ($journeyHighlight === '') {
+            $journeyHighlight = buildJourneyHighlight($displayCounts, $petName);
+        }
+
+        $cards[] = [
+            'pet_id' => $petId,
+            'pet_name' => $petName,
+            'breed' => (string) valueFromRow($pet, ['breed', 'display_breed'], ''),
+            'age' => (string) valueFromRow($pet, ['age', 'display_age'], ''),
+            'member_since' => $memberCreatedAt,
+            'last_service_date' => $lastServiceDate,
+            'manual_last_service_date' => $storedLastServiceDate,
+            'favorite_service' => $favoriteService,
+            'manual_favorite_service' => (string) valueFromRow($profile, ['favorite_service'], ''),
+            'milestone_badge' => $milestoneBadge,
+            'manual_milestone_badge' => (string) valueFromRow($profile, ['milestone_badge'], ''),
+            'journey_note' => (string) valueFromRow($profile, ['journey_note'], ''),
+            'manual_journey_note' => (string) valueFromRow($profile, ['journey_note'], ''),
+            'journey_highlight' => $journeyHighlight,
+            'manual_journey_highlight' => (string) valueFromRow($profile, ['journey_highlight'], ''),
+            'counts' => $displayCounts,
+            'baseline_counts' => $baselineCounts,
+            'live_counts' => $liveCounts,
+            'total_services' => $totalServices,
+        ];
+    }
+
+    return $cards;
+}
+
+function upsertDogJourneyProfile(PDO $pdo, int $userId, int $petId, array $payload): void
+{
+    $existing = fetchOneSafe(
+        $pdo,
+        'SELECT id FROM dog_journey_profiles WHERE user_id = :user_id AND pet_id = :pet_id LIMIT 1',
+        [':user_id' => $userId, ':pet_id' => $petId]
+    );
+
+    $params = [
+        ':user_id' => $userId,
+        ':pet_id' => $petId,
+        ':baseline_walks' => max(0, (int) ($payload['baseline_walks'] ?? 0)),
+        ':baseline_daycare_sessions' => max(0, (int) ($payload['baseline_daycare_sessions'] ?? 0)),
+        ':baseline_boarding_nights' => max(0, (int) ($payload['baseline_boarding_nights'] ?? 0)),
+        ':baseline_drop_in_sessions' => max(0, (int) ($payload['baseline_drop_in_sessions'] ?? 0)),
+        ':baseline_sitting_sessions' => max(0, (int) ($payload['baseline_sitting_sessions'] ?? 0)),
+        ':favorite_service' => trim((string) ($payload['favorite_service'] ?? '')),
+        ':milestone_badge' => trim((string) ($payload['milestone_badge'] ?? '')),
+        ':journey_note' => trim((string) ($payload['journey_note'] ?? '')),
+        ':journey_highlight' => trim((string) ($payload['journey_highlight'] ?? '')),
+        ':last_service_date' => trim((string) ($payload['last_service_date'] ?? '')),
+    ];
+
+    if ($existing) {
+        $sql = "
+            UPDATE dog_journey_profiles
+            SET
+                baseline_walks = :baseline_walks,
+                baseline_daycare_sessions = :baseline_daycare_sessions,
+                baseline_boarding_nights = :baseline_boarding_nights,
+                baseline_drop_in_sessions = :baseline_drop_in_sessions,
+                baseline_sitting_sessions = :baseline_sitting_sessions,
+                favorite_service = :favorite_service,
+                milestone_badge = :milestone_badge,
+                journey_note = :journey_note,
+                journey_highlight = :journey_highlight,
+                last_service_date = :last_service_date,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :user_id
+              AND pet_id = :pet_id
+        ";
+    } else {
+        $sql = "
+            INSERT INTO dog_journey_profiles (
+                user_id,
+                pet_id,
+                baseline_walks,
+                baseline_daycare_sessions,
+                baseline_boarding_nights,
+                baseline_drop_in_sessions,
+                baseline_sitting_sessions,
+                favorite_service,
+                milestone_badge,
+                journey_note,
+                journey_highlight,
+                last_service_date,
+                created_at,
+                updated_at
+            ) VALUES (
+                :user_id,
+                :pet_id,
+                :baseline_walks,
+                :baseline_daycare_sessions,
+                :baseline_boarding_nights,
+                :baseline_drop_in_sessions,
+                :baseline_sitting_sessions,
+                :favorite_service,
+                :milestone_badge,
+                :journey_note,
+                :journey_highlight,
+                :last_service_date,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            )
+        ";
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+}
+
 if (empty($_SESSION['admin_member_view_csrf']) || !is_string($_SESSION['admin_member_view_csrf'])) {
     $_SESSION['admin_member_view_csrf'] = bin2hex(random_bytes(32));
 }
@@ -203,6 +792,8 @@ $flashMessage = trim((string) ($_GET['status_message'] ?? ''));
 $user = null;
 $dogs = [];
 $bookings = [];
+$journeyBookings = [];
+$journeyCards = [];
 $clientProfile = null;
 
 $bookingHasAdminNotes = false;
@@ -217,6 +808,8 @@ try {
     if (!tableExists($pdo, 'users')) {
         throw new RuntimeException('The users table was not found.');
     }
+
+    ensureDogJourneySchema($pdo);
 
     $userColumns = getColumns($pdo, 'users');
 
@@ -268,37 +861,46 @@ try {
         $user['full_name'] = $derivedFullName;
     }
 
-    if (tableExists($pdo, 'dogs')) {
-        $dogColumns = getColumns($pdo, 'dogs');
+    $dogs = fetchMemberPetsDetailed($pdo, $userId);
 
-        $dogOwnerCol = pickExistingColumn($dogColumns, ['user_id', 'member_id', 'owner_id', 'client_id']);
-        $dogNameCol = pickExistingColumn($dogColumns, ['name', 'pet_name', 'dog_name']);
-        $dogBreedCol = pickExistingColumn($dogColumns, ['breed']);
-        $dogAgeCol = pickExistingColumn($dogColumns, ['age', 'dog_age']);
-        $dogNotesCol = pickExistingColumn($dogColumns, ['notes', 'care_notes']);
-        $dogCreatedCol = pickExistingColumn($dogColumns, ['created_at', 'created_on']);
-
-        if ($dogOwnerCol !== null) {
-            $dogSelectParts = [
-                quotedIdentifier('id'),
-                $dogNameCol !== null ? quotedIdentifier($dogNameCol) . ' AS ' . quotedIdentifier('display_name') : "'Dog' AS " . quotedIdentifier('display_name'),
-                $dogBreedCol !== null ? quotedIdentifier($dogBreedCol) . ' AS ' . quotedIdentifier('display_breed') : "NULL AS " . quotedIdentifier('display_breed'),
-                $dogAgeCol !== null ? quotedIdentifier($dogAgeCol) . ' AS ' . quotedIdentifier('display_age') : "NULL AS " . quotedIdentifier('display_age'),
-                $dogNotesCol !== null ? quotedIdentifier($dogNotesCol) . ' AS ' . quotedIdentifier('display_notes') : "NULL AS " . quotedIdentifier('display_notes'),
-                $dogCreatedCol !== null ? quotedIdentifier($dogCreatedCol) . ' AS ' . quotedIdentifier('display_created') : "NULL AS " . quotedIdentifier('display_created'),
-            ];
-
-            $orderBy = $dogCreatedCol !== null ? quotedIdentifier($dogCreatedCol) . ' DESC' : quotedIdentifier('id') . ' DESC';
-
-            $dogSql = "
-                SELECT " . implode(', ', $dogSelectParts) . "
-                FROM " . quotedIdentifier('dogs') . "
-                WHERE " . quotedIdentifier($dogOwnerCol) . " = :user_id
-                ORDER BY {$orderBy}
-            ";
-
-            $dogs = fetchAllSafe($pdo, $dogSql, [':user_id' => $userId]);
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') === 'save_dog_journey') {
+        $postedToken = (string) ($_POST['csrf_token'] ?? '');
+        if (!hash_equals($csrfToken, $postedToken)) {
+            safeRedirect('admin-member-view.php?id=' . $userId . '&status_type=error&status_message=' . urlencode('Security check failed. Please try again.'));
         }
+
+        $petId = (int) ($_POST['pet_id'] ?? 0);
+        $allowedPetIds = array_map(static fn(array $pet): int => (int) ($pet['pet_id'] ?? 0), $dogs);
+
+        if ($petId <= 0 || !in_array($petId, $allowedPetIds, true)) {
+            safeRedirect('admin-member-view.php?id=' . $userId . '&status_type=error&status_message=' . urlencode('That pet could not be matched to this member.'));
+        }
+
+        $favoriteService = trim((string) ($_POST['favorite_service'] ?? ''));
+        $allowedFavoriteServices = ['', 'walk', 'daycare', 'boarding_night', 'drop_in', 'sitting'];
+        if (!in_array($favoriteService, $allowedFavoriteServices, true)) {
+            $favoriteService = '';
+        }
+
+        $lastServiceDate = trim((string) ($_POST['last_service_date'] ?? ''));
+        if ($lastServiceDate !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $lastServiceDate)) {
+            $lastServiceDate = '';
+        }
+
+        upsertDogJourneyProfile($pdo, $userId, $petId, [
+            'baseline_walks' => (int) ($_POST['baseline_walks'] ?? 0),
+            'baseline_daycare_sessions' => (int) ($_POST['baseline_daycare_sessions'] ?? 0),
+            'baseline_boarding_nights' => (int) ($_POST['baseline_boarding_nights'] ?? 0),
+            'baseline_drop_in_sessions' => (int) ($_POST['baseline_drop_in_sessions'] ?? 0),
+            'baseline_sitting_sessions' => (int) ($_POST['baseline_sitting_sessions'] ?? 0),
+            'favorite_service' => $favoriteService,
+            'milestone_badge' => trim((string) ($_POST['milestone_badge'] ?? '')),
+            'journey_note' => trim((string) ($_POST['journey_note'] ?? '')),
+            'journey_highlight' => trim((string) ($_POST['journey_highlight'] ?? '')),
+            'last_service_date' => $lastServiceDate,
+        ]);
+
+        safeRedirect('admin-member-view.php?id=' . $userId . '&status_type=success&status_message=' . urlencode('Dog Journey baseline saved successfully.'));
     }
 
     if (tableExists($pdo, 'bookings')) {
@@ -364,6 +966,9 @@ try {
             $clientProfile = $profileStmt->fetch(PDO::FETCH_ASSOC) ?: null;
         }
     }
+
+    $journeyBookings = fetchJourneyBookings($pdo, $userId);
+    $journeyCards = buildDogJourneyCards($pdo, $userId, $dogs, $journeyBookings, (string) ($user['created_at'] ?? ''));
 } catch (Throwable $e) {
     safeRedirect('admin-members.php?status_type=error&status_message=' . urlencode($e->getMessage()));
 }
@@ -677,6 +1282,175 @@ try {
             background:rgba(255,255,255,0.03);
         }
 
+        .journey-shell{
+            display:grid;
+            gap:18px;
+        }
+
+        .journey-card{
+            background:var(--panel2);
+            border:1px solid rgba(255,255,255,0.08);
+            border-radius:18px;
+            padding:18px;
+        }
+
+        .journey-head{
+            display:flex;
+            justify-content:space-between;
+            align-items:flex-start;
+            gap:14px;
+            flex-wrap:wrap;
+            margin-bottom:14px;
+        }
+
+        .journey-copy{
+            color:var(--muted);
+            font-size:14px;
+            line-height:1.7;
+        }
+
+        .journey-badge{
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            padding:8px 12px;
+            border-radius:999px;
+            font-size:12px;
+            font-weight:800;
+            letter-spacing:0.04em;
+            text-transform:uppercase;
+            border:1px solid rgba(212,175,55,0.25);
+            background:rgba(212,175,55,0.14);
+            color:var(--gold-soft);
+            white-space:nowrap;
+        }
+
+        .journey-chip-row{
+            display:flex;
+            flex-wrap:wrap;
+            gap:10px;
+            margin-bottom:16px;
+        }
+
+        .journey-chip{
+            display:inline-flex;
+            align-items:center;
+            padding:7px 11px;
+            border-radius:999px;
+            background:rgba(255,255,255,0.05);
+            border:1px solid rgba(255,255,255,0.08);
+            color:var(--text);
+            font-size:12px;
+            font-weight:700;
+        }
+
+        .journey-highlight{
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.08);
+            border-radius:16px;
+            padding:14px;
+            color:var(--text);
+            line-height:1.7;
+            margin-bottom:16px;
+        }
+
+        .journey-note{
+            color:var(--muted);
+            line-height:1.7;
+            margin-top:-4px;
+            margin-bottom:16px;
+        }
+
+        .journey-totals{
+            display:grid;
+            grid-template-columns:repeat(5, minmax(0,1fr));
+            gap:12px;
+            margin-bottom:18px;
+        }
+
+        .journey-total{
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.08);
+            border-radius:16px;
+            padding:14px;
+        }
+
+        .journey-total-top{
+            display:flex;
+            justify-content:space-between;
+            gap:10px;
+            align-items:flex-end;
+            margin-bottom:8px;
+        }
+
+        .journey-total-number{
+            font-size:26px;
+            font-weight:800;
+            color:var(--gold-soft);
+            line-height:1;
+        }
+
+        .journey-total-meta{
+            color:var(--muted);
+            font-size:12px;
+            line-height:1.6;
+        }
+
+        .journey-form{
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.08);
+            border-radius:16px;
+            padding:16px;
+        }
+
+        .journey-form-grid{
+            display:grid;
+            grid-template-columns:repeat(2, minmax(0,1fr));
+            gap:14px;
+        }
+
+        .journey-field{
+            display:flex;
+            flex-direction:column;
+            gap:8px;
+        }
+
+        .journey-field-full{
+            grid-column:1 / -1;
+        }
+
+        .journey-field label{
+            font-size:12px;
+            font-weight:800;
+            text-transform:uppercase;
+            letter-spacing:0.08em;
+            color:var(--gold-soft);
+        }
+
+        .journey-input,
+        .journey-select,
+        .journey-textarea{
+            width:100%;
+            border-radius:12px;
+            border:1px solid rgba(255,255,255,0.10);
+            background:rgba(0,0,0,0.28);
+            color:var(--text);
+            padding:12px 13px;
+            font:inherit;
+            outline:none;
+        }
+
+        .journey-textarea{
+            min-height:110px;
+            resize:vertical;
+        }
+
+        .journey-helper{
+            color:var(--muted);
+            font-size:12px;
+            line-height:1.6;
+        }
+
         @media (max-width: 1100px){
             .grid{
                 grid-template-columns:repeat(2, minmax(0,1fr));
@@ -685,10 +1459,19 @@ try {
             .booking-layout{
                 grid-template-columns:1fr;
             }
+
+            .journey-totals{
+                grid-template-columns:repeat(2, minmax(0,1fr));
+            }
         }
 
         @media (max-width: 700px){
             .grid{
+                grid-template-columns:1fr;
+            }
+
+            .journey-form-grid,
+            .journey-totals{
                 grid-template-columns:1fr;
             }
 
@@ -796,6 +1579,157 @@ try {
                             Notes: <?php echo h($dog['display_notes'] ?? 'N/A'); ?><br>
                             Added: <?php echo formatDateTime($dog['display_created'] ?? ''); ?>
                         </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </section>
+
+
+    <section class="section">
+        <h2>Dog Journey Dashboard</h2>
+        <div class="sub" style="margin-bottom:16px;">
+            Manual baseline totals stack on top of live member booking history so pre-launch care is preserved without changing your live booking records.
+        </div>
+
+        <?php if (empty($journeyCards)): ?>
+            <div class="empty">No pets are connected to this member yet. Add a dog first, then seed their Dog Journey baseline here.</div>
+        <?php else: ?>
+            <div class="journey-shell">
+                <?php foreach ($journeyCards as $journey): ?>
+                    <div class="journey-card">
+                        <div class="journey-head">
+                            <div>
+                                <div class="item-title"><?php echo h($journey['pet_name'] ?? 'Dog'); ?></div>
+                                <div class="item-meta">
+                                    Breed: <?php echo h($journey['breed'] !== '' ? $journey['breed'] : 'N/A'); ?><br>
+                                    Age: <?php echo h($journey['age'] !== '' ? (string) $journey['age'] : 'N/A'); ?><br>
+                                    Favorite Service: <?php echo h($journey['favorite_service'] !== '' ? formatJourneyServiceLabel($journey['favorite_service']) : 'Auto Calculate'); ?><br>
+                                    Last Service Date: <?php echo formatDate($journey['last_service_date'] ?? ''); ?><br>
+                                    Milestone: <?php echo h($journey['milestone_badge'] !== '' ? $journey['milestone_badge'] : 'Journey Begins'); ?>
+                                </div>
+                            </div>
+
+                            <div class="journey-badge">
+                                Total Services: <?php echo (int) ($journey['total_services'] ?? 0); ?>
+                            </div>
+                        </div>
+
+                        <div class="journey-chip-row">
+                            <span class="journey-chip">Displayed totals = Manual baseline + live bookings</span>
+                            <span class="journey-chip">Member since <?php echo formatDate($journey['member_since'] ?? ''); ?></span>
+                        </div>
+
+                        <div class="journey-highlight">
+                            <?php echo h($journey['journey_highlight'] ?? ''); ?>
+                        </div>
+
+                        <?php if (trim((string) ($journey['journey_note'] ?? '')) !== ''): ?>
+                            <div class="journey-note">
+                                Journey Note: <?php echo h($journey['journey_note']); ?>
+                            </div>
+                        <?php endif; ?>
+
+                        <div class="journey-totals">
+                            <?php
+                            $journeyMetricLabels = [
+                                'walk' => 'Walks',
+                                'daycare' => 'Daycare',
+                                'boarding_night' => 'Boarding',
+                                'drop_in' => 'Drop-Ins',
+                                'sitting' => 'Sitting',
+                            ];
+                            ?>
+                            <?php foreach ($journeyMetricLabels as $metricKey => $metricLabel): ?>
+                                <div class="journey-total">
+                                    <div class="journey-total-top">
+                                        <div class="label"><?php echo h($metricLabel); ?></div>
+                                        <div class="journey-total-number"><?php echo (int) (($journey['counts'][$metricKey] ?? 0)); ?></div>
+                                    </div>
+                                    <div class="journey-total-meta">
+                                        Baseline: <?php echo (int) (($journey['baseline_counts'][$metricKey] ?? 0)); ?><br>
+                                        Live: <?php echo (int) (($journey['live_counts'][$metricKey] ?? 0)); ?>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+
+                        <form method="post" class="journey-form">
+                            <input type="hidden" name="action" value="save_dog_journey">
+                            <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
+                            <input type="hidden" name="pet_id" value="<?php echo (int) ($journey['pet_id'] ?? 0); ?>">
+
+                            <div class="journey-form-grid">
+                                <div class="journey-field">
+                                    <label for="baseline_walks_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Baseline Walks</label>
+                                    <input class="journey-input" type="number" min="0" step="1" name="baseline_walks" id="baseline_walks_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo (int) (($journey['baseline_counts']['walk'] ?? 0)); ?>">
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="baseline_daycare_sessions_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Baseline Daycare Sessions</label>
+                                    <input class="journey-input" type="number" min="0" step="1" name="baseline_daycare_sessions" id="baseline_daycare_sessions_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo (int) (($journey['baseline_counts']['daycare'] ?? 0)); ?>">
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="baseline_boarding_nights_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Baseline Boarding Nights</label>
+                                    <input class="journey-input" type="number" min="0" step="1" name="baseline_boarding_nights" id="baseline_boarding_nights_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo (int) (($journey['baseline_counts']['boarding_night'] ?? 0)); ?>">
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="baseline_drop_in_sessions_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Baseline Drop-Ins</label>
+                                    <input class="journey-input" type="number" min="0" step="1" name="baseline_drop_in_sessions" id="baseline_drop_in_sessions_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo (int) (($journey['baseline_counts']['drop_in'] ?? 0)); ?>">
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="baseline_sitting_sessions_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Baseline Sitting Sessions</label>
+                                    <input class="journey-input" type="number" min="0" step="1" name="baseline_sitting_sessions" id="baseline_sitting_sessions_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo (int) (($journey['baseline_counts']['sitting'] ?? 0)); ?>">
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="favorite_service_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Favorite Service</label>
+                                    <select class="journey-select" name="favorite_service" id="favorite_service_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">
+                                        <?php
+                                        $favoriteOptions = [
+                                            '' => 'Auto Calculate',
+                                            'walk' => 'Walks',
+                                            'daycare' => 'Daycare Sessions',
+                                            'boarding_night' => 'Boarding Nights',
+                                            'drop_in' => 'Drop-Ins',
+                                            'sitting' => 'Sitting Sessions',
+                                        ];
+                                        ?>
+                                        <?php foreach ($favoriteOptions as $favoriteValue => $favoriteLabel): ?>
+                                            <option value="<?php echo h($favoriteValue); ?>" <?php echo ($journey['manual_favorite_service'] ?? '') === $favoriteValue ? 'selected' : ''; ?>>
+                                                <?php echo h($favoriteLabel); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="last_service_date_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Manual Last Service Date</label>
+                                    <input class="journey-input" type="date" name="last_service_date" id="last_service_date_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo h((string) ($journey['manual_last_service_date'] ?? '')); ?>">
+                                    <div class="journey-helper">Used only when there is no newer live booking date.</div>
+                                </div>
+
+                                <div class="journey-field">
+                                    <label for="milestone_badge_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Milestone Badge</label>
+                                    <input class="journey-input" type="text" name="milestone_badge" id="milestone_badge_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo h((string) ($journey['manual_milestone_badge'] ?? '')); ?>" placeholder="Leave blank to auto-generate">
+                                </div>
+
+                                <div class="journey-field journey-field-full">
+                                    <label for="journey_highlight_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Journey Highlight</label>
+                                    <input class="journey-input" type="text" name="journey_highlight" id="journey_highlight_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo h((string) ($journey['manual_journey_highlight'] ?? '')); ?>" placeholder="Short premium summary shown on the member dashboard">
+                                </div>
+
+                                <div class="journey-field journey-field-full">
+                                    <label for="journey_note_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Journey Note</label>
+                                    <textarea class="journey-textarea" name="journey_note" id="journey_note_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" placeholder="Add a private-looking but member-facing note or milestone memory..."><?php echo h((string) ($journey['manual_journey_note'] ?? '')); ?></textarea>
+                                </div>
+                            </div>
+
+                            <button type="submit" class="btn btn-update">Save Dog Journey Baseline</button>
+                        </form>
                     </div>
                 <?php endforeach; ?>
             </div>
