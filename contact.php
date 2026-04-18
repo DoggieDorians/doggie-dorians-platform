@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/includes/mailer.php';
 
 $isLoggedIn = isset($_SESSION['user_id']) || isset($_SESSION['member_id']) || isset($_SESSION['id']);
 
@@ -49,6 +50,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'Group Walks',
         'Daycare',
         'Boarding',
+        'Drop-Ins',
+        'Pet Sitting',
         'Memberships',
         'Custom Plan',
         'General Inquiry',
@@ -142,16 +145,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $emailBody .= "Preferred Contact Method: " . ($safePreferred !== '' ? $safePreferred : 'Not provided') . "\n\n";
         $emailBody .= "Message:\n{$safeMessage}\n";
 
-        $headers = [];
-        $headers[] = 'MIME-Version: 1.0';
-        $headers[] = 'Content-Type: text/plain; charset=UTF-8';
-        $headers[] = 'From: Doggie Dorian\'s <admin@doggiedorians.com>';
-        $headers[] = 'Reply-To: ' . $safeName . ' <' . $safeEmail . '>';
-        $headers[] = 'X-Mailer: PHP/' . phpversion();
+        $htmlBody = '<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;color:#111;">'
+            . '<h2 style="margin:0 0 16px;">Doggie Dorian\'s Contact Inquiry</h2>'
+            . '<p style="margin:0 0 14px;"><strong>Submitted At:</strong> ' . h($submittedAt) . '<br>'
+            . '<strong>Website Host:</strong> ' . h($safeHost) . '<br>'
+            . '<strong>Visitor IP:</strong> ' . h($remoteIp !== '' ? $remoteIp : 'Unknown') . '</p>'
+            . '<p style="margin:0 0 14px;"><strong>Full Name:</strong> ' . h($safeName) . '<br>'
+            . '<strong>Email Address:</strong> ' . h($safeEmail) . '<br>'
+            . '<strong>Phone Number:</strong> ' . h($safePhone !== '' ? $safePhone : 'Not provided') . '<br>'
+            . '<strong>Service Interest:</strong> ' . h($safeService) . '<br>'
+            . '<strong>Dog Name:</strong> ' . h($safeDogName !== '' ? $safeDogName : 'Not provided') . '<br>'
+            . '<strong>Preferred Contact Method:</strong> ' . h($safePreferred !== '' ? $safePreferred : 'Not provided') . '</p>'
+            . '<p style="margin:0 0 8px;"><strong>Message:</strong></p>'
+            . '<div style="white-space:pre-wrap;border:1px solid #ddd;padding:14px;border-radius:10px;background:#fafafa;">' . nl2br(h($safeMessage)) . '</div>'
+            . '</div>';
 
-        $mailSent = mail($to, $subject, $emailBody, implode("\r\n", $headers));
+        $sendResult = dd_send_email(
+            $to,
+            'Doggie Dorian\'s Admin',
+            $subject,
+            $htmlBody,
+            $emailBody,
+            [],
+            [],
+            [],
+            [
+                'email' => $safeEmail,
+                'name' => $safeName,
+            ]
+        );
 
-        if ($mailSent) {
+        if (!empty($sendResult['success'])) {
             $successMessage = 'Your inquiry has been sent successfully. We’ll get back to you as soon as possible.';
             $formData = [
                 'full_name' => '',
@@ -166,7 +190,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['contact_form_csrf'] = bin2hex(random_bytes(32));
             $csrfToken = (string) $_SESSION['contact_form_csrf'];
         } else {
-            $errorMessage = 'Your message could not be sent right now. Please try again shortly or contact us directly by phone or email.';
+            $errorMessage = trim((string) ($sendResult['error'] ?? '')) !== ''
+                ? (string) $sendResult['error']
+                : 'Your message could not be sent right now. Please try again shortly or contact us directly by phone or email.';
         }
     } else {
         $errorMessage = 'Please correct the highlighted issues and try again.';
@@ -861,6 +887,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                   <option value="Group Walks" <?php echo $formData['service_type'] === 'Group Walks' ? 'selected' : ''; ?>>Group Walks</option>
                   <option value="Daycare" <?php echo $formData['service_type'] === 'Daycare' ? 'selected' : ''; ?>>Daycare</option>
                   <option value="Boarding" <?php echo $formData['service_type'] === 'Boarding' ? 'selected' : ''; ?>>Boarding</option>
+                  <option value="Drop-Ins" <?php echo $formData['service_type'] === 'Drop-Ins' ? 'selected' : ''; ?>>Drop-Ins</option>
+                  <option value="Pet Sitting" <?php echo $formData['service_type'] === 'Pet Sitting' ? 'selected' : ''; ?>>Pet Sitting</option>
                   <option value="Memberships" <?php echo $formData['service_type'] === 'Memberships' ? 'selected' : ''; ?>>Memberships</option>
                   <option value="Custom Plan" <?php echo $formData['service_type'] === 'Custom Plan' ? 'selected' : ''; ?>>Custom Plan</option>
                   <option value="General Inquiry" <?php echo $formData['service_type'] === 'General Inquiry' ? 'selected' : ''; ?>>General Inquiry</option>
@@ -891,7 +919,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
 
             <div class="form-note">
-              This upgraded form now submits through your website instead of opening the visitor’s email app. It now sends directly to admin@doggiedorians.com and includes a couple of quiet anti-spam and form-protection improvements.
+              This inquiry form now routes through Doggie Dorian’s mailer system and sends directly to admin@doggiedorians.com, with quiet anti-spam and form-protection improvements built in.
             </div>
 
             <button type="submit" class="btn btn-gold">Send Inquiry</button>
