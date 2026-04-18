@@ -98,3 +98,8 @@ stripe-env.php
 
 # Local SFTP helper scripts
 *.sftp
+
+# Local helper files and backup DB copies
+*.sftp
+local-backups/
+members-live*.sqlite
