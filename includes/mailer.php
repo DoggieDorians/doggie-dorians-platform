@@ -24,18 +24,51 @@ if (!class_exists(\PHPMailer\PHPMailer\PHPMailer::class)) {
     }
 }
 
-function dd_private_mailer_env_path(): string
+function dd_private_mailer_env_candidates(): array
 {
-    $override = getenv('DD_MAILER_ENV_PATH');
+    $candidates = [];
 
+    $override = getenv('DD_MAILER_ENV_PATH');
     if ($override !== false) {
         $override = trim((string) $override);
         if ($override !== '') {
-            return $override;
+            $candidates[] = $override;
         }
     }
 
-    return '/private/mailer-env.php';
+    $candidates[] = '/private/mailer-env.php';
+    $candidates[] = dirname(__DIR__) . '/private/mailer-env.php';
+    $candidates[] = __DIR__ . '/../private/mailer-env.php';
+    $candidates[] = dirname(dirname(__DIR__)) . '/private/mailer-env.php';
+
+    $normalized = [];
+    foreach ($candidates as $candidate) {
+        $candidate = trim((string) $candidate);
+        if ($candidate === '') {
+            continue;
+        }
+
+        $real = realpath($candidate);
+        $key = $real !== false ? $real : $candidate;
+
+        if (!isset($normalized[$key])) {
+            $normalized[$key] = $candidate;
+        }
+    }
+
+    return array_values($normalized);
+}
+
+function dd_private_mailer_env_path(): string
+{
+    foreach (dd_private_mailer_env_candidates() as $candidate) {
+        if (is_file($candidate)) {
+            return $candidate;
+        }
+    }
+
+    $candidates = dd_private_mailer_env_candidates();
+    return $candidates[0] ?? '/private/mailer-env.php';
 }
 
 function dd_load_private_mailer_env(): array
@@ -48,16 +81,19 @@ function dd_load_private_mailer_env(): array
 
     $config = [];
 
-    $path = dd_private_mailer_env_path();
+    foreach (dd_private_mailer_env_candidates() as $path) {
+        if (!is_file($path)) {
+            continue;
+        }
 
-    if (is_file($path)) {
         $loaded = require $path;
 
         if (is_array($loaded)) {
             $config = $loaded;
-        } else {
-            error_log('Doggie Dorian\'s mailer config file did not return an array: ' . $path);
+            return $config;
         }
+
+        error_log('Doggie Dorian\'s mailer config file did not return an array: ' . $path);
     }
 
     return $config;
@@ -128,7 +164,7 @@ function dd_send_email(
         || trim((string) $ddMailerConfig['password']) === ''
         || trim((string) $ddMailerConfig['from_email']) === ''
     ) {
-        error_log('Doggie Dorian\'s mailer configuration is incomplete.');
+        error_log('Doggie Dorian\'s mailer configuration is incomplete. Resolved path: ' . dd_private_mailer_env_path());
 
         return [
             'success' => false,
