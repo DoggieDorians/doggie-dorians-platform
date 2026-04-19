@@ -115,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!$errors) {
-        $to = 'admin@doggiedorians.com';
+        $to = 'support@doggiedorians.com';
         $subjectService = $formData['service_type'] !== '' ? $formData['service_type'] : 'Inquiry';
         $subjectName = $formData['full_name'] !== '' ? $formData['full_name'] : 'Website Visitor';
         $subject = 'New Contact Inquiry - ' . $subjectService . ' - ' . $subjectName;
@@ -162,7 +162,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $sendResult = dd_send_email(
             $to,
-            'Doggie Dorian\'s Admin',
+            'Doggie Dorian\'s Support',
             $subject,
             $htmlBody,
             $emailBody,
@@ -809,7 +809,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="contact-card">
               <small>Email</small>
               <strong>General Inquiries</strong>
-              <a href="mailto:admin@doggiedorians.com">admin@doggiedorians.com</a>
+              <a href="mailto:support@doggiedorians.com">support@doggiedorians.com</a>
             </div>
 
             <div class="contact-card">
@@ -919,7 +919,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
 
             <div class="form-note">
-              This inquiry form now routes through Doggie Dorian’s mailer system and sends directly to admin@doggiedorians.com, with quiet anti-spam and form-protection improvements built in.
+              This inquiry form now routes through Doggie Dorian’s mailer system and sends directly to support@doggiedorians.com, with quiet anti-spam and form-protection improvements built in.
             </div>
 
             <button type="submit" class="btn btn-gold">Send Inquiry</button>
