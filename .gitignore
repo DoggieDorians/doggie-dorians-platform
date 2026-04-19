@@ -107,3 +107,7 @@ members-live*.sqlite
 # Private mail config
 mailer-env.php
 mailer-env-live.php
+
+# Private mail config
+mailer-env.php
+mailer-env-live.php
