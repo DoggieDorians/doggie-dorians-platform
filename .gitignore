@@ -103,3 +103,7 @@ stripe-env.php
 *.sftp
 local-backups/
 members-live*.sqlite
+
+# Private mail config
+mailer-env.php
+mailer-env-live.php
