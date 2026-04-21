@@ -96,6 +96,42 @@ function dd_admin_login_validate_csrf(?string $submittedToken): bool
     return hash_equals($sessionToken, $submittedToken);
 }
 
+function dd_admin_login_allowed_emails(): array
+{
+    global $masterAdminEmails, $masterAdminEmail;
+
+    $emails = [];
+
+    if (isset($masterAdminEmails) && is_array($masterAdminEmails)) {
+        foreach ($masterAdminEmails as $email) {
+            $email = strtolower(trim((string) $email));
+            if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $emails[] = $email;
+            }
+        }
+    }
+
+    $singleEmail = strtolower(trim((string) ($masterAdminEmail ?? '')));
+    if ($singleEmail !== '' && filter_var($singleEmail, FILTER_VALIDATE_EMAIL)) {
+        $emails[] = $singleEmail;
+    }
+
+    $emails = array_values(array_unique($emails));
+
+    return $emails;
+}
+
+function dd_admin_login_email_allowed(string $email): bool
+{
+    $email = strtolower(trim($email));
+
+    if ($email === '') {
+        return false;
+    }
+
+    return in_array($email, dd_admin_login_allowed_emails(), true);
+}
+
 $error = '';
 $email = trim((string) ($_POST['email'] ?? ''));
 
@@ -138,19 +174,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($email === '' || $password === '') {
             $error = 'Please enter both email and password.';
         } else {
-            $configuredEmail = trim((string) ($masterAdminEmail ?? ''));
             $configuredHash = trim((string) ($masterAdminPasswordHash ?? ''));
             $configuredName = trim((string) ($masterAdminDisplayName ?? 'Doggie Dorian’s Admin'));
+            $allowedEmails = dd_admin_login_allowed_emails();
 
-            if ($configuredEmail === '' || $configuredHash === '') {
+            if (empty($allowedEmails) || $configuredHash === '') {
                 $error = 'Admin login is not configured correctly in admin-config.php.';
             } else {
-                $emailMatches = hash_equals(strtolower($configuredEmail), strtolower($email));
+                $normalizedEmail = strtolower(trim($email));
+                $emailMatches = dd_admin_login_email_allowed($normalizedEmail);
                 $passwordMatches = password_verify($password, $configuredHash);
 
                 if ($emailMatches && $passwordMatches) {
                     session_regenerate_id(true);
-                    dd_admin_login_set_session($configuredEmail, $configuredName);
+                    dd_admin_login_set_session($normalizedEmail, $configuredName);
                     dd_admin_login_redirect('admin-dashboard.php');
                 } else {
                     $_SESSION['admin_login_attempts'] = (int) $_SESSION['admin_login_attempts'] + 1;
@@ -457,7 +494,7 @@ $csrfToken = dd_admin_login_csrf_token();
                         type="email"
                         id="email"
                         name="email"
-                        placeholder="admin@doggiedorians.com"
+                        placeholder="support@doggiedorians.com or admin@doggiedorians.com"
                         value="<?php echo $prefillEmail; ?>"
                         required
                         autocomplete="username"
@@ -492,7 +529,7 @@ $csrfToken = dd_admin_login_csrf_token();
             </form>
 
             <div class="helper">
-                This page uses a hashed admin password stored in <strong>admin-config.php</strong>.
+                This page uses a shared hashed admin password stored in <strong>admin-config.php</strong> and allows both approved admin email addresses.
             </div>
         </section>
     </div>
