@@ -882,7 +882,7 @@ if ($sessionId === '') {
                 $stripePaymentNotes
             );
 
-            $booking = load_booking_row($pdoInstance) ? (load_booking_row($pdoInstance, $bookingId) ?? $booking) : $booking;
+            $booking = load_booking_row($pdoInstance, $bookingId) ?? $booking;
 
             unset($_SESSION['service_payment_portal']);
 
