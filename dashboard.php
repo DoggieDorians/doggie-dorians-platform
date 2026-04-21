@@ -1090,6 +1090,62 @@ function fetchDogJourneyProfileMap(PDO $pdo, $userId)
     return $rows;
 }
 
+function fetchDogJourneyEntriesMap(PDO $pdo, $userId, $limitPerPet = 4)
+{
+    if (!hasTable($pdo, 'dog_journey_entries')) {
+        return array();
+    }
+
+    $rows = safeFetchAll(
+        $pdo,
+        "SELECT * FROM dog_journey_entries WHERE user_id = :user_id ORDER BY COALESCE(NULLIF(entry_date, ''), created_at) DESC, id DESC",
+        array(':user_id' => (int) $userId)
+    );
+
+    $map = array();
+    foreach ($rows as $row) {
+        $petId = (int) valueFromRow($row, array('pet_id'), 0);
+        if ($petId <= 0) {
+            continue;
+        }
+
+        if (!isset($map[$petId])) {
+            $map[$petId] = array();
+        }
+
+        if (count($map[$petId]) >= (int) $limitPerPet) {
+            continue;
+        }
+
+        $map[$petId][] = array(
+            'entry_type' => (string) valueFromRow($row, array('entry_type'), 'note'),
+            'service_type' => (string) valueFromRow($row, array('service_type'), ''),
+            'entry_title' => (string) valueFromRow($row, array('entry_title'), ''),
+            'entry_body' => (string) valueFromRow($row, array('entry_body'), ''),
+            'entry_date' => (string) valueFromRow($row, array('entry_date', 'created_at'), ''),
+            'created_at' => (string) valueFromRow($row, array('created_at'), ''),
+            'created_by_admin' => (int) valueFromRow($row, array('created_by_admin'), 0),
+        );
+    }
+
+    return $map;
+}
+
+function dogJourneyMomentLabel(array $entry)
+{
+    $type = strtolower(trim((string) valueFromRow($entry, array('entry_type'), 'note')));
+
+    if ($type === 'badge_award') {
+        return 'Badge Awarded';
+    }
+
+    if ($type === 'milestone') {
+        return 'Milestone';
+    }
+
+    return 'Journey Moment';
+}
+
 function buildAutoJourneyBadge($totalServices)
 {
     $totalServices = (int) $totalServices;
@@ -1133,6 +1189,7 @@ function buildJourneyHighlight(array $counts, $petName)
 function buildDogJourneyCards(PDO $pdo, $userId, array $pets, array $bookings, $memberCreatedAt = '')
 {
     $profiles = fetchDogJourneyProfileMap($pdo, $userId);
+    $entriesMap = fetchDogJourneyEntriesMap($pdo, $userId);
     $cards = array();
 
     foreach ($pets as $pet) {
@@ -1253,6 +1310,7 @@ function buildDogJourneyCards(PDO $pdo, $userId, array $pets, array $bookings, $
             'baseline_counts' => $baselineCounts,
             'live_counts' => $liveCounts,
             'total_services' => $totalServices,
+            'journey_entries' => isset($entriesMap[$petId]) ? $entriesMap[$petId] : array(),
         );
     }
 
@@ -2055,6 +2113,24 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
 
                             <?php if (trim((string) $card['journey_note']) !== ''): ?>
                                 <div class="journey-note"><?php echo h($card['journey_note']); ?></div>
+                            <?php endif; ?>
+                            <?php if (!empty($card['journey_entries'])): ?>
+                                <div class="journey-moments">
+                                    <?php foreach ($card['journey_entries'] as $entry): ?>
+                                        <div class="journey-moment">
+                                            <div class="journey-moment-top">
+                                                <div class="journey-moment-label"><?php echo h(dogJourneyMomentLabel($entry)); ?></div>
+                                                <div class="journey-moment-date"><?php echo h(formatDateDisplay((string) valueFromRow($entry, array('entry_date', 'created_at'), ''))); ?></div>
+                                            </div>
+                                            <?php if (trim((string) valueFromRow($entry, array('entry_title'), '')) !== ''): ?>
+                                                <div class="journey-moment-title"><?php echo h((string) valueFromRow($entry, array('entry_title'), '')); ?></div>
+                                            <?php endif; ?>
+                                            <?php if (trim((string) valueFromRow($entry, array('entry_body'), '')) !== ''): ?>
+                                                <div class="journey-moment-body"><?php echo h((string) valueFromRow($entry, array('entry_body'), '')); ?></div>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
                             <?php endif; ?>
                         </div>
                     <?php endforeach; ?>

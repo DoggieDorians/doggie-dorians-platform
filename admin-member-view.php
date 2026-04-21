@@ -523,6 +523,100 @@ function fetchDogJourneyProfileMap(PDO $pdo, int $userId): array
     return $map;
 }
 
+function fetchDogJourneyEntriesMap(PDO $pdo, int $userId, int $limitPerPet = 4): array
+{
+    if (!tableExists($pdo, 'dog_journey_entries')) {
+        return [];
+    }
+
+    $rows = fetchAllSafe(
+        $pdo,
+        "SELECT * FROM dog_journey_entries WHERE user_id = :user_id ORDER BY COALESCE(NULLIF(entry_date, ''), created_at) DESC, id DESC",
+        [':user_id' => $userId]
+    );
+
+    $map = [];
+    foreach ($rows as $row) {
+        $petId = (int) valueFromRow($row, ['pet_id'], 0);
+        if ($petId <= 0) {
+            continue;
+        }
+
+        if (!isset($map[$petId])) {
+            $map[$petId] = [];
+        }
+
+        if (count($map[$petId]) >= $limitPerPet) {
+            continue;
+        }
+
+        $map[$petId][] = [
+            'entry_type' => (string) valueFromRow($row, ['entry_type'], 'note'),
+            'service_type' => (string) valueFromRow($row, ['service_type'], ''),
+            'entry_title' => (string) valueFromRow($row, ['entry_title'], ''),
+            'entry_body' => (string) valueFromRow($row, ['entry_body'], ''),
+            'entry_date' => (string) valueFromRow($row, ['entry_date', 'created_at'], ''),
+            'created_at' => (string) valueFromRow($row, ['created_at'], ''),
+            'created_by_admin' => (int) valueFromRow($row, ['created_by_admin'], 0),
+        ];
+    }
+
+    return $map;
+}
+
+function fetchLatestDogJourneyEntry(PDO $pdo, int $userId, int $petId, string $entryType = ''): ?array
+{
+    if (!tableExists($pdo, 'dog_journey_entries') || $userId <= 0 || $petId <= 0) {
+        return null;
+    }
+
+    $sql = 'SELECT * FROM dog_journey_entries WHERE user_id = :user_id AND pet_id = :pet_id';
+    $params = [':user_id' => $userId, ':pet_id' => $petId];
+
+    if ($entryType !== '') {
+        $sql .= ' AND entry_type = :entry_type';
+        $params[':entry_type'] = $entryType;
+    }
+
+    $sql .= " ORDER BY COALESCE(NULLIF(entry_date, ''), created_at) DESC, id DESC LIMIT 1";
+
+    return fetchOneSafe($pdo, $sql, $params);
+}
+
+function insertDogJourneyEntry(PDO $pdo, int $userId, int $petId, string $entryType, string $entryTitle, string $entryBody, string $entryDate = '', int $createdByAdmin = 1, string $serviceType = ''): void
+{
+    if (!tableExists($pdo, 'dog_journey_entries') || $userId <= 0 || $petId <= 0) {
+        return;
+    }
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO dog_journey_entries (user_id, pet_id, entry_type, service_type, entry_title, entry_body, entry_date, created_by_admin, created_at, updated_at) '
+        . 'VALUES (:user_id, :pet_id, :entry_type, :service_type, :entry_title, :entry_body, :entry_date, :created_by_admin, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
+    );
+
+    $stmt->execute([
+        ':user_id' => $userId,
+        ':pet_id' => $petId,
+        ':entry_type' => $entryType,
+        ':service_type' => $serviceType,
+        ':entry_title' => $entryTitle,
+        ':entry_body' => $entryBody,
+        ':entry_date' => $entryDate,
+        ':created_by_admin' => $createdByAdmin,
+    ]);
+}
+
+function journeyCardForPet(array $cards, int $petId): ?array
+{
+    foreach ($cards as $card) {
+        if ((int) ($card['pet_id'] ?? 0) === $petId) {
+            return $card;
+        }
+    }
+
+    return null;
+}
+
 function buildAutoJourneyBadge(int $totalServices): string
 {
     if ($totalServices >= 30) {
@@ -564,6 +658,7 @@ function buildJourneyHighlight(array $counts, string $petName): string
 function buildDogJourneyCards(PDO $pdo, int $userId, array $pets, array $bookings, string $memberCreatedAt = ''): array
 {
     $profiles = fetchDogJourneyProfileMap($pdo, $userId);
+    $entriesMap = fetchDogJourneyEntriesMap($pdo, $userId);
     $cards = [];
 
     foreach ($pets as $pet) {
@@ -680,6 +775,7 @@ function buildDogJourneyCards(PDO $pdo, int $userId, array $pets, array $booking
             'baseline_counts' => $baselineCounts,
             'live_counts' => $liveCounts,
             'total_services' => $totalServices,
+            'journey_entries' => $entriesMap[$petId] ?? [],
         ];
     }
 
@@ -887,6 +983,22 @@ try {
             $lastServiceDate = '';
         }
 
+        $manualBadge = trim((string) ($_POST['milestone_badge'] ?? ''));
+        $journeyNote = trim((string) ($_POST['journey_note'] ?? ''));
+        $journeyHighlight = trim((string) ($_POST['journey_highlight'] ?? ''));
+
+        $petName = 'Dog';
+        foreach ($dogs as $pet) {
+            if ((int) ($pet['pet_id'] ?? 0) === $petId) {
+                $petName = (string) ($pet['pet_name'] ?? $pet['display_name'] ?? 'Dog');
+                break;
+            }
+        }
+
+        $currentJourneyCards = buildDogJourneyCards($pdo, $userId, $dogs, fetchJourneyBookings($pdo, $userId), (string) ($user['created_at'] ?? ''));
+        $currentJourneyCard = journeyCardForPet($currentJourneyCards, $petId);
+        $previousBadge = trim((string) ($currentJourneyCard['milestone_badge'] ?? ''));
+
         upsertDogJourneyProfile($pdo, $userId, $petId, [
             'baseline_walks' => (int) ($_POST['baseline_walks'] ?? 0),
             'baseline_daycare_sessions' => (int) ($_POST['baseline_daycare_sessions'] ?? 0),
@@ -894,13 +1006,41 @@ try {
             'baseline_drop_in_sessions' => (int) ($_POST['baseline_drop_in_sessions'] ?? 0),
             'baseline_sitting_sessions' => (int) ($_POST['baseline_sitting_sessions'] ?? 0),
             'favorite_service' => $favoriteService,
-            'milestone_badge' => trim((string) ($_POST['milestone_badge'] ?? '')),
-            'journey_note' => trim((string) ($_POST['journey_note'] ?? '')),
-            'journey_highlight' => trim((string) ($_POST['journey_highlight'] ?? '')),
+            'milestone_badge' => $manualBadge,
+            'journey_note' => $journeyNote,
+            'journey_highlight' => $journeyHighlight,
             'last_service_date' => $lastServiceDate,
         ]);
 
-        safeRedirect('admin-member-view.php?id=' . $userId . '&status_type=success&status_message=' . urlencode('Dog Journey baseline saved successfully.'));
+        $updatedJourneyCards = buildDogJourneyCards($pdo, $userId, $dogs, fetchJourneyBookings($pdo, $userId), (string) ($user['created_at'] ?? ''));
+        $updatedJourneyCard = journeyCardForPet($updatedJourneyCards, $petId);
+        $newBadge = trim((string) ($updatedJourneyCard['milestone_badge'] ?? ''));
+
+        if ($newBadge !== '' && $newBadge !== $previousBadge) {
+            $latestBadgeEntry = fetchLatestDogJourneyEntry($pdo, $userId, $petId, 'badge_award');
+            $latestBadgeBody = trim((string) valueFromRow($latestBadgeEntry ?? [], ['entry_body'], ''));
+
+            if ($latestBadgeBody !== $newBadge) {
+                $entryDate = $lastServiceDate !== '' ? $lastServiceDate : date('Y-m-d');
+                $entryTitle = $petName . ' unlocked a new Dog Journey badge';
+                $entryBody = $newBadge;
+
+                if ($manualBadge !== '') {
+                    $entryBody .= ' · assigned manually by Doggie Dorian’s';
+                } else {
+                    $entryBody .= ' · automatically awarded from updated Dog Journey totals';
+                }
+
+                insertDogJourneyEntry($pdo, $userId, $petId, 'badge_award', $entryTitle, $entryBody, $entryDate, 1, 'dog_journey');
+            }
+        }
+
+        $statusMessage = 'Dog Journey baseline saved successfully.';
+        if ($newBadge !== '' && $newBadge !== $previousBadge) {
+            $statusMessage = 'Dog Journey baseline saved and ' . $petName . ' earned the ' . $newBadge . ' badge.';
+        }
+
+        safeRedirect('admin-member-view.php?id=' . $userId . '&status_type=success&status_message=' . urlencode($statusMessage));
     }
 
     if (tableExists($pdo, 'bookings')) {
@@ -1715,6 +1855,7 @@ try {
                                 <div class="journey-field">
                                     <label for="milestone_badge_<?php echo (int) ($journey['pet_id'] ?? 0); ?>">Milestone Badge</label>
                                     <input class="journey-input" type="text" name="milestone_badge" id="milestone_badge_<?php echo (int) ($journey['pet_id'] ?? 0); ?>" value="<?php echo h((string) ($journey['manual_milestone_badge'] ?? '')); ?>" placeholder="Leave blank to auto-generate">
+                                    <div class="journey-helper">Leave blank to auto-award the badge from the updated Dog Journey totals. Saving a new badge logs a Journey Moment for the member dashboard.</div>
                                 </div>
 
                                 <div class="journey-field journey-field-full">
