@@ -1856,6 +1856,161 @@ function ddAdminDashboardSeedMembershipEntitlements(PDO $pdo, int $membershipId,
     }
 }
 
+function ddAdminDashboardFindUserRowByDisplayName(PDO $pdo, string $displayName): ?array
+{
+    $displayName = strtolower(trim($displayName));
+    if ($displayName === '' || !ddAdminDashboardHasTable($pdo, 'users')) {
+        return null;
+    }
+
+    $nameCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('full_name', 'name', 'client_name', 'member_name', 'username'));
+    if ($nameCol !== null) {
+        $row = ddAdminDashboardSafeFetchOne(
+            $pdo,
+            'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+            . ' WHERE LOWER(TRIM(COALESCE(' . ddAdminDashboardQuoteIdentifier($nameCol) . ", ''))) = :name LIMIT 1",
+            array(':name' => $displayName)
+        );
+
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    $firstCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('first_name'));
+    $lastCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('last_name'));
+    if ($firstCol !== null && $lastCol !== null) {
+        $displayNameSql = 'LOWER(TRIM(COALESCE('
+            . ddAdminDashboardQuoteIdentifier($firstCol)
+            . ", '') || ' ' || COALESCE("
+            . ddAdminDashboardQuoteIdentifier($lastCol)
+            . ", '')))";
+        $row = ddAdminDashboardSafeFetchOne(
+            $pdo,
+            'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+            . ' WHERE ' . $displayNameSql . ' = :name LIMIT 1',
+            array(':name' => $displayName)
+        );
+
+        if ($row !== null) {
+            return $row;
+        }
+    }
+
+    return null;
+}
+
+function ddAdminDashboardRefreshIdentityForAssignment(PDO $pdo, array $identity): array
+{
+    $resolvedUserId = (int) ($identity['user_id'] ?? 0);
+    $resolvedMemberId = (int) ($identity['member_id'] ?? 0);
+    $identityEmail = trim((string) ($identity['email'] ?? ''));
+    $identityName = trim((string) ($identity['member_name'] ?? ''));
+
+    if ($resolvedUserId <= 0) {
+        if ($resolvedMemberId > 0) {
+            $linkedUserRow = ddAdminDashboardFindUserRowByMemberId($pdo, $resolvedMemberId);
+            if ($linkedUserRow !== null) {
+                $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+                if ($userIdCol !== null) {
+                    $resolvedUserId = (int) ($linkedUserRow[$userIdCol] ?? 0);
+                }
+            }
+        }
+
+        if ($resolvedUserId <= 0 && $identityEmail !== '') {
+            $linkedUserRow = ddAdminDashboardFindUserRowByEmail($pdo, $identityEmail);
+            if ($linkedUserRow !== null) {
+                $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+                if ($userIdCol !== null) {
+                    $resolvedUserId = (int) ($linkedUserRow[$userIdCol] ?? 0);
+                }
+            }
+        }
+
+        if ($resolvedUserId <= 0 && $identityName !== '') {
+            $linkedUserRow = ddAdminDashboardFindUserRowByDisplayName($pdo, $identityName);
+            if ($linkedUserRow !== null) {
+                $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+                if ($userIdCol !== null) {
+                    $resolvedUserId = (int) ($linkedUserRow[$userIdCol] ?? 0);
+                }
+            }
+        }
+
+        if ($resolvedUserId > 0) {
+            $identity['user_id'] = $resolvedUserId;
+        }
+    }
+
+    if ($resolvedMemberId <= 0 && $resolvedUserId > 0) {
+        $resolvedMemberId = ddAdminDashboardEnsureMemberRowForUser($pdo, $resolvedUserId);
+        if ($resolvedMemberId > 0) {
+            $identity['member_id'] = $resolvedMemberId;
+        }
+    }
+
+    if ($resolvedMemberId <= 0 && $identityEmail !== '') {
+        $linkedMemberRow = ddAdminDashboardFindMemberRowByEmail($pdo, $identityEmail);
+        if ($linkedMemberRow !== null) {
+            $resolvedMemberId = (int) ddAdminDashboardValueFromRow($linkedMemberRow, array('id', 'member_id'), 0);
+            if ($resolvedMemberId > 0) {
+                $identity['member_id'] = $resolvedMemberId;
+            }
+        }
+    }
+
+    if ($resolvedMemberId <= 0 && $identityName !== '') {
+        $linkedMemberRow = ddAdminDashboardFindMemberRowForUserRow($pdo, array(
+            'full_name' => $identityName,
+            'email' => $identityEmail,
+        ));
+        if ($linkedMemberRow !== null) {
+            $resolvedMemberId = (int) ddAdminDashboardValueFromRow($linkedMemberRow, array('id', 'member_id'), 0);
+            if ($resolvedMemberId > 0) {
+                $identity['member_id'] = $resolvedMemberId;
+            }
+        }
+    }
+
+    if ($resolvedMemberId > 0 && $resolvedUserId > 0) {
+        ddAdminDashboardAttachUserIdToMemberIfPossible($pdo, $resolvedMemberId, $resolvedUserId);
+    }
+
+    if ($resolvedMemberId > 0) {
+        $memberIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'members', array('id', 'member_id'));
+        if ($memberIdCol !== null) {
+            $memberRow = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('members')
+                . ' WHERE ' . ddAdminDashboardQuoteIdentifier($memberIdCol) . ' = :member_id LIMIT 1',
+                array(':member_id' => $resolvedMemberId)
+            );
+
+            if ($memberRow !== null) {
+                $identity = ddAdminDashboardResolveMemberIdentityFromMemberRow($pdo, $memberRow);
+            }
+        }
+    } elseif ($resolvedUserId > 0) {
+        $userIdCol = ddAdminDashboardFirstExistingColumn($pdo, 'users', array('id', 'user_id'));
+        if ($userIdCol !== null) {
+            $userRow = ddAdminDashboardSafeFetchOne(
+                $pdo,
+                'SELECT * FROM ' . ddAdminDashboardQuoteIdentifier('users')
+                . ' WHERE ' . ddAdminDashboardQuoteIdentifier($userIdCol) . ' = :user_id LIMIT 1',
+                array(':user_id' => $resolvedUserId)
+            );
+
+            if ($userRow !== null) {
+                $identity = ddAdminDashboardResolveMemberIdentityFromUserRow($pdo, $userRow);
+            }
+        }
+    }
+
+    return $identity;
+}
+
+
 function ddAdminDashboardAssignMembershipAdmin(PDO $pdo, string $memberKey, string $planSlug): array
 {
     $catalog = ddAdminDashboardPlanCatalog();
@@ -1877,8 +2032,15 @@ function ddAdminDashboardAssignMembershipAdmin(PDO $pdo, string $memberKey, stri
         return array('ok' => false, 'message' => 'member_memberships table is not available.');
     }
 
+    $identity = ddAdminDashboardRefreshIdentityForAssignment($pdo, $identity);
+
     if ($ownerColumn === 'member_id' && (int) ($identity['member_id'] ?? 0) <= 0 && (int) ($identity['user_id'] ?? 0) > 0) {
         $identity['member_id'] = ddAdminDashboardEnsureMemberRowForUser($pdo, (int) $identity['user_id']);
+        $identity = ddAdminDashboardRefreshIdentityForAssignment($pdo, $identity);
+    }
+
+    if ($ownerColumn === 'user_id' && (int) ($identity['user_id'] ?? 0) <= 0) {
+        $identity = ddAdminDashboardRefreshIdentityForAssignment($pdo, $identity);
     }
 
     $membershipOwnerId = ddAdminDashboardMembershipOwnerIdForIdentity($pdo, $identity);
