@@ -37,3 +37,23 @@ if (session_status() === PHP_SESSION_NONE) {
 
     session_start();
 }
+
+$ddDatabaseBootstrapFile = dirname(__DIR__) . '/db.php';
+if (is_file($ddDatabaseBootstrapFile)) {
+    try {
+        require_once $ddDatabaseBootstrapFile;
+    } catch (Throwable $e) {
+    }
+}
+
+$ddAnalyticsBootstrapFile = __DIR__ . '/analytics.php';
+if (is_file($ddAnalyticsBootstrapFile)) {
+    try {
+        require_once $ddAnalyticsBootstrapFile;
+
+        if (isset($pdo) && $pdo instanceof PDO && function_exists('dd_analytics_bootstrap')) {
+            dd_analytics_bootstrap($pdo);
+        }
+    } catch (Throwable $e) {
+    }
+}

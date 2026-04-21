@@ -128,12 +128,32 @@ function dd_mailer_env(string $key, mixed $default = null): mixed
     return $default;
 }
 
+function dd_mailer_secure_mode(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    if ($value === '' || $value === 'tls' || $value === 'starttls') {
+        return \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+    }
+
+    if ($value === 'ssl' || $value === 'smtps') {
+        return \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_SMTPS;
+    }
+
+    if ($value === 'none' || $value === 'off' || $value === 'disabled') {
+        return '';
+    }
+
+    return \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+}
+
 $ddMailerConfig = array(
     'host' => (string) dd_mailer_env('DD_SMTP_HOST', 'smtp.ionos.com'),
     'username' => (string) dd_mailer_env('DD_SMTP_USERNAME', ''),
     'password' => (string) dd_mailer_env('DD_SMTP_PASSWORD', ''),
     'port' => (int) dd_mailer_env('DD_SMTP_PORT', 587),
-    'from_email' => (string) dd_mailer_env('DD_SMTP_FROM_EMAIL', 'admin@doggiedorians.com'),
+    'secure' => (string) dd_mailer_env('DD_SMTP_ENCRYPTION', 'tls'),
+    'from_email' => (string) dd_mailer_env('DD_SMTP_FROM_EMAIL', 'support@doggiedorians.com'),
     'from_name' => (string) dd_mailer_env('DD_SMTP_FROM_NAME', 'Doggie Dorian\'s'),
     'timeout' => (int) dd_mailer_env('DD_SMTP_TIMEOUT', 30),
 );
@@ -181,7 +201,13 @@ function dd_send_email(
         $mail->Username = (string) $ddMailerConfig['username'];
         $mail->Password = (string) $ddMailerConfig['password'];
         $mail->Port = (int) $ddMailerConfig['port'];
-        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->SMTPAutoTLS = true;
+
+        $secureMode = dd_mailer_secure_mode((string) $ddMailerConfig['secure']);
+        if ($secureMode !== '') {
+            $mail->SMTPSecure = $secureMode;
+        }
+
         $mail->CharSet = 'UTF-8';
         $mail->Timeout = (int) $ddMailerConfig['timeout'];
 
@@ -236,14 +262,28 @@ function dd_send_email(
             'error' => null,
         ];
     } catch (\PHPMailer\PHPMailer\Exception $e) {
-        error_log('Doggie Dorian\'s mailer error: ' . $e->getMessage());
+        error_log(
+            'Doggie Dorian\'s mailer error: '
+            . $e->getMessage()
+            . ' | host=' . (string) $ddMailerConfig['host']
+            . ' | port=' . (string) $ddMailerConfig['port']
+            . ' | secure=' . (string) $ddMailerConfig['secure']
+            . ' | user=' . (string) $ddMailerConfig['username']
+        );
 
         return [
             'success' => false,
             'error' => 'Email could not be sent right now.',
         ];
     } catch (\Throwable $e) {
-        error_log('Doggie Dorian\'s mailer fatal error: ' . $e->getMessage());
+        error_log(
+            'Doggie Dorian\'s mailer fatal error: '
+            . $e->getMessage()
+            . ' | host=' . (string) $ddMailerConfig['host']
+            . ' | port=' . (string) $ddMailerConfig['port']
+            . ' | secure=' . (string) $ddMailerConfig['secure']
+            . ' | user=' . (string) $ddMailerConfig['username']
+        );
 
         return [
             'success' => false,

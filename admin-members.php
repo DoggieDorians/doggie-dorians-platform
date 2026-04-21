@@ -136,8 +136,12 @@ function safeFetchOne(PDO $pdo, string $sql, array $params = []): ?array
     }
 }
 
-function valueFromRow(array $row, array $candidates, string $default = ''): string
+function valueFromRow(?array $row, array $candidates, string $default = ''): string
 {
+    if ($row === null) {
+        return $default;
+    }
+
     foreach ($candidates as $candidate) {
         if (array_key_exists($candidate, $row) && $row[$candidate] !== null && $row[$candidate] !== '') {
             return (string) $row[$candidate];
@@ -299,6 +303,81 @@ function buildAddress(array $row): string
     return trim(implode(', ', $parts));
 }
 
+function findMemberRowByEmail(PDO $pdo, string $email): ?array
+{
+    $email = strtolower(trim($email));
+    if ($email === '' || !hasTable($pdo, 'members')) {
+        return null;
+    }
+
+    $columns = getTableColumns($pdo, 'members');
+    $idCol = firstExistingColumn($columns, ['id', 'member_id']);
+    $emailCol = firstExistingColumn($columns, ['email', 'member_email', 'user_email', 'client_email']);
+
+    if ($idCol === null || $emailCol === null) {
+        return null;
+    }
+
+    return safeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . quotedIdentifier('members')
+        . ' WHERE LOWER(TRIM(COALESCE(' . quotedIdentifier($emailCol) . ", ''))) = :email LIMIT 1",
+        [':email' => $email]
+    );
+}
+
+function findMemberRowByUsername(PDO $pdo, string $username): ?array
+{
+    $username = strtolower(trim($username));
+    if ($username === '' || !hasTable($pdo, 'members')) {
+        return null;
+    }
+
+    $columns = getTableColumns($pdo, 'members');
+    $nameCol = firstExistingColumn($columns, ['username', 'full_name', 'name', 'client_name', 'member_name']);
+
+    if ($nameCol === null) {
+        return null;
+    }
+
+    return safeFetchOne(
+        $pdo,
+        'SELECT * FROM ' . quotedIdentifier('members')
+        . ' WHERE LOWER(TRIM(COALESCE(' . quotedIdentifier($nameCol) . ", ''))) = :username LIMIT 1",
+        [':username' => $username]
+    );
+}
+
+function resolveLinkedMemberRowFromUserRow(PDO $pdo, array $row): ?array
+{
+    $email = trim(valueFromRow($row, ['email']));
+    if ($email !== '') {
+        $memberRow = findMemberRowByEmail($pdo, $email);
+        if ($memberRow !== null) {
+            return $memberRow;
+        }
+    }
+
+    $usernameCandidates = [
+        trim(valueFromRow($row, ['username'])),
+        trim(valueFromRow($row, ['full_name'])),
+        trim(valueFromRow($row, ['name'])),
+    ];
+
+    foreach ($usernameCandidates as $candidate) {
+        if ($candidate === '') {
+            continue;
+        }
+
+        $memberRow = findMemberRowByUsername($pdo, $candidate);
+        if ($memberRow !== null) {
+            return $memberRow;
+        }
+    }
+
+    return null;
+}
+
 function fetchMembersFromUsers(PDO $pdo): array
 {
     if (!hasTable($pdo, 'users')) {
@@ -330,7 +409,8 @@ function fetchMembersFromUsers(PDO $pdo): array
     $isAdminCol = in_array('is_admin', $userColumns, true) ? 'is_admin' : null;
 
     $select = [
-        quotedIdentifier($idCol) . ' AS member_id',
+        quotedIdentifier($idCol) . ' AS user_id',
+        "0 AS member_id",
         ($nameCol !== null ? quotedIdentifier($nameCol) : "''") . ' AS full_name',
         ($firstCol !== null ? quotedIdentifier($firstCol) : "''") . ' AS first_name',
         ($lastCol !== null ? quotedIdentifier($lastCol) : "''") . ' AS last_name',
@@ -371,8 +451,24 @@ function fetchMembersFromUsers(PDO $pdo): array
 
     foreach ($rows as &$row) {
         $row['full_name'] = buildFullName($row);
+
+        $linkedMemberRow = resolveLinkedMemberRowFromUserRow($pdo, $row);
+        $linkedMemberId = (int) valueFromRow($linkedMemberRow, ['id', 'member_id'], '0');
+
+        if ($linkedMemberId > 0) {
+            $row['member_id'] = (string) $linkedMemberId;
+
+            if (trim(valueFromRow($row, ['username'])) === '') {
+                $row['username'] = valueFromRow($linkedMemberRow, ['username', 'full_name', 'name'], '');
+            }
+
+            if (trim(valueFromRow($row, ['preferred_login'])) === '') {
+                $row['preferred_login'] = valueFromRow($linkedMemberRow, ['preferred_login'], '');
+            }
+        }
+
         $fallbackMembership = valueFromRow($row, ['membership_type']);
-        $row['membership_type'] = ddMembershipNameForMember($pdo, (int) valueFromRow($row, ['member_id'], '0'), $fallbackMembership);
+        $row['membership_type'] = ddMembershipNameForMember($pdo, $linkedMemberId, $fallbackMembership);
         $row['address_display'] = buildAddress($row);
     }
     unset($row);
@@ -416,6 +512,7 @@ function fetchMembersFallback(PDO $pdo): array
 
         $select = [
             quotedIdentifier($idCol) . ' AS member_id',
+            "0 AS user_id",
             ($nameCol !== null ? quotedIdentifier($nameCol) : "''") . ' AS full_name',
             ($firstCol !== null ? quotedIdentifier($firstCol) : "''") . ' AS first_name',
             ($lastCol !== null ? quotedIdentifier($lastCol) : "''") . ' AS last_name',
@@ -983,12 +1080,15 @@ foreach ($members as $member) {
                         <?php foreach ($members as $member): ?>
                             <?php
                             $memberId = (int) valueFromRow($member, ['member_id'], '0');
+                            $userId = (int) valueFromRow($member, ['user_id'], '0');
+                            $actionId = $userId > 0 ? $userId : ($memberId > 0 ? $memberId : 0);
                             $fullAddress = trim(valueFromRow($member, ['address_display']));
+                            $idLabel = $memberId > 0 ? 'Member ID #' . $memberId : 'User ID #' . $actionId;
                             ?>
                             <tr>
                                 <td>
                                     <div class="member-name"><?php echo h(valueFromRow($member, ['full_name'], '—')); ?></div>
-                                    <div class="member-sub">ID #<?php echo h((string) $memberId); ?></div>
+                                    <div class="member-sub"><?php echo h($idLabel); ?></div>
                                 </td>
                                 <td><?php echo h(valueFromRow($member, ['email'], '—')); ?></td>
                                 <td><?php echo h(valueFromRow($member, ['phone'], '—')); ?></td>
@@ -1005,10 +1105,10 @@ foreach ($members as $member) {
                                 <td><?php echo h(formatDateTimeDisplay(valueFromRow($member, ['created_at'], ''))); ?></td>
                                 <td>
                                     <div class="actions-col">
-                                        <a class="action-link" href="admin-member-view.php?id=<?php echo $memberId; ?>">View</a>
-                                        <a class="action-link" href="admin-add-dog.php?user_id=<?php echo $memberId; ?>">Add Dog</a>
-                                        <a class="action-link" href="admin-create-booking.php?user_id=<?php echo $memberId; ?>">Create Booking</a>
-                                        <a class="action-link action-link-danger" href="admin-delete-member.php?id=<?php echo $memberId; ?>">Delete</a>
+                                        <a class="action-link" href="admin-member-view.php?id=<?php echo $actionId; ?>">View</a>
+                                        <a class="action-link" href="admin-add-dog.php?user_id=<?php echo $actionId; ?>">Add Dog</a>
+                                        <a class="action-link" href="admin-create-booking.php?user_id=<?php echo $actionId; ?>">Create Booking</a>
+                                        <a class="action-link action-link-danger" href="admin-delete-member.php?id=<?php echo $actionId; ?>">Delete</a>
                                     </div>
                                 </td>
                             </tr>

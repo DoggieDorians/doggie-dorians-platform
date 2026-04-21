@@ -17,6 +17,8 @@ $sections = [
         'description' => 'Main control pages for the admin side.',
         'items' => [
             ['file' => 'admin-dashboard.php', 'label' => 'Admin Dashboard', 'note' => 'Main admin home', 'href' => 'admin-dashboard.php', 'type' => 'page'],
+            ['file' => 'admin-analytics.php', 'label' => 'Admin Analytics', 'note' => 'Traffic, funnel, geo, badge, and business analytics dashboard', 'href' => 'admin-analytics.php', 'type' => 'page'],
+            ['file' => 'admin-analytics-tracking.php', 'label' => 'Admin Analytics Tracking', 'note' => 'Raw session and event explorer for visitor tracking', 'href' => 'admin-analytics-tracking.php', 'type' => 'page'],
             ['file' => 'admin-nav.php', 'label' => 'Admin Navigation', 'note' => 'Central admin link hub', 'href' => 'admin-nav.php', 'type' => 'page'],
             ['file' => 'admin.php', 'label' => 'Admin', 'note' => 'Legacy or alternate admin entry', 'href' => 'admin-dashboard.php', 'type' => 'redirected'],
             ['file' => 'admin-revenue.php', 'label' => 'Admin Revenue', 'note' => 'Revenue dashboard', 'href' => 'admin-revenue.php', 'type' => 'page'],
@@ -51,7 +53,7 @@ $sections = [
         'items' => [
             ['file' => 'admin-walks.php', 'label' => 'Admin Walks', 'note' => 'Walk operations board', 'href' => 'admin-walks.php', 'type' => 'page'],
             ['file' => 'admin-live-tracking.php', 'label' => 'Admin Live Tracking', 'note' => 'Admin live tracking screen', 'href' => 'admin-live-tracking.php', 'type' => 'page'],
-            ['file' => 'admin-tracking.php', 'label' => 'Admin Tracking', 'note' => 'Tracking-related admin page', 'href' => 'admin-tracking.php', 'type' => 'page'],
+            ['file' => 'admin-tracking.php', 'label' => 'Admin Tracking', 'note' => 'Member-facing dog tracking page', 'href' => 'admin-tracking.php', 'type' => 'page'],
             ['file' => 'admin-walker-management.php', 'label' => 'Admin Walker Management', 'note' => 'Worker directory and controls', 'href' => 'admin-walker-management.php', 'type' => 'page'],
             ['file' => 'admin-worker-view.php', 'label' => 'Admin Worker View', 'note' => 'Requires a specific worker. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
             ['file' => 'admin-worker-jobs.php', 'label' => 'Admin Worker Jobs', 'note' => 'Requires a specific worker context. Opens worker management first.', 'href' => 'admin-walker-management.php', 'type' => 'context'],
@@ -478,7 +480,8 @@ $primaryLinks = $totalLinks - $internalLinks - $contextLinks;
 
             <div class="top-actions">
                 <a class="top-btn" href="admin-dashboard.php">Dashboard</a>
-                <a class="top-btn" href="admin-revenue.php">Revenue</a>
+                <a class="top-btn" href="admin-analytics.php">Analytics</a>
+                <a class="top-btn" href="admin-analytics-tracking.php">Tracking</a>
                 <a class="top-btn" href="admin-bookings.php">Bookings</a>
                 <a class="top-btn primary" href="admin-nav.php">Admin Nav</a>
             </div>

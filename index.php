@@ -371,6 +371,19 @@ $remainingFounderWalk = 13;
             color: #f3e5c7;
         }
 
+        .list-link {
+            display: block;
+            transition: transform .15s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
+            cursor: pointer;
+        }
+
+        .list-link:hover {
+            transform: translateY(-1px);
+            background: rgba(255,255,255,0.06);
+            border-color: rgba(226,196,141,0.20);
+            box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+        }
+
         .founder-highlight-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -485,7 +498,7 @@ $remainingFounderWalk = 13;
 
             <div class="top-links">
                 <a class="top-link" href="index.php">Home</a>
-                <a class="top-link" href="why-join.php">Why Join</a>
+                <a class="top-link" href="memberships.php">Why Join</a>
                 <a class="top-link" href="pricing.php">Pricing</a>
                 <a class="top-link" href="memberships.php#founders">Founder Memberships</a>
                 <a class="top-link" href="non-member-booking.php">Book Now</a>
@@ -541,7 +554,7 @@ $remainingFounderWalk = 13;
                 <div class="cta-row">
                     <a class="btn btn-gold" href="<?php echo h($primaryLink); ?>"><?php echo h($primaryText); ?></a>
                     <a class="btn btn-light" href="<?php echo h($secondaryLink); ?>"><?php echo h($secondaryText); ?></a>
-                    <a class="btn btn-light" href="why-join.php">Why Join Membership</a>
+                    <a class="btn btn-light" href="memberships.php">Why Join Membership</a>
                     <a class="btn btn-light" href="memberships.php#founders">View Founder Memberships</a>
                     <?php if (!$isLoggedIn): ?>
                         <a class="btn btn-light" href="signup.php">Create Account</a>
@@ -572,45 +585,35 @@ $remainingFounderWalk = 13;
                 </div>
 
                 <div class="list">
-                    <div class="list-item">
+                    <a class="list-item list-link" href="non-member-booking.php">
                         <strong>Book without an account</strong>
                         New clients can schedule eligible services directly without creating a membership first.
-                    </div>
+                    </a>
 
-                    <div class="list-item">
+                    <a class="list-item list-link" href="<?php echo h($isLoggedIn ? 'book-service.php' : 'login.php'); ?>">
                         <strong>Member booking</strong>
                         Returning members can manage walks, drop-ins, and other eligible services from one coordinated booking hub.
-                    </div>
+                    </a>
 
-                    <div class="list-item">
+                    <a class="list-item list-link" href="memberships.php#founders">
                         <strong>Founder-only care access</strong>
                         Daycare and boarding are currently included only through founder packages while availability remains. Full-time access for other clients is coming soon.
-                    </div>
+                    </a>
 
-                    <div class="list-item">
+                    <a class="list-item list-link" href="memberships.php">
                         <strong>Why join</strong>
                         Explore the value of membership, priority scheduling, premium structure, and why recurring clients choose Doggie Dorian’s.
-                    </div>
+                    </a>
 
-                    <div class="list-item">
+                    <a class="list-item list-link" href="memberships.php#founders">
                         <strong>Founder memberships</strong>
                         Clients interested in limited founder access can explore the collection and submit a founder request.
-                    </div>
+                    </a>
 
-                    <div class="list-item">
+                    <a class="list-item list-link" href="group-walks.php">
                         <strong>Group walk applications</strong>
                         Dogs interested in group walks can apply for evaluation and placement before joining the program.
-                    </div>
-                </div>
-
-                <div class="cta-row">
-                    <a class="btn btn-light" href="non-member-booking.php">Book Without an Account</a>
-                    <a class="btn btn-light" href="why-join.php">Why Join</a>
-                    <a class="btn btn-light" href="memberships.php#founders">Founder Memberships</a>
-                    <a class="btn btn-light" href="group-walks.php">Apply for Group Walks</a>
-                    <?php if (!$isLoggedIn): ?>
-                        <a class="btn btn-light" href="signup.php">Sign Up</a>
-                    <?php endif; ?>
+                    </a>
                 </div>
             </div>
         </section>
@@ -654,7 +657,7 @@ $remainingFounderWalk = 13;
                             </div>
 
                             <div class="cta-row">
-                                <a class="btn btn-gold" href="why-join.php">View Why Join Page</a>
+                                <a class="btn btn-gold" href="memberships.php">View Why Join Page</a>
                                 <a class="btn btn-light" href="memberships.php#founders">See Membership Options</a>
                                 <a class="btn btn-light" href="non-member-booking.php">Book First Service</a>
                             </div>
@@ -834,7 +837,7 @@ $remainingFounderWalk = 13;
             </div>
 
             <div class="footer-links">
-                <a href="why-join.php">Why Join</a>
+                <a href="memberships.php">Why Join</a>
                 <a href="memberships.php#founders">Founder Memberships</a>
                 <a href="privacy-policy.php">Privacy Policy</a>
                 <a href="legal-notice.php">Legal Notice</a>

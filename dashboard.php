@@ -1317,7 +1317,722 @@ function buildDogJourneyCards(PDO $pdo, $userId, array $pets, array $bookings, $
     return $cards;
 }
 
+
+
+function ensureBadgeVaultSchema(PDO $pdo)
+{
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS member_badges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                pet_id INTEGER NOT NULL DEFAULT 0,
+                badge_key TEXT NOT NULL,
+                badge_name TEXT NOT NULL DEFAULT '',
+                badge_mark TEXT NOT NULL DEFAULT '',
+                badge_group TEXT NOT NULL DEFAULT '',
+                badge_family TEXT NOT NULL DEFAULT '',
+                badge_scope TEXT NOT NULL DEFAULT 'member',
+                theme_class TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                reward_title TEXT NOT NULL DEFAULT '',
+                reward_note TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT '',
+                source_reference TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_featured INTEGER NOT NULL DEFAULT 1,
+                unlocked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+    } catch (Throwable $e) {
+    }
+
+    ensureTableColumn($pdo, 'member_badges', 'pet_id', 'INTEGER NOT NULL DEFAULT 0');
+    ensureTableColumn($pdo, 'member_badges', 'badge_key', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'badge_name', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'badge_mark', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'badge_group', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'badge_family', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'badge_scope', "TEXT NOT NULL DEFAULT 'member'");
+    ensureTableColumn($pdo, 'member_badges', 'theme_class', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'description', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'reward_title', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'reward_note', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'source_type', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'source_reference', "TEXT NOT NULL DEFAULT ''");
+    ensureTableColumn($pdo, 'member_badges', 'is_active', 'INTEGER NOT NULL DEFAULT 1');
+    ensureTableColumn($pdo, 'member_badges', 'is_featured', 'INTEGER NOT NULL DEFAULT 1');
+    ensureTableColumn($pdo, 'member_badges', 'unlocked_at', "TEXT DEFAULT CURRENT_TIMESTAMP");
+    ensureTableColumn($pdo, 'member_badges', 'created_at', "TEXT DEFAULT CURRENT_TIMESTAMP");
+    ensureTableColumn($pdo, 'member_badges', 'updated_at', "TEXT DEFAULT CURRENT_TIMESTAMP");
+
+    try {
+        $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_member_badges_user_pet_key ON member_badges(user_id, pet_id, badge_key)');
+    } catch (Throwable $e) {
+    }
+
+    try {
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_member_badges_user_group_active ON member_badges(user_id, badge_group, is_active)');
+    } catch (Throwable $e) {
+    }
+}
+
+function normalizeBadgeKey($value)
+{
+    $value = strtolower(trim((string) $value));
+    $value = preg_replace('/[^a-z0-9]+/i', '_', $value);
+    $value = trim((string) $value, '_');
+
+    return $value !== '' ? $value : 'badge';
+}
+
+function badgeMarkFromName($name)
+{
+    $name = trim((string) $name);
+    if ($name === '') {
+        return 'BDG';
+    }
+
+    $words = preg_split('/\s+/u', $name, -1, PREG_SPLIT_NO_EMPTY);
+    $letters = '';
+
+    foreach ((array) $words as $word) {
+        $letters .= strtoupper(substr((string) $word, 0, 1));
+        if (strlen($letters) >= 3) {
+            break;
+        }
+    }
+
+    if ($letters === '') {
+        $letters = strtoupper(substr((string) preg_replace('/[^a-z0-9]/i', '', $name), 0, 3));
+    }
+
+    return $letters !== '' ? $letters : 'BDG';
+}
+
+function founderBadgeCatalogDetailed()
+{
+    return array(
+        'founder_walk_club' => array(
+            'badge_key' => 'founder_walk_club',
+            'slug' => 'founder_walk_club',
+            'membership_name' => 'Founder Walk Club',
+            'badge_name' => 'Founding Walker',
+            'badge_mark' => 'FW',
+            'theme_class' => 'badge-tier-walk',
+            'description' => 'Reserved for members who locked in Founder Walk Club access and became part of the first premium walk circle.',
+            'reward_title' => 'Founder Reward Slot',
+            'reward_note' => 'Ready for future founder-only perks, credits, or concierge rewards.',
+        ),
+        'founder_care_club' => array(
+            'badge_key' => 'founder_care_club',
+            'slug' => 'founder_care_club',
+            'membership_name' => 'Founder Care Club',
+            'badge_name' => 'Care Circle Founder',
+            'badge_mark' => 'FC',
+            'theme_class' => 'badge-tier-care',
+            'description' => 'Awarded to members who secured Founder Care Club access with expanded recurring care benefits.',
+            'reward_title' => 'Founder Reward Slot',
+            'reward_note' => 'Ready for future founder-only perks, credits, or concierge rewards.',
+        ),
+        'founder_elite_club' => array(
+            'badge_key' => 'founder_elite_club',
+            'slug' => 'founder_elite_club',
+            'membership_name' => 'Founder Elite Club',
+            'badge_name' => 'Elite Founding Member',
+            'badge_mark' => 'FE',
+            'theme_class' => 'badge-tier-elite',
+            'description' => 'The highest founder distinction for members who entered the Founder Elite Club collection.',
+            'reward_title' => 'Founder Reward Slot',
+            'reward_note' => 'Ready for future founder-only perks, credits, or concierge rewards.',
+        ),
+    );
+}
+
+function dogJourneyBadgeCatalogDetailed()
+{
+    return array(
+        'journey_begins' => array(
+            'badge_key' => 'journey_begins',
+            'badge_name' => 'Journey Begins',
+            'badge_mark' => 'JB',
+            'theme_class' => 'badge-tier-journey',
+            'description' => 'The first Dog Journey milestone, created when a dog profile begins building its care history.',
+            'reward_title' => 'Journey Reward Slot',
+            'reward_note' => 'Ready for future welcome treats, profile unlocks, or member surprises.',
+        ),
+        'first_strolls' => array(
+            'badge_key' => 'first_strolls',
+            'badge_name' => 'First Strolls',
+            'badge_mark' => 'FS',
+            'theme_class' => 'badge-tier-journey',
+            'description' => 'Unlocked after a dog records its first meaningful set of services and begins a routine.',
+            'reward_title' => 'Journey Reward Slot',
+            'reward_note' => 'Ready for future welcome treats, profile unlocks, or member surprises.',
+        ),
+        'routine_favorite' => array(
+            'badge_key' => 'routine_favorite',
+            'badge_name' => 'Routine Favorite',
+            'badge_mark' => 'RF',
+            'theme_class' => 'badge-tier-journey',
+            'description' => 'Marks a dog that has settled into a dependable luxury care rhythm with Doggie Dorian’s.',
+            'reward_title' => 'Journey Reward Slot',
+            'reward_note' => 'Ready for future welcome treats, profile unlocks, or member surprises.',
+        ),
+        'vip_companion' => array(
+            'badge_key' => 'vip_companion',
+            'badge_name' => 'VIP Companion',
+            'badge_mark' => 'VC',
+            'theme_class' => 'badge-tier-journey',
+            'description' => 'Reserved for dogs with substantial service history and a strong premium care journey.',
+            'reward_title' => 'Journey Reward Slot',
+            'reward_note' => 'Ready for future welcome treats, profile unlocks, or member surprises.',
+        ),
+        'dorians_inner_circle' => array(
+            'badge_key' => 'dorians_inner_circle',
+            'badge_name' => 'Dorian’s Inner Circle',
+            'badge_mark' => 'DI',
+            'theme_class' => 'badge-tier-journey',
+            'description' => 'The signature Dog Journey distinction for dogs with deep ongoing service history.',
+            'reward_title' => 'Journey Reward Slot',
+            'reward_note' => 'Ready for future welcome treats, profile unlocks, or member surprises.',
+        ),
+    );
+}
+
+function standardJourneyBadgeKeyByName($name)
+{
+    $name = strtolower(trim((string) $name));
+    $catalog = dogJourneyBadgeCatalogDetailed();
+
+    foreach ($catalog as $badgeKey => $config) {
+        if (strtolower((string) $config['badge_name']) === $name) {
+            return (string) $badgeKey;
+        }
+    }
+
+    return '';
+}
+
+function awardOrUpdateMemberBadge(PDO $pdo, array $payload)
+{
+    if (!hasTable($pdo, 'member_badges')) {
+        return;
+    }
+
+    $userId = (int) valueFromRow($payload, array('user_id'), 0);
+    $petId = (int) valueFromRow($payload, array('pet_id'), 0);
+    $badgeKey = trim((string) valueFromRow($payload, array('badge_key'), ''));
+
+    if ($userId <= 0 || $badgeKey === '') {
+        return;
+    }
+
+    $existing = safeFetchOne(
+        $pdo,
+        'SELECT id, unlocked_at FROM member_badges WHERE user_id = :user_id AND pet_id = :pet_id AND badge_key = :badge_key LIMIT 1',
+        array(
+            ':user_id' => $userId,
+            ':pet_id' => $petId,
+            ':badge_key' => $badgeKey,
+        )
+    );
+
+    $params = array(
+        ':user_id' => $userId,
+        ':pet_id' => $petId,
+        ':badge_key' => $badgeKey,
+        ':badge_name' => trim((string) valueFromRow($payload, array('badge_name'), '')),
+        ':badge_mark' => trim((string) valueFromRow($payload, array('badge_mark'), '')),
+        ':badge_group' => trim((string) valueFromRow($payload, array('badge_group'), '')),
+        ':badge_family' => trim((string) valueFromRow($payload, array('badge_family'), '')),
+        ':badge_scope' => trim((string) valueFromRow($payload, array('badge_scope'), 'member')),
+        ':theme_class' => trim((string) valueFromRow($payload, array('theme_class'), '')),
+        ':description' => trim((string) valueFromRow($payload, array('description'), '')),
+        ':reward_title' => trim((string) valueFromRow($payload, array('reward_title'), '')),
+        ':reward_note' => trim((string) valueFromRow($payload, array('reward_note'), '')),
+        ':source_type' => trim((string) valueFromRow($payload, array('source_type'), '')),
+        ':source_reference' => trim((string) valueFromRow($payload, array('source_reference'), '')),
+        ':is_active' => (int) valueFromRow($payload, array('is_active'), 1) ? 1 : 0,
+        ':is_featured' => (int) valueFromRow($payload, array('is_featured'), 1) ? 1 : 0,
+        ':unlocked_at' => trim((string) valueFromRow($payload, array('unlocked_at'), '')),
+    );
+
+    if ($params[':badge_mark'] === '') {
+        $params[':badge_mark'] = badgeMarkFromName($params[':badge_name']);
+    }
+
+    if ($existing) {
+        $sql = "
+            UPDATE member_badges
+            SET
+                badge_name = :badge_name,
+                badge_mark = :badge_mark,
+                badge_group = :badge_group,
+                badge_family = :badge_family,
+                badge_scope = :badge_scope,
+                theme_class = :theme_class,
+                description = :description,
+                reward_title = :reward_title,
+                reward_note = :reward_note,
+                source_type = :source_type,
+                source_reference = :source_reference,
+                is_active = :is_active,
+                is_featured = :is_featured,
+                unlocked_at = CASE
+                    WHEN :unlocked_at <> '' THEN :unlocked_at
+                    ELSE COALESCE(NULLIF(unlocked_at, ''), CURRENT_TIMESTAMP)
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :user_id
+              AND pet_id = :pet_id
+              AND badge_key = :badge_key
+        ";
+    } else {
+        $sql = "
+            INSERT INTO member_badges (
+                user_id,
+                pet_id,
+                badge_key,
+                badge_name,
+                badge_mark,
+                badge_group,
+                badge_family,
+                badge_scope,
+                theme_class,
+                description,
+                reward_title,
+                reward_note,
+                source_type,
+                source_reference,
+                is_active,
+                is_featured,
+                unlocked_at,
+                created_at,
+                updated_at
+            ) VALUES (
+                :user_id,
+                :pet_id,
+                :badge_key,
+                :badge_name,
+                :badge_mark,
+                :badge_group,
+                :badge_family,
+                :badge_scope,
+                :theme_class,
+                :description,
+                :reward_title,
+                :reward_note,
+                :source_type,
+                :source_reference,
+                :is_active,
+                :is_featured,
+                CASE WHEN :unlocked_at <> '' THEN :unlocked_at ELSE CURRENT_TIMESTAMP END,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            )
+        ";
+    }
+
+    safeFetchOne($pdo, 'SELECT 1', array()); // keep PDO warm for some shared hosts
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+    } catch (Throwable $e) {
+    }
+}
+
+function fetchActiveMemberBadges(PDO $pdo, $userId, $badgeGroup = '')
+{
+    if (!hasTable($pdo, 'member_badges') || (int) $userId <= 0) {
+        return array();
+    }
+
+    $sql = 'SELECT * FROM member_badges WHERE user_id = :user_id AND COALESCE(is_active, 1) = 1';
+    $params = array(':user_id' => (int) $userId);
+
+    if ($badgeGroup !== '') {
+        $sql .= ' AND badge_group = :badge_group';
+        $params[':badge_group'] = (string) $badgeGroup;
+    }
+
+    $sql .= " ORDER BY COALESCE(NULLIF(unlocked_at, ''), created_at) DESC, id DESC";
+
+    return safeFetchAll($pdo, $sql, $params);
+}
+
+function founderBadgeSlugsFromMembershipHistory(PDO $pdo, $userId, array $catalog)
+{
+    $matched = array();
+
+    if ((int) $userId <= 0 || !hasTable($pdo, 'member_memberships')) {
+        return $matched;
+    }
+
+    $ownerCol = firstExistingColumn($pdo, 'member_memberships', array('member_id', 'user_id', 'client_id'));
+    $planCol = firstExistingColumn($pdo, 'member_memberships', array('plan_id'));
+
+    if ($ownerCol === null || $planCol === null) {
+        return $matched;
+    }
+
+    $rows = safeFetchAll(
+        $pdo,
+        'SELECT * FROM ' . quotedIdentifier('member_memberships')
+        . ' WHERE ' . quotedIdentifier($ownerCol) . ' = :owner_id'
+        . ' ORDER BY ' . quotedIdentifier('id') . ' DESC',
+        array(':owner_id' => (int) $userId)
+    );
+
+    foreach ($rows as $row) {
+        $slug = '';
+        $planId = (int) valueFromRow($row, array($planCol), 0);
+
+        if ($planId > 0 && hasTable($pdo, 'membership_plans')) {
+            $planIdCol = firstExistingColumn($pdo, 'membership_plans', array('id', 'plan_id'));
+            $slugCol = firstExistingColumn($pdo, 'membership_plans', array('slug', 'plan_slug', 'code'));
+            $nameCol = firstExistingColumn($pdo, 'membership_plans', array('name', 'plan_name', 'title'));
+
+            if ($planIdCol !== null) {
+                $planRow = safeFetchOne(
+                    $pdo,
+                    'SELECT * FROM ' . quotedIdentifier('membership_plans')
+                    . ' WHERE ' . quotedIdentifier($planIdCol) . ' = :plan_id LIMIT 1',
+                    array(':plan_id' => $planId)
+                );
+
+                if ($planRow !== null) {
+                    $slug = strtolower(trim((string) valueFromRow($planRow, array($slugCol), '')));
+
+                    if ($slug === '' && $nameCol !== null) {
+                        $planName = strtolower(trim((string) valueFromRow($planRow, array($nameCol), '')));
+                        foreach ($catalog as $catalogSlug => $config) {
+                            if (strtolower((string) $config['membership_name']) === $planName) {
+                                $slug = (string) $catalogSlug;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($slug !== '' && isset($catalog[$slug])) {
+            $matched[$slug] = true;
+        }
+    }
+
+    return $matched;
+}
+
+function syncFounderMembershipBadges(PDO $pdo, $userId, array $membershipSummary = array())
+{
+    $catalog = founderBadgeCatalogDetailed();
+    $matched = founderBadgeSlugsFromMembershipHistory($pdo, $userId, $catalog);
+
+    $currentSlug = strtolower(trim((string) valueFromRow($membershipSummary, array('plan_slug'), '')));
+    if ($currentSlug !== '' && isset($catalog[$currentSlug])) {
+        $matched[$currentSlug] = true;
+    }
+
+    foreach ($matched as $slug => $enabled) {
+        if (!$enabled || !isset($catalog[$slug])) {
+            continue;
+        }
+
+        $config = $catalog[$slug];
+        awardOrUpdateMemberBadge($pdo, array(
+            'user_id' => (int) $userId,
+            'pet_id' => 0,
+            'badge_key' => (string) $config['badge_key'],
+            'badge_name' => (string) $config['badge_name'],
+            'badge_mark' => (string) $config['badge_mark'],
+            'badge_group' => 'founder',
+            'badge_family' => 'founder_membership',
+            'badge_scope' => 'member',
+            'theme_class' => (string) $config['theme_class'],
+            'description' => (string) $config['description'],
+            'reward_title' => (string) $config['reward_title'],
+            'reward_note' => (string) $config['reward_note'],
+            'source_type' => 'membership_sync',
+            'source_reference' => (string) $slug,
+            'is_active' => 1,
+            'is_featured' => 1,
+        ));
+    }
+}
+
+function buildFounderBadgeVault(PDO $pdo, $userId, array $membershipSummary = array())
+{
+    $catalog = founderBadgeCatalogDetailed();
+    $items = array();
+
+    foreach ($catalog as $slug => $config) {
+        $items[$slug] = array(
+            'slug' => (string) $slug,
+            'badge_key' => (string) $config['badge_key'],
+            'membership_name' => (string) $config['membership_name'],
+            'badge_name' => (string) $config['badge_name'],
+            'badge_mark' => (string) $config['badge_mark'],
+            'theme_class' => (string) $config['theme_class'],
+            'description' => (string) $config['description'],
+            'reward_title' => (string) $config['reward_title'],
+            'reward_note' => (string) $config['reward_note'],
+            'unlocked' => false,
+            'is_current' => false,
+            'status_label' => 'Locked',
+        );
+    }
+
+    foreach (fetchActiveMemberBadges($pdo, $userId, 'founder') as $badge) {
+        $slug = strtolower(trim((string) valueFromRow($badge, array('badge_key'), '')));
+        if ($slug === '' || !isset($items[$slug])) {
+            continue;
+        }
+
+        $items[$slug]['unlocked'] = true;
+    }
+
+    $currentSlug = strtolower(trim((string) valueFromRow($membershipSummary, array('plan_slug'), '')));
+    if ($currentSlug !== '' && isset($items[$currentSlug])) {
+        $items[$currentSlug]['unlocked'] = true;
+        $items[$currentSlug]['is_current'] = true;
+    }
+
+    foreach ($items as $slug => $item) {
+        if (!empty($item['is_current'])) {
+            $items[$slug]['status_label'] = 'Current Founder Badge';
+        } elseif (!empty($item['unlocked'])) {
+            $items[$slug]['status_label'] = 'Founder Badge Earned';
+        }
+    }
+
+    return array_values($items);
+}
+
+function extractJourneyBadgeNameFromEntry(array $entry)
+{
+    $type = strtolower(trim((string) valueFromRow($entry, array('entry_type'), '')));
+    if ($type !== 'badge_award') {
+        return '';
+    }
+
+    $body = trim((string) valueFromRow($entry, array('entry_body'), ''));
+    if ($body !== '') {
+        $parts = preg_split('/\s*·\s*/u', $body);
+        $candidate = trim((string) ($parts[0] ?? ''));
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    return trim((string) valueFromRow($entry, array('entry_title'), ''));
+}
+
+function syncJourneyMilestoneBadges(PDO $pdo, $userId, array $journeyCards)
+{
+    if ((int) $userId <= 0) {
+        return;
+    }
+
+    $catalog = dogJourneyBadgeCatalogDetailed();
+
+    foreach ($journeyCards as $card) {
+        $petId = (int) valueFromRow($card, array('pet_id'), 0);
+        $petName = trim((string) valueFromRow($card, array('pet_name'), 'Dog'));
+
+        if ($petId <= 0) {
+            continue;
+        }
+
+        $awards = array();
+        $currentBadge = trim((string) valueFromRow($card, array('milestone_badge'), ''));
+        if ($currentBadge !== '') {
+            $awards[$currentBadge] = true;
+        }
+
+        foreach ((array) valueFromRow($card, array('journey_entries'), array()) as $entry) {
+            $entryBadge = trim((string) extractJourneyBadgeNameFromEntry((array) $entry));
+            if ($entryBadge !== '') {
+                $awards[$entryBadge] = true;
+            }
+        }
+
+        foreach (array_keys($awards) as $badgeName) {
+            $standardKey = standardJourneyBadgeKeyByName($badgeName);
+
+            if ($standardKey !== '' && isset($catalog[$standardKey])) {
+                $config = $catalog[$standardKey];
+                awardOrUpdateMemberBadge($pdo, array(
+                    'user_id' => (int) $userId,
+                    'pet_id' => $petId,
+                    'badge_key' => (string) $standardKey,
+                    'badge_name' => (string) $config['badge_name'],
+                    'badge_mark' => (string) $config['badge_mark'],
+                    'badge_group' => 'journey',
+                    'badge_family' => 'journey_milestone',
+                    'badge_scope' => 'pet',
+                    'theme_class' => (string) $config['theme_class'],
+                    'description' => (string) $config['description'],
+                    'reward_title' => (string) $config['reward_title'],
+                    'reward_note' => (string) $config['reward_note'],
+                    'source_type' => 'dog_journey_sync',
+                    'source_reference' => 'pet:' . $petId,
+                    'is_active' => 1,
+                    'is_featured' => 1,
+                ));
+            } else {
+                $customKey = 'journey_custom_' . normalizeBadgeKey($badgeName) . '_' . $petId;
+
+                awardOrUpdateMemberBadge($pdo, array(
+                    'user_id' => (int) $userId,
+                    'pet_id' => $petId,
+                    'badge_key' => $customKey,
+                    'badge_name' => (string) $badgeName,
+                    'badge_mark' => badgeMarkFromName($badgeName),
+                    'badge_group' => 'journey',
+                    'badge_family' => 'journey_custom',
+                    'badge_scope' => 'pet',
+                    'theme_class' => 'badge-tier-journey-custom',
+                    'description' => $petName . ' earned a custom Dog Journey distinction.',
+                    'reward_title' => 'Journey Reward Slot',
+                    'reward_note' => 'Ready for future custom badge rewards, surprises, or premium unlocks.',
+                    'source_type' => 'dog_journey_sync',
+                    'source_reference' => 'pet:' . $petId,
+                    'is_active' => 1,
+                    'is_featured' => 1,
+                ));
+            }
+        }
+    }
+}
+
+function buildJourneyBadgeVault(PDO $pdo, $userId)
+{
+    $catalog = dogJourneyBadgeCatalogDetailed();
+    $milestones = array();
+
+    foreach ($catalog as $badgeKey => $config) {
+        $milestones[$badgeKey] = array(
+            'badge_key' => (string) $badgeKey,
+            'badge_name' => (string) $config['badge_name'],
+            'badge_mark' => (string) $config['badge_mark'],
+            'theme_class' => (string) $config['theme_class'],
+            'description' => (string) $config['description'],
+            'reward_title' => (string) $config['reward_title'],
+            'reward_note' => (string) $config['reward_note'],
+            'pet_names' => array(),
+            'earned_count' => 0,
+            'unlocked' => false,
+            'status_label' => 'Locked',
+        );
+    }
+
+    $custom = array();
+
+    foreach (fetchActiveMemberBadges($pdo, $userId, 'journey') as $badge) {
+        $badgeKey = trim((string) valueFromRow($badge, array('badge_key'), ''));
+        $badgeName = trim((string) valueFromRow($badge, array('badge_name'), ''));
+        $petId = (int) valueFromRow($badge, array('pet_id'), 0);
+        $petName = $petId > 0 ? loadPetNameById($pdo, $petId) : '';
+
+        if ($badgeKey !== '' && isset($milestones[$badgeKey])) {
+            $milestones[$badgeKey]['unlocked'] = true;
+            $milestones[$badgeKey]['earned_count']++;
+
+            if ($petName !== '' && !in_array($petName, $milestones[$badgeKey]['pet_names'], true)) {
+                $milestones[$badgeKey]['pet_names'][] = $petName;
+            }
+
+            continue;
+        }
+
+        $customKey = $badgeKey !== '' ? $badgeKey : normalizeBadgeKey($badgeName);
+        if (!isset($custom[$customKey])) {
+            $custom[$customKey] = array(
+                'badge_key' => $customKey,
+                'badge_name' => $badgeName !== '' ? $badgeName : 'Custom Badge',
+                'badge_mark' => trim((string) valueFromRow($badge, array('badge_mark'), '')) !== '' ? (string) valueFromRow($badge, array('badge_mark'), '') : badgeMarkFromName($badgeName),
+                'theme_class' => trim((string) valueFromRow($badge, array('theme_class'), '')) !== '' ? (string) valueFromRow($badge, array('theme_class'), '') : 'badge-tier-journey-custom',
+                'description' => trim((string) valueFromRow($badge, array('description'), '')) !== '' ? (string) valueFromRow($badge, array('description'), '') : 'A custom Dog Journey distinction earned by a member dog.',
+                'reward_title' => trim((string) valueFromRow($badge, array('reward_title'), '')) !== '' ? (string) valueFromRow($badge, array('reward_title'), '') : 'Journey Reward Slot',
+                'reward_note' => trim((string) valueFromRow($badge, array('reward_note'), '')) !== '' ? (string) valueFromRow($badge, array('reward_note'), '') : 'Ready for future custom badge rewards, surprises, or premium unlocks.',
+                'pet_names' => array(),
+                'earned_count' => 0,
+                'unlocked' => true,
+                'status_label' => 'Unlocked',
+            );
+        }
+
+        $custom[$customKey]['earned_count']++;
+        if ($petName !== '' && !in_array($petName, $custom[$customKey]['pet_names'], true)) {
+            $custom[$customKey]['pet_names'][] = $petName;
+        }
+    }
+
+    foreach ($milestones as $badgeKey => $badge) {
+        if (!empty($badge['unlocked'])) {
+            $milestones[$badgeKey]['status_label'] = 'Unlocked';
+        }
+    }
+
+    $milestoneItems = array_values($milestones);
+    $customItems = array_values($custom);
+
+    usort($milestoneItems, function ($a, $b) {
+        return strcasecmp((string) ($a['badge_name'] ?? ''), (string) ($b['badge_name'] ?? ''));
+    });
+
+    usort($customItems, function ($a, $b) {
+        return strcasecmp((string) ($a['badge_name'] ?? ''), (string) ($b['badge_name'] ?? ''));
+    });
+
+    $unlockedCount = 0;
+    foreach ($milestoneItems as $item) {
+        if (!empty($item['unlocked'])) {
+            $unlockedCount++;
+        }
+    }
+    $unlockedCount += count($customItems);
+
+    return array(
+        'milestone_collection' => $milestoneItems,
+        'custom_collection' => $customItems,
+        'unlocked_count' => $unlockedCount,
+    );
+}
+
+function badgeVaultUnlockedCount(array $items)
+{
+    $count = 0;
+    foreach ($items as $item) {
+        if (!empty($item['unlocked'])) {
+            $count++;
+        }
+    }
+
+    return $count;
+}
+
+function dogsWithJourneyBadgesCount(array $journeyCards)
+{
+    $count = 0;
+    foreach ($journeyCards as $card) {
+        if (trim((string) valueFromRow($card, array('milestone_badge'), '')) !== '') {
+            $count++;
+        }
+    }
+
+    return $count;
+}
+
+
+require_once __DIR__ . '/includes/member-badge-roadmap.php';
+
 ensureDogJourneySchema($pdo);
+ensureBadgeVaultSchema($pdo);
 
 $userId = currentUserId();
 if ($userId <= 0 && !isAdmin()) {
@@ -1337,6 +2052,25 @@ $petCount = count($pets);
 $unreadNotifications = countUnreadNotificationsForUser($pdo, $userId);
 $membershipSummary = getMembershipSummary($pdo, $userId);
 $journeyCards = buildDogJourneyCards($pdo, $userId, $pets, $bookings, $memberCreatedAt);
+
+syncFounderMembershipBadges($pdo, $userId, $membershipSummary);
+syncJourneyMilestoneBadges($pdo, $userId, $journeyCards);
+
+$badgeProgressSnapshot = buildMemberBadgeProgressSnapshot($journeyCards, $bookings, $membershipSummary, $memberCreatedAt);
+syncRoadmapAutoBadges($pdo, $userId, $badgeProgressSnapshot);
+
+$founderBadgeCollection = buildFounderBadgeVault($pdo, $userId, $membershipSummary);
+$journeyBadgeVault = buildJourneyBadgeVault($pdo, $userId);
+$roadmapBadgeVault = buildRoadmapBadgeVault($pdo, $userId);
+$rewardTierSnapshot = buildRewardTierSnapshot($pdo, $userId);
+$journeyMilestoneCollection = (array) valueFromRow($journeyBadgeVault, array('milestone_collection'), array());
+$customJourneyBadgeCollection = (array) valueFromRow($journeyBadgeVault, array('custom_collection'), array());
+$roadmapBadgeSections = (array) valueFromRow($roadmapBadgeVault, array('sections'), array());
+$founderBadgeUnlockTotal = badgeVaultUnlockedCount($founderBadgeCollection);
+$journeyBadgeUnlockTotal = (int) valueFromRow($journeyBadgeVault, array('unlocked_count'), 0);
+$roadmapBadgeUnlockTotal = (int) valueFromRow($roadmapBadgeVault, array('unlocked_count'), 0);
+$dogsWithJourneyBadges = dogsWithJourneyBadgesCount($journeyCards);
+$totalUnlockedBadgeCount = (int) valueFromRow($rewardTierSnapshot, array('total_unlocked'), 0);
 
 $statusCounts = array(
     'pending' => 0,
@@ -1582,11 +2316,18 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             margin-bottom: 22px;
         }
 
+        .journey-showcase {
+            display: grid;
+            grid-template-columns: minmax(0, 1.75fr) minmax(320px, 0.9fr);
+            gap: 18px;
+            margin-top: 18px;
+            align-items: start;
+        }
+
         .journey-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 16px;
-            margin-top: 18px;
         }
 
         .journey-item {
@@ -1684,6 +2425,346 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             border: 1px solid rgba(255,255,255,0.06);
             color: rgba(244,241,234,0.74);
             line-height: 1.65;
+        }
+
+
+        .badge-case {
+            padding: 18px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.035);
+            border: 1px solid rgba(255,255,255,0.06);
+            display: grid;
+            gap: 16px;
+            position: sticky;
+            top: 18px;
+        }
+
+        .badge-case-top {
+            display: grid;
+            gap: 8px;
+        }
+
+        .badge-case-title {
+            font-size: 1.08rem;
+            font-weight: 900;
+        }
+
+        .badge-case-sub {
+            color: rgba(244,241,234,0.7);
+            line-height: 1.6;
+            font-size: .92rem;
+        }
+
+        .badge-case-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .badge-case-metric {
+            padding: 12px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .badge-case-metric-label {
+            color: rgba(244,241,234,0.56);
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            font-size: .66rem;
+            font-weight: 800;
+            margin-bottom: 8px;
+        }
+
+        .badge-case-metric-value {
+            font-size: 1.08rem;
+            font-weight: 900;
+        }
+
+        .badge-case-section {
+            display: grid;
+            gap: 12px;
+        }
+
+        .badge-case-section-title {
+            font-size: .92rem;
+            font-weight: 900;
+            color: rgba(244,241,234,0.9);
+        }
+
+        .badge-case-grid {
+            display: grid;
+            gap: 12px;
+        }
+
+        .badge-case-item {
+            padding: 14px;
+            border-radius: 18px;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.04);
+            display: grid;
+            gap: 10px;
+        }
+
+        .badge-case-item.locked {
+            opacity: .55;
+            background: rgba(255,255,255,0.02);
+        }
+
+        .badge-case-item-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .badge-case-mark {
+            width: 46px;
+            height: 46px;
+            border-radius: 14px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: .95rem;
+            font-weight: 900;
+            letter-spacing: .08em;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.05);
+            color: #fff;
+        }
+
+        .badge-tier-walk .badge-case-mark {
+            background: linear-gradient(135deg, rgba(177,140,78,0.28), rgba(226,196,141,0.14));
+            color: #f4dfb1;
+        }
+
+        .badge-tier-care .badge-case-mark {
+            background: linear-gradient(135deg, rgba(110,145,205,0.24), rgba(169,198,255,0.12));
+            color: #d8e6ff;
+        }
+
+        .badge-tier-elite .badge-case-mark {
+            background: linear-gradient(135deg, rgba(152,109,228,0.28), rgba(230,204,255,0.12));
+            color: #ecd8ff;
+        }
+
+        .badge-tier-journey .badge-case-mark {
+            background: linear-gradient(135deg, rgba(198,178,139,0.28), rgba(245,224,186,0.12));
+            color: #f7e7c6;
+        }
+
+        .badge-tier-journey-custom .badge-case-mark {
+            background: linear-gradient(135deg, rgba(118,154,206,0.26), rgba(208,226,255,0.12));
+            color: #dce9ff;
+        }
+
+        .badge-tier-service-walk .badge-case-mark {
+            background: linear-gradient(135deg, rgba(214,179,93,0.26), rgba(255,232,178,0.08));
+            color: #ffe6a8;
+        }
+
+        .badge-tier-service-daycare .badge-case-mark {
+            background: linear-gradient(135deg, rgba(138,110,255,0.28), rgba(198,183,255,0.08));
+            color: #ece6ff;
+        }
+
+        .badge-tier-service-boarding .badge-case-mark {
+            background: linear-gradient(135deg, rgba(88,148,255,0.28), rgba(189,219,255,0.08));
+            color: #e4f1ff;
+        }
+
+        .badge-tier-service-dropin .badge-case-mark {
+            background: linear-gradient(135deg, rgba(76,190,171,0.28), rgba(193,255,242,0.08));
+            color: #dbfff8;
+        }
+
+        .badge-tier-service-sitting .badge-case-mark {
+            background: linear-gradient(135deg, rgba(219,133,94,0.28), rgba(255,217,191,0.08));
+            color: #fff0e1;
+        }
+
+        .badge-tier-service-multi .badge-case-mark {
+            background: linear-gradient(135deg, rgba(244,196,48,0.22), rgba(124,92,255,0.18));
+            color: #fff1c6;
+        }
+
+        .badge-tier-loyalty .badge-case-mark {
+            background: linear-gradient(135deg, rgba(132,221,118,0.24), rgba(228,255,214,0.08));
+            color: #ecffe3;
+        }
+
+        .badge-case-tier {
+            display: grid;
+            gap: 12px;
+            padding: 16px;
+            border-radius: 18px;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.04);
+        }
+
+        .badge-case-tier-top,
+        .badge-case-tier-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .badge-case-tier-label {
+            color: rgba(244,241,234,0.56);
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            font-size: .66rem;
+            font-weight: 800;
+            margin-bottom: 8px;
+        }
+
+        .badge-case-tier-name {
+            font-size: 1.1rem;
+            font-weight: 900;
+            color: #f7ead2;
+        }
+
+        .badge-case-tier-count {
+            font-size: .86rem;
+            font-weight: 800;
+            color: rgba(244,241,234,0.72);
+        }
+
+        .badge-case-tier-copy,
+        .badge-case-tier-reward,
+        .badge-case-tier-meta {
+            color: rgba(244,241,234,0.72);
+            font-size: .86rem;
+            line-height: 1.6;
+        }
+
+        .badge-case-tier-track {
+            position: relative;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.08);
+            overflow: hidden;
+        }
+
+        .badge-case-tier-fill {
+            display: block;
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(135deg, rgba(214,179,93,0.92), rgba(255,232,178,0.92));
+        }
+
+        .reward-tier-bronze .badge-case-tier-fill {
+            background: linear-gradient(135deg, rgba(173,119,74,0.95), rgba(238,188,136,0.95));
+        }
+
+        .reward-tier-silver .badge-case-tier-fill {
+            background: linear-gradient(135deg, rgba(156,168,184,0.95), rgba(231,237,245,0.95));
+        }
+
+        .reward-tier-gold .badge-case-tier-fill {
+            background: linear-gradient(135deg, rgba(214,179,93,0.95), rgba(255,232,178,0.95));
+        }
+
+        .reward-tier-platinum .badge-case-tier-fill {
+            background: linear-gradient(135deg, rgba(140,145,255,0.95), rgba(228,230,255,0.95));
+        }
+
+        .reward-tier-blacktag .badge-case-tier-fill {
+            background: linear-gradient(135deg, rgba(36,36,36,0.98), rgba(214,179,93,0.95));
+        }
+
+        .badge-case-state {
+            padding: 7px 10px;
+            border-radius: 999px;
+            font-size: .73rem;
+            font-weight: 900;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: rgba(244,241,234,0.82);
+        }
+
+        .badge-case-name {
+            font-size: .98rem;
+            font-weight: 900;
+        }
+
+        .badge-case-membership {
+            color: rgba(244,241,234,0.72);
+            font-size: .84rem;
+            font-weight: 800;
+        }
+
+        .badge-case-desc,
+        .badge-case-meta {
+            color: rgba(244,241,234,0.68);
+            line-height: 1.58;
+            font-size: .88rem;
+        }
+
+        .badge-case-reward {
+            color: rgba(243,223,177,0.84);
+            line-height: 1.55;
+            font-size: .79rem;
+            font-weight: 700;
+            padding-top: 2px;
+        }
+
+        .badge-case-list {
+            display: grid;
+            gap: 10px;
+        }
+
+        .badge-case-list-item {
+            padding: 13px 14px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            display: grid;
+            gap: 8px;
+        }
+
+        .badge-case-list-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .badge-case-list-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .badge-case-list-name {
+            font-size: .92rem;
+            font-weight: 900;
+        }
+
+        .badge-case-count {
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: rgba(198,178,139,0.16);
+            border: 1px solid rgba(198,178,139,0.24);
+            color: #f3e5c7;
+            font-size: .72rem;
+            font-weight: 900;
+        }
+
+        .badge-case-empty {
+            padding: 14px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.03);
+            border: 1px dashed rgba(255,255,255,0.12);
+            color: rgba(244,241,234,0.64);
+            line-height: 1.6;
+            font-size: .9rem;
         }
 
         .dashboard-grid {
@@ -1878,11 +2959,17 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
         @media (max-width: 1180px) {
             .hero,
             .dashboard-grid,
+            .journey-showcase,
             .journey-grid {
                 grid-template-columns: 1fr;
             }
 
-            .journey-stats {
+            .badge-case {
+                position: static;
+            }
+
+            .journey-stats,
+            .badge-case-metrics {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
@@ -1891,7 +2978,8 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
             .metrics,
             .stats-grid,
             .quick-grid,
-            .journey-stats {
+            .journey-stats,
+            .badge-case-metrics {
                 grid-template-columns: 1fr;
             }
 
@@ -1970,6 +3058,7 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                     <div class="chip">Total Bookings: <?php echo (int) $totalBookings; ?></div>
                     <div class="chip">Active Services: <?php echo (int) $activeServices; ?></div>
                     <div class="chip">Unread Alerts: <?php echo (int) $unreadNotifications; ?></div>
+                    <div class="chip">Badges Unlocked: <?php echo (int) $totalUnlockedBadgeCount; ?></div>
                     <div class="chip">Paid: <?php echo (int) $paymentCounts['paid']; ?></div>
                     <div class="chip">Pending Payment: <?php echo (int) $paymentCounts['pending']; ?></div>
                     <div class="chip">Unpaid: <?php echo (int) $paymentCounts['unpaid']; ?></div>
@@ -2054,88 +3143,226 @@ $activeServices = $statusCounts['pending'] + $statusCounts['available'] + $statu
                 This premium timeline combines manually seeded pre-launch history with live website bookings so each dog’s journey feels complete from day one.
             </div>
 
-            <?php if (empty($journeyCards)): ?>
-                <div class="empty" style="margin-top:18px;">
-                    No pet profiles are connected yet. Add a pet to begin building your dog’s journey.
-                </div>
-            <?php else: ?>
-                <div class="journey-grid">
-                    <?php foreach ($journeyCards as $card): ?>
-                        <div class="journey-item">
-                            <div class="journey-head">
-                                <div>
-                                    <div class="journey-name"><?php echo h($card['pet_name']); ?></div>
-                                    <div class="journey-sub">
-                                        <?php if ($card['breed'] !== ''): ?>
-                                            <?php echo h($card['breed']); ?>
-                                            <?php if ($card['age'] !== ''): ?> · <?php echo h($card['age']); ?><?php endif; ?>
-                                        <?php elseif ($card['age'] !== ''): ?>
-                                            <?php echo h($card['age']); ?>
-                                        <?php else: ?>
-                                            Dog Journey profile
-                                        <?php endif; ?>
-                                    </div>
-                                </div>
-                                <div class="journey-badge"><?php echo h($card['milestone_badge']); ?></div>
-                            </div>
-
-                            <div class="journey-highlight"><?php echo h($card['journey_highlight']); ?></div>
-
-                            <div class="journey-stats">
-                                <div class="journey-stat">
-                                    <div class="journey-stat-label">Walks</div>
-                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['walk']; ?></div>
-                                </div>
-                                <div class="journey-stat">
-                                    <div class="journey-stat-label">Daycare</div>
-                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['daycare']; ?></div>
-                                </div>
-                                <div class="journey-stat">
-                                    <div class="journey-stat-label">Boarding</div>
-                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['boarding_night']; ?></div>
-                                </div>
-                                <div class="journey-stat">
-                                    <div class="journey-stat-label">Drop-Ins</div>
-                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['drop_in']; ?></div>
-                                </div>
-                                <div class="journey-stat">
-                                    <div class="journey-stat-label">Sitting</div>
-                                    <div class="journey-stat-value"><?php echo (int) $card['counts']['sitting']; ?></div>
-                                </div>
-                            </div>
-
-                            <div class="journey-footer">
-                                <div class="journey-chip">Favorite: <?php echo h($card['favorite_service'] !== '' ? formatServiceLabel($card['favorite_service']) : 'Still unfolding'); ?></div>
-                                <div class="journey-chip">Last Service: <?php echo h($card['last_service_date'] !== '' ? formatDateDisplay($card['last_service_date']) : 'Not yet recorded'); ?></div>
-                                <div class="journey-chip">Total Services: <?php echo (int) $card['total_services']; ?></div>
-                                <div class="journey-chip">Member Since: <?php echo h($card['member_since'] !== '' ? formatDateDisplay($card['member_since']) : 'Welcome'); ?></div>
-                            </div>
-
-                            <?php if (trim((string) $card['journey_note']) !== ''): ?>
-                                <div class="journey-note"><?php echo h($card['journey_note']); ?></div>
-                            <?php endif; ?>
-                            <?php if (!empty($card['journey_entries'])): ?>
-                                <div class="journey-moments">
-                                    <?php foreach ($card['journey_entries'] as $entry): ?>
-                                        <div class="journey-moment">
-                                            <div class="journey-moment-top">
-                                                <div class="journey-moment-label"><?php echo h(dogJourneyMomentLabel($entry)); ?></div>
-                                                <div class="journey-moment-date"><?php echo h(formatDateDisplay((string) valueFromRow($entry, array('entry_date', 'created_at'), ''))); ?></div>
+            <div class="journey-showcase">
+                <div>
+                    <?php if (empty($journeyCards)): ?>
+                        <div class="empty">
+                            No pet profiles are connected yet. Add a pet to begin building your dog’s journey.
+                        </div>
+                    <?php else: ?>
+                        <div class="journey-grid">
+                            <?php foreach ($journeyCards as $card): ?>
+                                <div class="journey-item">
+                                    <div class="journey-head">
+                                        <div>
+                                            <div class="journey-name"><?php echo h($card['pet_name']); ?></div>
+                                            <div class="journey-sub">
+                                                <?php if ($card['breed'] !== ''): ?>
+                                                    <?php echo h($card['breed']); ?>
+                                                    <?php if ($card['age'] !== ''): ?> · <?php echo h($card['age']); ?><?php endif; ?>
+                                                <?php elseif ($card['age'] !== ''): ?>
+                                                    <?php echo h($card['age']); ?>
+                                                <?php else: ?>
+                                                    Dog Journey profile
+                                                <?php endif; ?>
                                             </div>
-                                            <?php if (trim((string) valueFromRow($entry, array('entry_title'), '')) !== ''): ?>
-                                                <div class="journey-moment-title"><?php echo h((string) valueFromRow($entry, array('entry_title'), '')); ?></div>
-                                            <?php endif; ?>
-                                            <?php if (trim((string) valueFromRow($entry, array('entry_body'), '')) !== ''): ?>
-                                                <div class="journey-moment-body"><?php echo h((string) valueFromRow($entry, array('entry_body'), '')); ?></div>
-                                            <?php endif; ?>
                                         </div>
-                                    <?php endforeach; ?>
+                                        <div class="journey-badge"><?php echo h($card['milestone_badge']); ?></div>
+                                    </div>
+
+                                    <div class="journey-highlight"><?php echo h($card['journey_highlight']); ?></div>
+
+                                    <div class="journey-stats">
+                                        <div class="journey-stat">
+                                            <div class="journey-stat-label">Walks</div>
+                                            <div class="journey-stat-value"><?php echo (int) $card['counts']['walk']; ?></div>
+                                        </div>
+                                        <div class="journey-stat">
+                                            <div class="journey-stat-label">Daycare</div>
+                                            <div class="journey-stat-value"><?php echo (int) $card['counts']['daycare']; ?></div>
+                                        </div>
+                                        <div class="journey-stat">
+                                            <div class="journey-stat-label">Boarding</div>
+                                            <div class="journey-stat-value"><?php echo (int) $card['counts']['boarding_night']; ?></div>
+                                        </div>
+                                        <div class="journey-stat">
+                                            <div class="journey-stat-label">Drop-Ins</div>
+                                            <div class="journey-stat-value"><?php echo (int) $card['counts']['drop_in']; ?></div>
+                                        </div>
+                                        <div class="journey-stat">
+                                            <div class="journey-stat-label">Sitting</div>
+                                            <div class="journey-stat-value"><?php echo (int) $card['counts']['sitting']; ?></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="journey-footer">
+                                        <div class="journey-chip">Favorite: <?php echo h($card['favorite_service'] !== '' ? formatServiceLabel($card['favorite_service']) : 'Still unfolding'); ?></div>
+                                        <div class="journey-chip">Last Service: <?php echo h($card['last_service_date'] !== '' ? formatDateDisplay($card['last_service_date']) : 'Not yet recorded'); ?></div>
+                                        <div class="journey-chip">Total Services: <?php echo (int) $card['total_services']; ?></div>
+                                        <div class="journey-chip">Member Since: <?php echo h($card['member_since'] !== '' ? formatDateDisplay($card['member_since']) : 'Welcome'); ?></div>
+                                    </div>
+
+                                    <?php if (trim((string) $card['journey_note']) !== ''): ?>
+                                        <div class="journey-note"><?php echo h($card['journey_note']); ?></div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($card['journey_entries'])): ?>
+                                        <div class="journey-moments">
+                                            <?php foreach ($card['journey_entries'] as $entry): ?>
+                                                <div class="journey-moment">
+                                                    <div class="journey-moment-top">
+                                                        <div class="journey-moment-label"><?php echo h(dogJourneyMomentLabel($entry)); ?></div>
+                                                        <div class="journey-moment-date"><?php echo h(formatDateDisplay((string) valueFromRow($entry, array('entry_date', 'created_at'), ''))); ?></div>
+                                                    </div>
+                                                    <?php if (trim((string) valueFromRow($entry, array('entry_title'), '')) !== ''): ?>
+                                                        <div class="journey-moment-title"><?php echo h((string) valueFromRow($entry, array('entry_title'), '')); ?></div>
+                                                    <?php endif; ?>
+                                                    <?php if (trim((string) valueFromRow($entry, array('entry_body'), '')) !== ''): ?>
+                                                        <div class="journey-moment-body"><?php echo h((string) valueFromRow($entry, array('entry_body'), '')); ?></div>
+                                                    <?php endif; ?>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php endif; ?>
                                 </div>
-                            <?php endif; ?>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+
+                <aside class="badge-case">
+                    <div class="badge-case-top">
+                        <div class="eyebrow">Badge Collection</div>
+                        <div class="badge-case-title">Your Member Badge Vault</div>
+                        <div class="badge-case-sub">
+                            Founder distinctions, journey milestones, service collectibles, and a visible reward tier now live in one shared vault with locked spaces ready for future unlocks.
+                        </div>
+                    </div>
+
+                    <div class="badge-case-tier <?php echo h((string) ($rewardTierSnapshot['theme_class'] ?? '')); ?>">
+                        <div class="badge-case-tier-top">
+                            <div>
+                                <div class="badge-case-tier-label">Visible Reward Tier</div>
+                                <div class="badge-case-tier-name"><?php echo h((string) ($rewardTierSnapshot['current_tier_name'] ?? 'Bronze Collar')); ?></div>
+                            </div>
+                            <div class="badge-case-tier-count"><?php echo (int) ($rewardTierSnapshot['total_unlocked'] ?? 0); ?> badges</div>
+                        </div>
+                        <div class="badge-case-tier-copy"><?php echo h((string) ($rewardTierSnapshot['reward_note'] ?? 'Your reward tier grows as your badge vault expands.')); ?></div>
+                        <div class="badge-case-tier-track">
+                            <span class="badge-case-tier-fill" style="width: <?php echo h((string) ($rewardTierSnapshot['progress_percent'] ?? 0)); ?>%;"></span>
+                        </div>
+                        <div class="badge-case-tier-meta">
+                            <span><?php echo h((string) ($rewardTierSnapshot['range_label'] ?? '0+ badges')); ?></span>
+                            <span><?php echo h((string) ($rewardTierSnapshot['next_tier_message'] ?? '')); ?></span>
+                        </div>
+                    </div>
+
+                    <div class="badge-case-metrics">
+                        <div class="badge-case-metric">
+                            <div class="badge-case-metric-label">Unlocked</div>
+                            <div class="badge-case-metric-value"><?php echo (int) $totalUnlockedBadgeCount; ?></div>
+                        </div>
+                        <div class="badge-case-metric">
+                            <div class="badge-case-metric-label">Founder Badges</div>
+                            <div class="badge-case-metric-value"><?php echo (int) $founderBadgeUnlockTotal; ?>/3</div>
+                        </div>
+                        <div class="badge-case-metric">
+                            <div class="badge-case-metric-label">Journey Badges</div>
+                            <div class="badge-case-metric-value"><?php echo (int) $journeyBadgeUnlockTotal; ?></div>
+                        </div>
+                        <div class="badge-case-metric">
+                            <div class="badge-case-metric-label">Roadmap Badges</div>
+                            <div class="badge-case-metric-value"><?php echo (int) $roadmapBadgeUnlockTotal; ?></div>
+                        </div>
+                    </div>
+
+                    <div class="badge-case-section">
+                        <div class="badge-case-section-title">Founder Membership Badges</div>
+                        <div class="badge-case-grid">
+                            <?php foreach ($founderBadgeCollection as $badge): ?>
+                                <div class="badge-case-item <?php echo !empty($badge['unlocked']) ? 'unlocked' : 'locked'; ?> <?php echo h($badge['theme_class']); ?>">
+                                    <div class="badge-case-item-top">
+                                        <div class="badge-case-mark"><?php echo h($badge['badge_mark']); ?></div>
+                                        <div class="badge-case-state"><?php echo h($badge['status_label']); ?></div>
+                                    </div>
+                                    <div class="badge-case-name"><?php echo h($badge['badge_name']); ?></div>
+                                    <div class="badge-case-membership"><?php echo h($badge['membership_name']); ?></div>
+                                    <div class="badge-case-desc"><?php echo h($badge['description']); ?></div>
+                                    <div class="badge-case-reward"><?php echo h($badge['reward_title']); ?>: <?php echo h($badge['reward_note']); ?></div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <div class="badge-case-section">
+                        <div class="badge-case-section-title">Dog Journey Milestone Badges</div>
+                        <div class="badge-case-grid">
+                            <?php foreach ($journeyMilestoneCollection as $badge): ?>
+                                <div class="badge-case-item <?php echo !empty($badge['unlocked']) ? 'unlocked' : 'locked'; ?> <?php echo h($badge['theme_class']); ?>">
+                                    <div class="badge-case-item-top">
+                                        <div class="badge-case-mark"><?php echo h($badge['badge_mark']); ?></div>
+                                        <div class="badge-case-state"><?php echo h($badge['status_label']); ?></div>
+                                    </div>
+                                    <div class="badge-case-name"><?php echo h($badge['badge_name']); ?></div>
+                                    <div class="badge-case-desc"><?php echo h($badge['description']); ?></div>
+                                    <?php if (!empty($badge['pet_names'])): ?>
+                                        <div class="badge-case-meta">Earned by: <?php echo h(implode(', ', $badge['pet_names'])); ?></div>
+                                    <?php else: ?>
+                                        <div class="badge-case-meta">This slot stays locked until one of your dogs reaches this milestone.</div>
+                                    <?php endif; ?>
+                                    <div class="badge-case-reward"><?php echo h($badge['reward_title']); ?>: <?php echo h($badge['reward_note']); ?></div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <?php foreach ($roadmapBadgeSections as $section): ?>
+                        <div class="badge-case-section">
+                            <div class="badge-case-section-title"><?php echo h((string) ($section['title'] ?? 'Badge Collection')); ?> · <?php echo (int) ($section['unlocked_count'] ?? 0); ?>/<?php echo (int) ($section['total_count'] ?? 0); ?></div>
+                            <div class="badge-case-grid">
+                                <?php foreach ((array) ($section['items'] ?? array()) as $badge): ?>
+                                    <div class="badge-case-item <?php echo !empty($badge['unlocked']) ? 'unlocked' : 'locked'; ?> <?php echo h((string) ($badge['theme_class'] ?? '')); ?>">
+                                        <div class="badge-case-item-top">
+                                            <div class="badge-case-mark"><?php echo h((string) ($badge['badge_mark'] ?? 'BDG')); ?></div>
+                                            <div class="badge-case-state"><?php echo h((string) ($badge['status_label'] ?? 'Locked')); ?></div>
+                                        </div>
+                                        <div class="badge-case-name"><?php echo h((string) ($badge['badge_name'] ?? 'Badge')); ?></div>
+                                        <div class="badge-case-desc"><?php echo h((string) ($badge['description'] ?? '')); ?></div>
+                                        <div class="badge-case-reward"><?php echo h((string) ($badge['reward_title'] ?? 'Reward Slot')); ?>: <?php echo h((string) ($badge['reward_note'] ?? 'Ready for future member rewards.')); ?></div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
                         </div>
                     <?php endforeach; ?>
-                </div>
-            <?php endif; ?>
+
+                    <div class="badge-case-section">
+                        <div class="badge-case-section-title">Custom Journey Badges</div>
+                        <?php if (empty($customJourneyBadgeCollection)): ?>
+                            <div class="badge-case-empty">
+                                Custom Dog Journey badges will appear here whenever Doggie Dorian’s manually awards a unique member collectible.
+                            </div>
+                        <?php else: ?>
+                            <div class="badge-case-list">
+                                <?php foreach ($customJourneyBadgeCollection as $badge): ?>
+                                    <div class="badge-case-list-item">
+                                        <div class="badge-case-list-top">
+                                            <div class="badge-case-list-left">
+                                                <div class="badge-case-mark"><?php echo h($badge['badge_mark']); ?></div>
+                                                <div class="badge-case-list-name"><?php echo h($badge['badge_name']); ?></div>
+                                            </div>
+                                            <div class="badge-case-count"><?php echo count($badge['pet_names']); ?> dog<?php echo count($badge['pet_names']) === 1 ? '' : 's'; ?></div>
+                                        </div>
+                                        <div class="badge-case-meta"><?php echo h($badge['description']); ?></div>
+                                        <?php if (!empty($badge['pet_names'])): ?>
+                                            <div class="badge-case-meta">Seen on: <?php echo h(implode(', ', $badge['pet_names'])); ?></div>
+                                        <?php endif; ?>
+                                        <div class="badge-case-reward"><?php echo h($badge['reward_title']); ?>: <?php echo h($badge['reward_note']); ?></div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </aside>
+            </div>
         </section>
 
         <section class="dashboard-grid">

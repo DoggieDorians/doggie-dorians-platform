@@ -421,17 +421,6 @@ $csrfToken = dd_admin_login_csrf_token();
             color:var(--danger-text);
         }
 
-        .helper{
-            margin-top:16px;
-            color:var(--muted);
-            font-size:13px;
-            line-height:1.6;
-        }
-
-        .helper strong{
-            color:var(--text);
-        }
-
         @media (max-width: 920px){
             .wrap{grid-template-columns:1fr;}
             .left{border-right:none;border-bottom:1px solid var(--border);}
@@ -494,7 +483,6 @@ $csrfToken = dd_admin_login_csrf_token();
                         type="email"
                         id="email"
                         name="email"
-                        placeholder="support@doggiedorians.com or admin@doggiedorians.com"
                         value="<?php echo $prefillEmail; ?>"
                         required
                         autocomplete="username"
@@ -527,10 +515,6 @@ $csrfToken = dd_admin_login_csrf_token();
 
                 <button class="btn" type="submit">Enter Admin Dashboard</button>
             </form>
-
-            <div class="helper">
-                This page uses a shared hashed admin password stored in <strong>admin-config.php</strong> and allows both approved admin email addresses.
-            </div>
         </section>
     </div>
 
