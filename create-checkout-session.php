@@ -660,6 +660,65 @@ function merge_context(array $primary, array $fallback): array
     return $primary;
 }
 
+function non_member_public_service_allowed(string $serviceType): bool
+{
+    return in_array(normalize_service_type($serviceType), ['walk', 'drop_in', 'sitting'], true);
+}
+
+function find_non_member_request_record(PDO $pdo, int $requestId): ?array
+{
+    if ($requestId <= 0) {
+        return null;
+    }
+
+    $tableConfigs = [
+        [
+            'table' => 'non_member_bookings',
+            'id_candidates' => ['id'],
+        ],
+        [
+            'table' => 'public_booking_requests',
+            'id_candidates' => ['id', 'request_id'],
+        ],
+    ];
+
+    foreach ($tableConfigs as $config) {
+        try {
+            $table = (string) $config['table'];
+            $columns = getTableColumns($pdo, $table);
+
+            if (empty($columns)) {
+                continue;
+            }
+
+            $idColumn = first_existing_column($columns, $config['id_candidates']);
+            if ($idColumn === null) {
+                continue;
+            }
+
+            $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE {$idColumn} = :id LIMIT 1");
+            if (!safeExecute($stmt, [':id' => $requestId])) {
+                continue;
+            }
+
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (is_array($row)) {
+                return [
+                    'table' => $table,
+                    'id_column' => $idColumn,
+                    'row' => $row,
+                ];
+            }
+        } catch (Throwable $e) {
+            continue;
+        } catch (Exception $e) {
+            continue;
+        }
+    }
+
+    return null;
+}
+
 function mark_non_member_pending(PDO $pdo, int $requestId): void
 {
     if ($requestId <= 0) {
@@ -1043,26 +1102,54 @@ if ($mode === 'non_member') {
         $sessionPortal = [];
     }
 
-    $requestId = (int) ($sessionPortal['request_id'] ?? 0);
-    $serviceType = normalize_service_type((string) ($sessionPortal['service_type'] ?? $_POST['service_type'] ?? ''));
-    $dogSize = normalize_dog_size((string) ($sessionPortal['dog_size'] ?? $_POST['dog_size'] ?? ''));
-    $dateStart = trim((string) ($sessionPortal['date_start'] ?? $_POST['date_start'] ?? ''));
-    $dateEnd = trim((string) ($sessionPortal['date_end'] ?? $_POST['date_end'] ?? ''));
-    $walkDuration = (int) ($sessionPortal['walk_duration'] ?? $_POST['walk_duration'] ?? 0);
-    $dropInHours = (int) ($sessionPortal['drop_in_hours'] ?? $_POST['drop_in_hours'] ?? 1);
-    $dropInAddWalk = (string) ($sessionPortal['drop_in_add_walk'] ?? $_POST['drop_in_add_walk'] ?? '') === '1';
-    $daycareProvideFood = (string) ($sessionPortal['daycare_provide_food'] ?? $_POST['daycare_provide_food'] ?? '') === '1';
-    $daycareExtraWalks = (int) ($sessionPortal['daycare_extra_walks'] ?? $_POST['daycare_extra_walks'] ?? 0);
-    $sittingExtraWalks = (int) ($sessionPortal['sitting_extra_walks'] ?? $_POST['sitting_extra_walks'] ?? 0);
-    $fullName = trim((string) ($sessionPortal['full_name'] ?? $_POST['full_name'] ?? ''));
-    $email = trim((string) ($sessionPortal['email'] ?? $_POST['email'] ?? ''));
-    $phone = trim((string) ($sessionPortal['phone'] ?? $_POST['phone'] ?? ''));
-    $dogName = trim((string) ($sessionPortal['dog_name'] ?? $_POST['dog_name'] ?? ''));
-    $pricingType = trim((string) ($sessionPortal['pricing_type'] ?? $_POST['pricing_type'] ?? 'non_member'));
-    $discountLabel = trim((string) ($sessionPortal['discount_label'] ?? $_POST['discount_label'] ?? 'standard_non_member'));
+    $requestId = (int) ($_POST['request_id'] ?? $sessionPortal['request_id'] ?? 0);
 
-    if ($serviceType === '') {
-        failPage('Invalid non-member booking details.', 400, 'non-member-booking.php');
+    if ($requestId <= 0) {
+        failPage('Missing non-member booking reference.', 400, 'non-member-booking.php');
+    }
+
+    $requestRecord = find_non_member_request_record($pdo, $requestId);
+    if ($requestRecord === null) {
+        failPage('That non-member booking request could not be found.', 404, 'non-member-booking.php');
+    }
+
+    $requestRow = is_array($requestRecord['row'] ?? null) ? $requestRecord['row'] : [];
+
+    $serviceType = normalize_service_type((string) row_first_value($requestRow, ['service_type', 'type', 'booking_type'], $sessionPortal['service_type'] ?? $_POST['service_type'] ?? ''));
+    $dogSize = normalize_dog_size((string) row_first_value($requestRow, ['dog_size', 'pet_size', 'size'], $sessionPortal['dog_size'] ?? $_POST['dog_size'] ?? ''));
+    $dateStart = trim((string) row_first_value($requestRow, ['date_start', 'start_date', 'booking_date', 'service_date'], $sessionPortal['date_start'] ?? $_POST['date_start'] ?? ''));
+    $dateEnd = trim((string) row_first_value($requestRow, ['date_end', 'end_date', 'check_out_date'], $sessionPortal['date_end'] ?? $_POST['date_end'] ?? ''));
+    $walkDuration = row_first_int($requestRow, ['walk_duration', 'duration_minutes', 'duration'], (int) ($sessionPortal['walk_duration'] ?? $_POST['walk_duration'] ?? 0));
+    $dropInHours = row_first_int($requestRow, ['drop_in_hours', 'quantity'], (int) ($sessionPortal['drop_in_hours'] ?? $_POST['drop_in_hours'] ?? 1));
+    $dropInAddWalk = (string) row_first_value($requestRow, ['drop_in_add_walk'], $sessionPortal['drop_in_add_walk'] ?? $_POST['drop_in_add_walk'] ?? '') === '1';
+    $sittingExtraWalks = row_first_int($requestRow, ['sitting_extra_walks'], (int) ($sessionPortal['sitting_extra_walks'] ?? $_POST['sitting_extra_walks'] ?? 0));
+
+    $fullName = trim((string) row_first_value($requestRow, ['full_name', 'name'], $sessionPortal['full_name'] ?? $_POST['full_name'] ?? ''));
+    $email = trim((string) row_first_value($requestRow, ['email'], $sessionPortal['email'] ?? $_POST['email'] ?? ''));
+    $phone = trim((string) row_first_value($requestRow, ['phone'], $sessionPortal['phone'] ?? $_POST['phone'] ?? ''));
+    $dogName = trim((string) row_first_value($requestRow, ['dog_name', 'pet_name'], $sessionPortal['dog_name'] ?? $_POST['dog_name'] ?? ''));
+    $pricingType = trim((string) row_first_value($requestRow, ['pricing_type'], $sessionPortal['pricing_type'] ?? $_POST['pricing_type'] ?? 'non_member'));
+    $discountLabel = trim((string) row_first_value($requestRow, ['discount_label'], $sessionPortal['discount_label'] ?? $_POST['discount_label'] ?? 'standard_non_member'));
+
+    $storedQuantity = row_first_int($requestRow, ['quantity'], (int) ($sessionPortal['quantity'] ?? 0));
+    $storedUnitPrice = row_first_float($requestRow, ['unit_price'], (float) ($sessionPortal['unit_price'] ?? 0));
+    $storedOriginalAmount = row_first_float($requestRow, ['original_price', 'original_amount', 'subtotal_amount'], (float) ($sessionPortal['original_total_amount'] ?? 0));
+    $storedDiscountAmount = row_first_float($requestRow, ['discount_amount', 'ambassador_discount_amount'], (float) ($sessionPortal['discount_amount'] ?? 0));
+    $storedFinalAmount = row_first_float($requestRow, ['final_price', 'final_amount', 'estimated_price', 'total_amount'], (float) ($sessionPortal['final_total_amount'] ?? $sessionPortal['total_amount'] ?? 0));
+
+    $ambassadorCode = strtoupper(trim((string) row_first_value($requestRow, ['ambassador_code', 'referral_code', 'promo_code'], $sessionPortal['ambassador_code'] ?? '')));
+    $referringMemberId = row_first_int($requestRow, ['referring_member_id', 'referrer_member_id'], (int) ($sessionPortal['referring_member_id'] ?? 0));
+    $referringUserId = row_first_int($requestRow, ['referring_user_id', 'referrer_user_id'], (int) ($sessionPortal['referring_user_id'] ?? 0));
+    $referralStatus = trim((string) row_first_value($requestRow, ['referral_status', 'status'], $sessionPortal['referral_status'] ?? ''));
+    $referralRewardAmount = round(row_first_float($requestRow, ['reward_amount', 'credit_amount', 'ambassador_credit_amount'], (float) ($sessionPortal['referral_reward_amount'] ?? 0)), 2);
+    $referralIp = trim((string) row_first_value($requestRow, ['referral_ip', 'client_ip', 'ip_address'], $sessionPortal['referral_ip'] ?? ''));
+
+    if (!non_member_public_service_allowed($serviceType)) {
+        failPage(
+            'Daycare and boarding are currently included only through founder packages while availability remains.',
+            400,
+            'non-member-booking.php'
+        );
     }
 
     try {
@@ -1083,29 +1170,9 @@ if ($mode === 'non_member') {
                 'quantity' => $dropInHours,
                 'add_walk' => $dropInAddWalk,
             ]);
-        } elseif ($serviceType === 'daycare') {
-            $pricing = dd_get_service_pricing('daycare', false, [
-                'provide_food' => $daycareProvideFood,
-                'extra_walks' => $daycareExtraWalks,
-            ]);
         } elseif ($serviceType === 'sitting') {
             $pricing = dd_get_service_pricing('sitting', false, [
                 'extra_walks' => $sittingExtraWalks,
-            ]);
-        } elseif ($serviceType === 'boarding') {
-            if ($dogSize === '' || $dateStart === '' || $dateEnd === '') {
-                throw new Exception('Boarding requires size, check-in date, and check-out date.');
-            }
-
-            $nights = dd_calculate_boarding_nights($dateStart, $dateEnd);
-
-            if ($nights <= 0) {
-                throw new Exception('Boarding requires a valid date range.');
-            }
-
-            $pricing = dd_get_service_pricing('boarding', false, [
-                'dog_size' => $dogSize,
-                'quantity' => $nights,
             ]);
         } else {
             throw new Exception('Unsupported non-member service.');
@@ -1122,34 +1189,32 @@ if ($mode === 'non_member') {
     $unitPrice = (float) ($pricing['unit_price'] ?? 0);
     $quantity = (int) ($pricing['quantity'] ?? 0);
 
+    if ($storedQuantity > 0) {
+        $quantity = $storedQuantity;
+    }
+
+    if ($storedUnitPrice > 0) {
+        $unitPrice = $storedUnitPrice;
+    }
+
     if ($originalAmount <= 0 || $quantity <= 0) {
         failPage('Invalid non-member total.', 400, 'non-member-booking.php');
     }
 
-    $ambassadorCode = strtoupper(trim((string) ($sessionPortal['ambassador_code'] ?? '')));
-    $referringMemberId = (int) ($sessionPortal['referring_member_id'] ?? 0);
-    $referringUserId = (int) ($sessionPortal['referring_user_id'] ?? 0);
-    $referralStatus = trim((string) ($sessionPortal['referral_status'] ?? ''));
-    $referralRewardAmount = round((float) ($sessionPortal['referral_reward_amount'] ?? 0), 2);
-    $referralIp = trim((string) ($sessionPortal['referral_ip'] ?? ''));
-    $sessionOriginalAmount = round((float) ($sessionPortal['original_total_amount'] ?? 0), 2);
-    $sessionDiscountAmount = round((float) ($sessionPortal['discount_amount'] ?? 0), 2);
-    $sessionFinalAmount = round((float) ($sessionPortal['final_total_amount'] ?? $sessionPortal['total_amount'] ?? 0), 2);
-
     $discountAmount = 0.00;
     $amount = round($originalAmount, 2);
 
-    if ($ambassadorCode !== '' && $referringMemberId > 0 && $sessionDiscountAmount > 0) {
-        $discountAmount = min($sessionDiscountAmount, $amount);
+    if ($ambassadorCode !== '' && ($referringMemberId > 0 || $referringUserId > 0) && $storedDiscountAmount > 0) {
+        $discountAmount = min($storedDiscountAmount, $amount);
         $amount = round($amount - $discountAmount, 2);
     }
 
-    if ($sessionOriginalAmount > 0 && abs($sessionOriginalAmount - $originalAmount) < 0.01) {
-        $originalAmount = $sessionOriginalAmount;
+    if ($storedOriginalAmount > 0 && abs($storedOriginalAmount - $originalAmount) < 0.01) {
+        $originalAmount = $storedOriginalAmount;
     }
 
-    if ($sessionFinalAmount > 0 && abs($sessionFinalAmount - $amount) < 0.01) {
-        $amount = $sessionFinalAmount;
+    if ($storedFinalAmount > 0 && abs($storedFinalAmount - $amount) < 0.01) {
+        $amount = $storedFinalAmount;
     }
 
     if ($amount <= 0) {
@@ -1166,10 +1231,6 @@ if ($mode === 'non_member') {
 
     if ($serviceType === 'walk' && $walkDuration > 0) {
         $checkoutName .= ' - ' . $walkDuration . ' Minutes';
-    }
-
-    if ($serviceType === 'boarding' && $dogSize !== '') {
-        $checkoutName .= ' - ' . ucfirst($dogSize);
     }
 
     if ($ambassadorCode !== '' && $discountAmount > 0) {

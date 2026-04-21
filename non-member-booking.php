@@ -73,7 +73,6 @@ function old_value(array $formData, string $key): string
 
 $pricingMatrix = dd_pricing_matrix();
 $dropInConfig = dd_get_drop_in_config(false);
-$daycareConfig = dd_get_daycare_config(false);
 $sittingConfig = dd_get_sitting_config(false);
 
 $clientPricingData = [
@@ -90,15 +89,6 @@ $clientPricingData = [
         'max_hours' => (int) $dropInConfig['max_hours'],
         'walk_duration_minutes' => (int) $dropInConfig['walk_duration_minutes'],
     ],
-    'daycare' => [
-        'base_rate' => (float) $daycareConfig['base_rate'],
-        'hours' => (int) $daycareConfig['hours'],
-        'food_fee' => (float) $daycareConfig['food_fee'],
-        'included_walks' => (int) $daycareConfig['included_walks'],
-        'included_walk_duration_minutes' => (int) $daycareConfig['included_walk_duration_minutes'],
-        'additional_walk_rate' => (float) $daycareConfig['additional_walk_rate'],
-        'additional_walk_duration_minutes' => (int) $daycareConfig['additional_walk_duration_minutes'],
-    ],
     'sitting' => [
         'base_rate' => (float) $sittingConfig['base_rate'],
         'hours' => (int) $sittingConfig['hours'],
@@ -106,11 +96,6 @@ $clientPricingData = [
         'included_walk_duration_minutes' => (int) $sittingConfig['included_walk_duration_minutes'],
         'additional_walk_rate' => (float) $sittingConfig['additional_walk_rate'],
         'additional_walk_duration_minutes' => (int) $sittingConfig['additional_walk_duration_minutes'],
-    ],
-    'boarding' => [
-        'small' => (float) $pricingMatrix['boarding']['non_member']['small'],
-        'medium' => (float) $pricingMatrix['boarding']['non_member']['medium'],
-        'large' => (float) $pricingMatrix['boarding']['non_member']['large'],
     ],
 ];
 ?>
@@ -120,7 +105,7 @@ $clientPricingData = [
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Non-Member Booking | Doggie Dorian’s</title>
-  <meta name="description" content="Book non-member dog walks, drop-ins, daycare, in-home sitting, and boarding with Doggie Dorian’s. Premium service with transparent pricing and a luxury booking experience.">
+  <meta name="description" content="Book non-member dog walks, drop-ins, and in-home sitting with Doggie Dorian’s. Premium service with transparent pricing and a luxury booking experience. Daycare and boarding are currently available only through founder packages while availability remains.">
 
   <style>
     * {
@@ -451,7 +436,7 @@ $clientPricingData = [
 
     .pricing-grid {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       gap: 20px;
     }
 
@@ -818,20 +803,6 @@ $clientPricingData = [
   <script>
     const DD_PRICING = <?php echo json_encode($clientPricingData, JSON_UNESCAPED_SLASHES); ?>;
 
-    function nightsBetween(start, end) {
-      if (!start || !end) return 0;
-
-      const startDate = new Date(start + 'T00:00:00');
-      const endDate = new Date(end + 'T00:00:00');
-
-      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || endDate <= startDate) {
-        return 0;
-      }
-
-      const diff = endDate.getTime() - startDate.getTime();
-      return Math.floor(diff / 86400000);
-    }
-
     function money(value) {
       return '$' + Number(value || 0).toFixed(2);
     }
@@ -851,54 +822,22 @@ $clientPricingData = [
     function updateBookingFormUI() {
       const serviceType = document.getElementById('service_type').value;
       const walkFields = document.querySelectorAll('.walk-only');
-      const boardingFields = document.querySelectorAll('.boarding-only');
       const dropInPanel = document.getElementById('dropin_panel');
-      const daycarePanel = document.getElementById('daycare_panel');
       const sittingPanel = document.getElementById('sitting_panel');
-      const dogSizeWrap = document.getElementById('dog_size_wrap');
-      const endDateWrap = document.getElementById('date_end_wrap');
-      const endDateLabel = document.getElementById('date_end_label');
-      const endDateHelper = document.getElementById('date_end_helper');
 
       walkFields.forEach(el => {
         el.classList.toggle('hidden', serviceType !== 'Walk');
       });
 
-      boardingFields.forEach(el => {
-        el.classList.toggle('hidden', serviceType !== 'Boarding');
-      });
-
-      if (dogSizeWrap) {
-        dogSizeWrap.classList.toggle('hidden', serviceType !== 'Boarding');
-      }
-
       if (dropInPanel) {
         dropInPanel.classList.toggle('hidden', serviceType !== 'Drop-In');
-      }
-
-      if (daycarePanel) {
-        daycarePanel.classList.toggle('hidden', serviceType !== 'Daycare');
       }
 
       if (sittingPanel) {
         sittingPanel.classList.toggle('hidden', serviceType !== 'Sitting');
       }
 
-      if (endDateWrap) {
-        endDateWrap.classList.toggle('hidden', serviceType !== 'Boarding');
-      }
-
-      if (endDateLabel) {
-        endDateLabel.textContent = 'Check-Out Date';
-      }
-
-      if (endDateHelper) {
-        endDateHelper.textContent = 'Boarding total uses nights. Example: April 1 to April 6 = 5 boarding nights.';
-      }
-
       setFieldRequired('walk_duration', serviceType === 'Walk');
-      setFieldRequired('dog_size', serviceType === 'Boarding');
-      setFieldRequired('date_end', serviceType === 'Boarding');
 
       updateEstimatedPrice();
     }
@@ -906,17 +845,11 @@ $clientPricingData = [
     function updateEstimatedPrice() {
       const serviceType = document.getElementById('service_type').value;
       const walkDuration = document.getElementById('walk_duration').value;
-      const dogSizeValue = document.getElementById('dog_size').value;
-      const dateStart = document.getElementById('date_start').value;
-      const dateEnd = document.getElementById('date_end').value;
       const dropInHours = parseInt(document.getElementById('drop_in_hours').value || '1', 10);
       const dropInAddWalk = document.getElementById('drop_in_add_walk').checked;
-      const daycareProvideFood = document.getElementById('daycare_provide_food').checked;
-      const daycareExtraWalks = parseInt(document.getElementById('daycare_extra_walks').value || '0', 10);
       const sittingExtraWalks = parseInt(document.getElementById('sitting_extra_walks').value || '0', 10);
       const ambassadorCode = trimmedValue('ambassador_code');
 
-      const dogSize = String(dogSizeValue || '').toLowerCase();
       const estimateField = document.getElementById('estimated_price');
       const originalPriceField = document.getElementById('original_price');
       const ambassadorDiscountAmountField = document.getElementById('ambassador_discount_amount');
@@ -968,30 +901,6 @@ $clientPricingData = [
         discountLabel = 'non_member_dropin_hourly_custom';
       }
 
-      if (serviceType === 'Daycare') {
-        unitPrice = Number(DD_PRICING.daycare.base_rate);
-        quantity = 1;
-        total = unitPrice;
-
-        if (daycareProvideFood) {
-          total += Number(DD_PRICING.daycare.food_fee);
-        }
-
-        if (daycareExtraWalks > 0) {
-          total += Number(DD_PRICING.daycare.additional_walk_rate) * daycareExtraWalks;
-        }
-
-        label = money(total) + ' live price for one 6-hour daycare session.';
-        meta = money(unitPrice) + ' base for ' + DD_PRICING.daycare.hours + ' hours';
-        if (daycareProvideFood) {
-          meta += ' · +' + money(DD_PRICING.daycare.food_fee) + ' food';
-        }
-        if (daycareExtraWalks > 0) {
-          meta += ' · +' + daycareExtraWalks + ' extra walk(s)';
-        }
-        discountLabel = 'non_member_daycare_6hr_custom';
-      }
-
       if (serviceType === 'Sitting') {
         unitPrice = Number(DD_PRICING.sitting.base_rate);
         quantity = 1;
@@ -1007,24 +916,6 @@ $clientPricingData = [
           meta += ' · +' + sittingExtraWalks + ' extra walk(s)';
         }
         discountLabel = 'non_member_sitting_custom';
-      }
-
-      if (serviceType === 'Boarding') {
-        if (DD_PRICING.boarding[dogSize]) {
-          unitPrice = Number(DD_PRICING.boarding[dogSize]);
-          quantity = nightsBetween(dateStart, dateEnd);
-
-          if (quantity > 0) {
-            total = unitPrice * quantity;
-            label = money(total) + ' live price for ' + quantity + ' boarding night' + (quantity === 1 ? '' : 's') + '.';
-            meta = money(unitPrice) + ' per night · ' + quantity + ' night' + (quantity === 1 ? '' : 's');
-            discountLabel = 'standard_non_member';
-          } else {
-            total = 0;
-            label = 'Select a valid boarding date range to view live pricing.';
-            meta = money(unitPrice) + ' per night';
-          }
-        }
       }
 
       originalTotal = total > 0 ? total : 0;
@@ -1087,9 +978,6 @@ $clientPricingData = [
     function validateBookingForSubmit() {
       const serviceType = document.getElementById('service_type').value;
       const walkDuration = document.getElementById('walk_duration').value;
-      const dogSize = document.getElementById('dog_size').value;
-      const dateStart = document.getElementById('date_start').value;
-      const dateEnd = document.getElementById('date_end').value;
       const estimatedPrice = document.getElementById('estimated_price').value;
 
       if (!serviceType) {
@@ -1100,23 +988,6 @@ $clientPricingData = [
       if (serviceType === 'Walk' && !walkDuration) {
         alert('Please choose a walk duration.');
         return false;
-      }
-
-      if (serviceType === 'Boarding') {
-        if (!dogSize) {
-          alert('Please choose your dog size for boarding.');
-          return false;
-        }
-
-        if (!dateEnd) {
-          alert('Please choose a check-out date for boarding.');
-          return false;
-        }
-
-        if (nightsBetween(dateStart, dateEnd) <= 0) {
-          alert('Please choose a valid boarding date range.');
-          return false;
-        }
       }
 
       if (!estimatedPrice || Number(estimatedPrice) <= 0) {
@@ -1133,13 +1004,9 @@ $clientPricingData = [
       [
         'service_type',
         'walk_duration',
-        'dog_size',
         'date_start',
-        'date_end',
         'drop_in_hours',
         'drop_in_add_walk',
-        'daycare_provide_food',
-        'daycare_extra_walks',
         'sitting_extra_walks',
         'ambassador_code'
       ].forEach(function(id) {
@@ -1207,13 +1074,13 @@ $clientPricingData = [
                 Book premium care without a <span>membership</span>.
               </h1>
               <p>
-                This page is built for clients who want one-time or occasional bookings for walks, drop-ins, daycare, in-home sitting, or boarding while still experiencing the elevated Doggie Dorian’s brand.
+                This page is built for clients who want one-time or occasional bookings for walks, drop-ins, or in-home sitting while still experiencing the elevated Doggie Dorian’s brand. Daycare and boarding are currently included only through founder packages while availability remains, with full-time access for other clients coming soon.
               </p>
 
               <div class="hero-pills">
                 <div class="hero-pill">Luxury booking experience</div>
                 <div class="hero-pill">Transparent pricing</div>
-                <div class="hero-pill">Walks, drop-ins, daycare, sitting, and boarding</div>
+                <div class="hero-pill">Walks, drop-ins, and sitting</div>
                 <div class="hero-pill">Live pricing updates</div>
               </div>
             </div>
@@ -1223,15 +1090,15 @@ $clientPricingData = [
                 <small>What Clients Can Book</small>
                 <h3>Flexible premium care for non-members.</h3>
                 <p>
-                  Clients can request walks, drop-ins, daycare, in-home sitting, or boarding with a clean premium booking experience, transparent live pricing, and a dedicated non-member payment portal before secure checkout.
+                  Clients can request walks, drop-ins, or in-home sitting with a clean premium booking experience, transparent live pricing, and a dedicated non-member payment portal before secure checkout. Daycare and boarding are currently reserved through founder packages while those remain available.
                 </p>
 
                 <div class="hero-panel-list">
                   <div>Walk requests from 15 to 60 minutes</div>
                   <div>Drop-ins billed hourly with optional walk add-on</div>
-                  <div>6-hour daycare with optional food and extra walks</div>
                   <div>In-home sitting with included walk and add-ons</div>
-                  <div>Boarding still priced by dog size</div>
+                  <div>Founder packages currently hold daycare and boarding access</div>
+                  <div>Expanded daycare and boarding access is coming soon</div>
                 </div>
               </div>
             </div>
@@ -1280,33 +1147,22 @@ $clientPricingData = [
           </div>
 
           <div class="pricing-card">
-            <h3>Daycare Pricing</h3>
-            <p>6-hour daycare session for non-members.</p>
-            <ul class="price-list">
-              <li><span>6-Hour Session</span><strong><?php echo dd_format_money($clientPricingData['daycare']['base_rate']); ?></strong></li>
-              <li><span>We Provide Food</span><strong>+<?php echo dd_format_money($clientPricingData['daycare']['food_fee']); ?></strong></li>
-              <li><span>1 Included Walk</span><strong>Included</strong></li>
-              <li><span>Additional 30-Min Walk</span><strong>+<?php echo dd_format_money($clientPricingData['daycare']['additional_walk_rate']); ?></strong></li>
-            </ul>
-          </div>
-
-          <div class="pricing-card">
             <h3>In-Home Sitting</h3>
             <p>Premium in-home sitting for non-members.</p>
             <ul class="price-list">
               <li><span>Up to <?php echo (int) $clientPricingData['sitting']['hours']; ?> Hours</span><strong><?php echo dd_format_money($clientPricingData['sitting']['base_rate']); ?></strong></li>
-              <li><span>1 Included Walk</span><strong>Included</strong></li>
+              <li><span>1 Included Walk</span><strong>1 × 30 min</strong></li>
               <li><span>Additional 30-Min Walk</span><strong>+<?php echo dd_format_money($clientPricingData['sitting']['additional_walk_rate']); ?></strong></li>
             </ul>
           </div>
 
           <div class="pricing-card">
-            <h3>Boarding Pricing</h3>
-            <p>Pricing per night based on dog size.</p>
+            <h3>Founder-Only Access</h3>
+            <p>Daycare and boarding are currently not part of the public non-member booking flow.</p>
             <ul class="price-list">
-              <li><span>Small Dog</span><strong><?php echo dd_format_money($clientPricingData['boarding']['small']); ?></strong></li>
-              <li><span>Medium Dog</span><strong><?php echo dd_format_money($clientPricingData['boarding']['medium']); ?></strong></li>
-              <li><span>Large Dog</span><strong><?php echo dd_format_money($clientPricingData['boarding']['large']); ?></strong></li>
+              <li><span>Daycare</span><strong>Founder packages only</strong></li>
+              <li><span>Boarding</span><strong>Founder packages only</strong></li>
+              <li><span>Public Access</span><strong>Coming soon</strong></li>
             </ul>
           </div>
         </div>
@@ -1326,15 +1182,15 @@ $clientPricingData = [
               <div class="booking-copy-list">
                 <div>Walk duration selection for non-member bookings</div>
                 <div>Drop-ins with hourly options and walk add-ons</div>
-                <div>6-hour daycare with optional food and extra walks</div>
                 <div>In-home sitting with included walk and optional extra walks</div>
-                <div>Boarding still priced by size and night count</div>
+                <div>Daycare and boarding are currently founder-package-only while available</div>
+                <div>Expanded public access for those services is coming soon</div>
               </div>
 
               <div class="quote-box">
                 <small>Live Price</small>
                 <strong id="estimated_price_text">Select service details to view live pricing.</strong>
-                <span>This live total will carry into the non-member payment portal before Stripe checkout. Daycare is one 6-hour session. Sitting is priced as one session. Boarding totals use nights and still depend on dog size.</span>
+                <span>This live total will carry into the non-member payment portal before Stripe checkout. Sitting is priced as one session. Daycare and boarding are currently available only through founder packages while those remain open.</span>
                 <div class="quote-meta" id="quote_meta"></div>
                 <div class="quote-disclaimer" id="quote_disclaimer">Promo and ambassador codes are validated securely on the server before payment. Self-referrals and repeat promo use from the same IP can be blocked even if a code is entered here.</div>
               </div>
@@ -1374,9 +1230,7 @@ $clientPricingData = [
                     <option value="">Choose a service</option>
                     <option value="Walk" <?php echo old_value($formData, 'service_type') === 'Walk' ? 'selected' : ''; ?>>Walk</option>
                     <option value="Drop-In" <?php echo old_value($formData, 'service_type') === 'Drop-In' ? 'selected' : ''; ?>>Drop-In</option>
-                    <option value="Daycare" <?php echo old_value($formData, 'service_type') === 'Daycare' ? 'selected' : ''; ?>>Daycare</option>
                     <option value="Sitting" <?php echo old_value($formData, 'service_type') === 'Sitting' ? 'selected' : ''; ?>>In-Home Sitting</option>
-                    <option value="Boarding" <?php echo old_value($formData, 'service_type') === 'Boarding' ? 'selected' : ''; ?>>Boarding</option>
                   </select>
                 </div>
               </div>
@@ -1387,14 +1241,9 @@ $clientPricingData = [
                   <input type="text" id="dog_name" name="dog_name" required placeholder="Your dog's name" value="<?php echo old_value($formData, 'dog_name'); ?>">
                 </div>
 
-                <div class="field-group hidden" id="dog_size_wrap">
-                  <label for="dog_size">Dog Size</label>
-                  <select id="dog_size" name="dog_size">
-                    <option value="">Choose a size</option>
-                    <option value="Small" <?php echo old_value($formData, 'dog_size') === 'Small' ? 'selected' : ''; ?>>Small</option>
-                    <option value="Medium" <?php echo old_value($formData, 'dog_size') === 'Medium' ? 'selected' : ''; ?>>Medium</option>
-                    <option value="Large" <?php echo old_value($formData, 'dog_size') === 'Large' ? 'selected' : ''; ?>>Large</option>
-                  </select>
+                <div class="field-group">
+                  <label for="date_start">Requested Start Date</label>
+                  <input type="date" id="date_start" name="date_start" required value="<?php echo old_value($formData, 'date_start'); ?>">
                 </div>
               </div>
 
@@ -1433,7 +1282,7 @@ $clientPricingData = [
                       <option value="1" <?php echo old_value($formData, 'drop_in_hours') === '1' ? 'selected' : ''; ?>>1 Hour</option>
                       <option value="2" <?php echo old_value($formData, 'drop_in_hours') === '2' ? 'selected' : ''; ?>>2 Hours</option>
                     </select>
-                    <div class="helper">Anything longer should be booked as daycare.</div>
+                    <div class="helper">Anything longer will return as unavailable here until expanded daycare access is released publicly.</div>
                   </div>
 
                   <div class="field-group">
@@ -1446,37 +1295,13 @@ $clientPricingData = [
                 </div>
               </div>
 
-              <div id="daycare_panel" class="service-panel hidden">
-                <div class="service-panel-title">Daycare Options</div>
-                <div class="form-row">
-                  <div class="field-group">
-                    <label>&nbsp;</label>
-                    <div class="check-row">
-                      <input type="checkbox" id="daycare_provide_food" name="daycare_provide_food" value="1" <?php echo old_value($formData, 'daycare_provide_food') === '1' ? 'checked' : ''; ?>>
-                      <span>Have us provide food for <?php echo dd_format_money((float) $clientPricingData['daycare']['food_fee']); ?></span>
-                    </div>
-                  </div>
-
-                  <div class="field-group">
-                    <label for="daycare_extra_walks">Additional 30-Minute Walks</label>
-                    <select id="daycare_extra_walks" name="daycare_extra_walks">
-                      <option value="0" <?php echo old_value($formData, 'daycare_extra_walks') === '0' ? 'selected' : ''; ?>>0 extra walks</option>
-                      <option value="1" <?php echo old_value($formData, 'daycare_extra_walks') === '1' ? 'selected' : ''; ?>>1 extra walk</option>
-                      <option value="2" <?php echo old_value($formData, 'daycare_extra_walks') === '2' ? 'selected' : ''; ?>>2 extra walks</option>
-                      <option value="3" <?php echo old_value($formData, 'daycare_extra_walks') === '3' ? 'selected' : ''; ?>>3 extra walks</option>
-                    </select>
-                    <div class="helper">1 complimentary 30-minute walk is already included.</div>
-                  </div>
-                </div>
-              </div>
-
               <div id="sitting_panel" class="service-panel hidden">
                 <div class="service-panel-title">In-Home Sitting Options</div>
                 <div class="form-row">
                   <div class="field-group">
                     <label>&nbsp;</label>
                     <div class="check-row">
-                      <span>Includes 1 complimentary <?php echo (int) $clientPricingData['sitting']['included_walk_duration_minutes']; ?>-minute walk</span>
+                      <span>Includes 1 complimentary 30-minute walk</span>
                     </div>
                   </div>
 
@@ -1490,19 +1315,6 @@ $clientPricingData = [
                     </select>
                     <div class="helper">Base rate covers up to <?php echo (int) $clientPricingData['sitting']['hours']; ?> hours of in-home sitting.</div>
                   </div>
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="field-group">
-                  <label for="date_start">Requested Start Date</label>
-                  <input type="date" id="date_start" name="date_start" required value="<?php echo old_value($formData, 'date_start'); ?>">
-                </div>
-
-                <div class="field-group hidden boarding-only" id="date_end_wrap">
-                  <label for="date_end" id="date_end_label">Check-Out Date</label>
-                  <input type="date" id="date_end" name="date_end" value="<?php echo old_value($formData, 'date_end'); ?>">
-                  <div class="helper" id="date_end_helper">Boarding total uses nights. Example: April 1 to April 6 = 5 boarding nights.</div>
                 </div>
               </div>
 
@@ -1537,7 +1349,7 @@ $clientPricingData = [
 
               <div class="field-group">
                 <label for="notes">Additional Notes</label>
-                <textarea id="notes" name="notes" placeholder="Tell us anything helpful about your dog, routine, feeding details, pickup/drop-off preferences, or anything else we should know."><?php echo old_value($formData, 'notes'); ?></textarea>
+                <textarea id="notes" name="notes" placeholder="Tell us anything helpful about your dog, routine, feeding details, pickup preferences, or anything else we should know."><?php echo old_value($formData, 'notes'); ?></textarea>
               </div>
 
               <button type="submit" class="btn btn-gold">Continue to Payment Portal</button>
@@ -1552,7 +1364,7 @@ $clientPricingData = [
     <div class="container footer-wrap">
       <div>
         <div class="footer-brand">Doggie Dorian’s</div>
-        <div class="footer-text">Luxury dog walking, drop-ins, daycare, boarding, and premium membership care.</div>
+        <div class="footer-text">Luxury dog walking, drop-ins, in-home sitting, and founder-access premium care.</div>
       </div>
 
       <div class="footer-text">

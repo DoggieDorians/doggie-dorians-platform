@@ -12,17 +12,11 @@ $bookingLink = $isLoggedIn ? 'book-service.php' : 'non-member-booking.php';
 $walkNonMember = $pricing['walk']['non_member'];
 $walkMember = $pricing['walk']['member'];
 
-$daycareNonMember = $pricing['daycare']['non_member'];
-$daycareMember = $pricing['daycare']['member'];
-
 $dropInNonMember = $pricing['drop_in']['non_member'];
 $dropInMember = $pricing['drop_in']['member'];
 
 $sittingNonMember = $pricing['sitting']['non_member'];
 $sittingMember = $pricing['sitting']['member'];
-
-$boardingNonMember = $pricing['boarding']['non_member'];
-$boardingMember = $pricing['boarding']['member'];
 
 function h($value): string
 {
@@ -37,7 +31,7 @@ function h($value): string
   <title>Services | Doggie Dorian's</title>
   <meta
     name="description"
-    content="Explore luxury dog walking, hourly drop-ins, premium daycare, in-home sitting, and boutique boarding at Doggie Dorian’s for Manhattan dog parents."
+    content="Explore luxury dog walking, hourly drop-ins, in-home sitting, and founder-access premium care at Doggie Dorian’s for Manhattan dog parents. Daycare and boarding are currently included only through founder packages while availability remains."
   />
   <style>
     * {
@@ -784,7 +778,7 @@ function h($value): string
               <span class="accent">built for city clients who expect more.</span>
             </h1>
             <p>
-              Doggie Dorian’s is designed for Manhattan dog parents who want more than basic pet care. The experience is meant to feel polished, dependable, and elevated from the first booking through ongoing service.
+              Doggie Dorian’s is designed for Manhattan dog parents who want more than basic pet care. The experience is meant to feel polished, dependable, and elevated from the first booking through ongoing service. Daycare and boarding are currently included only through founder packages while availability remains, with broader access for other clients coming soon.
             </p>
 
             <div class="hero-actions">
@@ -795,8 +789,8 @@ function h($value): string
             <div class="hero-badges">
               <span class="hero-badge">Luxury Walks</span>
               <span class="hero-badge">Hourly Drop-Ins</span>
-              <span class="hero-badge">Premium Daycare</span>
-              <span class="hero-badge">Boutique Boarding</span>
+              <span class="hero-badge">Founder-Only Daycare Access</span>
+              <span class="hero-badge">Founder-Only Boarding Access</span>
             </div>
           </div>
 
@@ -818,9 +812,9 @@ function h($value): string
                 <span>Services built around real Manhattan schedules</span>
               </div>
               <div class="quick-box">
-                <small>Positioning</small>
-                <strong>Premium by design</strong>
-                <span>The experience is meant to feel polished from the start</span>
+                <small>Access</small>
+                <strong>Founder-only care now</strong>
+                <span>Daycare and boarding are currently reserved through founder packages while availability remains</span>
               </div>
               <div class="quick-box">
                 <small>Care</small>
@@ -875,18 +869,18 @@ function h($value): string
           </article>
 
           <article class="service-card">
-            <span class="service-tag">Daycare</span>
-            <h3>Premium Daycare</h3>
-            <div class="price">6-hour session from <?= h(dd_format_money((float)$daycareNonMember['base_rate'])) ?></div>
+            <span class="service-tag">Founder Access</span>
+            <h3>Daycare Through Founder Packages</h3>
+            <div class="price">Currently founder-only while available</div>
             <p>
-              Structured daytime care for clients who want a smoother, more elevated option than piecing together multiple short visits.
+              Daycare is not being offered as a standard public booking option right now. It is currently included only through available founder packages.
             </p>
             <ul>
-              <li>6-hour premium session format</li>
-              <li>1 complimentary 30-minute walk included</li>
-              <li>Optional food and additional walk add-ons</li>
+              <li>Available only through founder memberships</li>
+              <li>Limited by founder package availability</li>
+              <li>Expanded public access will be coming soon</li>
             </ul>
-            <a href="<?= h($bookingLink) ?>" class="service-link">Reserve daycare →</a>
+            <a href="memberships.php#founders" class="service-link">Explore founder packages →</a>
           </article>
 
           <article class="service-card">
@@ -898,25 +892,25 @@ function h($value): string
             </p>
             <ul>
               <li>Up to <?= h((string)$sittingNonMember['hours']) ?> hours</li>
-              <li>1 complimentary 30-minute walk included</li>
-              <li>More personal and present than a short visit</li>
+              <li>Non-members receive 1 complimentary 30-minute walk</li>
+              <li>Members receive 1 complimentary 45-minute walk</li>
             </ul>
             <a href="<?= h($bookingLink) ?>" class="service-link">Book in-home sitting →</a>
           </article>
 
           <article class="service-card">
-            <span class="service-tag">Boarding</span>
-            <h3>Boutique Boarding</h3>
-            <div class="price">From <?= h(dd_format_money((float)$boardingNonMember['small'])) ?></div>
+            <span class="service-tag">Founder Access</span>
+            <h3>Boarding Through Founder Packages</h3>
+            <div class="price">Currently founder-only while available</div>
             <p>
-              Overnight care positioned for clients who want more comfort, more reassurance, and a more refined overall experience.
+              Boarding is also being kept exclusive for now and is currently included only through available founder packages while founder inventory remains open.
             </p>
             <ul>
-              <li>Boarding remains priced by dog size</li>
-              <li>Member pricing starts lower right away</li>
-              <li>Longer stays unlock better member value</li>
+              <li>Current access is through founder packages only</li>
+              <li>Designed to stay limited while founder spots remain</li>
+              <li>Broader boarding access for other clients is coming soon</li>
             </ul>
-            <a href="<?= h($bookingLink) ?>" class="service-link">Book boarding →</a>
+            <a href="memberships.php#founders" class="service-link">See founder access →</a>
           </article>
         </div>
       </div>
@@ -960,14 +954,14 @@ function h($value): string
           </div>
 
           <div class="side-card">
-            <strong>Service area clarity</strong>
+            <strong>Founder-only daycare and boarding right now</strong>
             <p>
-              The Upper East Side remains the priority service area, while expanded Manhattan coverage may be available when planned ahead.
+              Daycare and boarding are currently included only through founder packages while they remain available. Full-time access for other clients is planned for a future release.
             </p>
             <div class="pill-row">
-              <span class="pill">Upper East Side</span>
-              <span class="pill">Advance Scheduling</span>
-              <span class="pill">Premium Access</span>
+              <span class="pill">Founder Packages</span>
+              <span class="pill">Limited Availability</span>
+              <span class="pill">Coming Soon</span>
             </div>
           </div>
 
@@ -995,7 +989,7 @@ function h($value): string
           <div class="step-card">
             <div class="step-number">1</div>
             <h3>Choose your service</h3>
-            <p>Select walking, drop-ins, daycare, in-home sitting, or boarding based on your dog’s needs and your schedule.</p>
+            <p>Select walking, drop-ins, in-home sitting, or founder-access care based on your dog’s needs and your schedule.</p>
           </div>
           <div class="step-card">
             <div class="step-number">2</div>
@@ -1005,7 +999,7 @@ function h($value): string
           <div class="step-card">
             <div class="step-number">3</div>
             <h3>Review the pricing</h3>
-            <p>The pricing page and booking flow apply the correct member vs non-member structure automatically.</p>
+            <p>The pricing page and booking flow apply the correct member vs non-member structure automatically where those services are currently available.</p>
           </div>
           <div class="step-card">
             <div class="step-number">4</div>
@@ -1022,7 +1016,7 @@ function h($value): string
           <span class="eyebrow">Ready to Book?</span>
           <h2>Luxury dog care should feel effortless from the very first step.</h2>
           <p>
-            Whether you need a premium walk, quick drop-in, dependable daycare, in-home sitting, or boutique-style boarding, Doggie Dorian’s is built for clients who want confidence, convenience, and a more elevated standard of care.
+            Whether you need a premium walk, quick drop-in, dependable in-home sitting, or current founder-access daycare and boarding, Doggie Dorian’s is built for clients who want confidence, convenience, and a more elevated standard of care. Expanded daycare and boarding access for other clients will be coming soon.
           </p>
           <div class="cta-actions">
             <a href="<?= h($bookingLink) ?>" class="btn btn-primary">Book Premium Care</a>
@@ -1042,7 +1036,7 @@ function h($value): string
     <div class="container footer-wrap">
       <div>
         <strong style="color: var(--text);">Doggie Dorian’s</strong><br />
-        Luxury dog walking, hourly drop-ins, premium daycare, in-home sitting & boutique boarding in Manhattan.
+        Luxury dog walking, hourly drop-ins, in-home sitting, and founder-access premium care in Manhattan.
       </div>
       <div>
         <a href="pricing.php">Pricing</a> &nbsp;•&nbsp;

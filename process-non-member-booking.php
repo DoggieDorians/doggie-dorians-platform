@@ -489,38 +489,14 @@ function calculate_non_member_pricing(array $data): array
         ]);
     }
 
-    if ($serviceType === 'daycare') {
-        return dd_get_service_pricing('daycare', false, [
-            'provide_food' => (bool) $data['daycare_provide_food'],
-            'extra_walks' => (int) $data['daycare_extra_walks'],
-        ]);
-    }
-
     if ($serviceType === 'sitting') {
         return dd_get_service_pricing('sitting', false, [
             'extra_walks' => (int) $data['sitting_extra_walks'],
         ]);
     }
 
-    if ($serviceType === 'boarding') {
-        $dogSize = $data['dog_size'];
-        $dateStart = $data['date_start'];
-        $dateEnd = $data['date_end'];
-
-        if ($dogSize === '' || $dateStart === '' || $dateEnd === '') {
-            throw new RuntimeException('Boarding requires dog size, check-in date, and check-out date.');
-        }
-
-        $nights = dd_calculate_boarding_nights($dateStart, $dateEnd);
-
-        if ($nights <= 0) {
-            throw new RuntimeException('Boarding requires a valid date range.');
-        }
-
-        return dd_get_service_pricing('boarding', false, [
-            'dog_size' => $dogSize,
-            'quantity' => $nights,
-        ]);
+    if ($serviceType === 'daycare' || $serviceType === 'boarding') {
+        throw new RuntimeException('Daycare and boarding are currently included only through founder packages while availability remains.');
     }
 
     throw new RuntimeException('Unsupported non-member service.');
@@ -741,6 +717,10 @@ if (!is_valid_ambassador_code_format($ambassadorCode)) {
     redirect_back_with_error('Please enter a valid ambassador code format.', $formData);
 }
 
+if (!in_array($serviceType, ['walk', 'drop_in', 'sitting'], true)) {
+    redirect_back_with_error('Daycare and boarding are currently included only through founder packages while availability remains.', $formData);
+}
+
 try {
     $pricing = calculate_non_member_pricing([
         'service_type' => $serviceType,
@@ -818,8 +798,8 @@ try {
         'walk_duration' => $walkDuration,
         'drop_in_hours' => $dropInHours,
         'drop_in_add_walk' => $dropInAddWalk,
-        'daycare_provide_food' => $daycareProvideFood,
-        'daycare_extra_walks' => $daycareExtraWalks,
+        'daycare_provide_food' => false,
+        'daycare_extra_walks' => 0,
         'sitting_extra_walks' => $sittingExtraWalks,
         'pricing_type' => $pricingType,
         'discount_label' => $discountLabel,
@@ -859,15 +839,15 @@ $_SESSION['non_member_payment_portal'] = [
     'email' => $email,
     'phone' => $phone,
     'dog_name' => $dogName,
-    'dog_size' => $dogSize,
+    'dog_size' => '',
     'service_type' => $serviceType,
     'date_start' => $dateStart,
-    'date_end' => $dateEnd,
+    'date_end' => '',
     'walk_duration' => $walkDuration,
     'drop_in_hours' => $dropInHours,
     'drop_in_add_walk' => $dropInAddWalk ? '1' : '0',
-    'daycare_provide_food' => $daycareProvideFood ? '1' : '0',
-    'daycare_extra_walks' => $daycareExtraWalks,
+    'daycare_provide_food' => '0',
+    'daycare_extra_walks' => 0,
     'sitting_extra_walks' => $sittingExtraWalks,
     'pricing_type' => $pricingType,
     'discount_label' => $discountLabel,

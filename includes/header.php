@@ -6,7 +6,7 @@ if (!isset($pageTitle) || trim((string)$pageTitle) === '') {
 }
 
 if (!isset($metaDescription) || trim((string)$metaDescription) === '') {
-    $metaDescription = "Luxury dog care, memberships, walks, daycare, boarding, and concierge-level pet services from Doggie Dorian's.";
+    $metaDescription = "Luxury dog care, memberships, walks, drop-ins, pet sitting, founder packages, and concierge-level pet services from Doggie Dorian's.";
 }
 
 if (!isset($siteName) || trim((string)$siteName) === '') {

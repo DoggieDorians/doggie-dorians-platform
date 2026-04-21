@@ -204,6 +204,9 @@ $discountLabel = trim((string) ($_GET['discount_label'] ?? $_POST['discount_labe
 $quantity = (int) ($_GET['quantity'] ?? $_POST['quantity'] ?? 0);
 $unitPrice = (float) ($_GET['unit_price'] ?? $_POST['unit_price'] ?? 0);
 $totalAmount = (float) ($_GET['total_amount'] ?? $_POST['total_amount'] ?? $_GET['estimated_price'] ?? $_POST['estimated_price'] ?? 0);
+$originalTotalAmount = (float) ($_GET['original_total_amount'] ?? $_POST['original_total_amount'] ?? 0);
+$discountAmount = (float) ($_GET['discount_amount'] ?? $_POST['discount_amount'] ?? 0);
+$ambassadorCode = trim((string) ($_GET['ambassador_code'] ?? $_POST['ambassador_code'] ?? ''));
 
 $dropInHours = trim((string) ($_GET['drop_in_hours'] ?? $_POST['drop_in_hours'] ?? ''));
 $dropInAddWalk = trim((string) ($_GET['drop_in_add_walk'] ?? $_POST['drop_in_add_walk'] ?? ''));
@@ -227,6 +230,9 @@ if ($sessionPortal !== null) {
     $quantity = (int) ($sessionPortal['quantity'] ?? $quantity);
     $unitPrice = (float) ($sessionPortal['unit_price'] ?? $unitPrice);
     $totalAmount = (float) ($sessionPortal['total_amount'] ?? $totalAmount);
+    $originalTotalAmount = (float) ($sessionPortal['original_total_amount'] ?? $originalTotalAmount);
+    $discountAmount = (float) ($sessionPortal['discount_amount'] ?? $discountAmount);
+    $ambassadorCode = trim((string) ($sessionPortal['ambassador_code'] ?? $ambassadorCode));
     $dropInHours = trim((string) ($sessionPortal['drop_in_hours'] ?? $dropInHours));
     $dropInAddWalk = trim((string) ($sessionPortal['drop_in_add_walk'] ?? $dropInAddWalk));
     $daycareProvideFood = trim((string) ($sessionPortal['daycare_provide_food'] ?? $daycareProvideFood));
@@ -254,6 +260,14 @@ if ($requestId > 0) {
         $quantity = (int) ($requestRow['quantity'] ?? $quantity);
         $unitPrice = (float) ($requestRow['unit_price'] ?? $unitPrice);
         $totalAmount = (float) ($requestRow['estimated_price'] ?? $requestRow['total_amount'] ?? $totalAmount);
+        $originalTotalAmount = (float) ($requestRow['original_price'] ?? $requestRow['original_amount'] ?? $originalTotalAmount);
+        $discountAmount = (float) ($requestRow['discount_amount'] ?? $requestRow['ambassador_discount_amount'] ?? $discountAmount);
+        $ambassadorCode = trim((string) ($requestRow['ambassador_code'] ?? $requestRow['referral_code'] ?? $ambassadorCode));
+        $dropInHours = trim((string) ($requestRow['drop_in_hours'] ?? $dropInHours));
+        $dropInAddWalk = trim((string) ($requestRow['drop_in_add_walk'] ?? $dropInAddWalk));
+        $daycareProvideFood = trim((string) ($requestRow['daycare_provide_food'] ?? $daycareProvideFood));
+        $daycareExtraWalks = trim((string) ($requestRow['daycare_extra_walks'] ?? $daycareExtraWalks));
+        $sittingExtraWalks = trim((string) ($requestRow['sitting_extra_walks'] ?? $sittingExtraWalks));
     }
 }
 
@@ -265,6 +279,16 @@ if ($totalAmount <= 0 && $unitPrice > 0 && $quantity > 0) {
     $totalAmount = $unitPrice * $quantity;
 }
 
+if ($originalTotalAmount <= 0) {
+    $originalTotalAmount = $totalAmount;
+}
+
+if (!in_array($serviceType, ['walk', 'drop_in', 'sitting'], true)) {
+    $_SESSION['nonmember_flash_type'] = 'error';
+    $_SESSION['nonmember_flash_message'] = 'Daycare and boarding are currently included only through founder packages while availability remains.';
+    portal_redirect('non-member-booking.php');
+}
+
 if ($serviceType === '' || $totalAmount <= 0) {
     $_SESSION['nonmember_flash_type'] = 'error';
     $_SESSION['nonmember_flash_message'] = 'No non-member payment details were found for checkout.';
@@ -274,8 +298,6 @@ if ($serviceType === '' || $totalAmount <= 0) {
 $serviceTypeMap = [
     'walk' => 'Walk',
     'drop_in' => 'Drop-In',
-    'daycare' => 'Daycare',
-    'boarding' => 'Boarding',
     'sitting' => 'Pet Sitting',
 ];
 
@@ -289,7 +311,7 @@ if ($walkDuration !== '') {
 if ($dogName !== '') {
     $serviceDescription .= ' · ' . $dogName;
 }
-if ($dogSize !== '') {
+if ($dogSize !== '' && $serviceType === 'walk') {
     $serviceDescription .= ' · ' . $dogSizeLabel;
 }
 
@@ -297,9 +319,6 @@ $serviceDetails = [];
 
 if ($dateStart !== '') {
     $serviceDetails[] = ['label' => 'Start Date', 'value' => $dateStart];
-}
-if ($dateEnd !== '') {
-    $serviceDetails[] = ['label' => 'End Date', 'value' => $dateEnd];
 }
 if ($walkDuration !== '') {
     $serviceDetails[] = ['label' => 'Walk Duration', 'value' => $walkDuration];
@@ -310,14 +329,11 @@ if ($dropInHours !== '') {
 if ($dropInAddWalk !== '') {
     $serviceDetails[] = ['label' => 'Walk Add-On', 'value' => boolish_label($dropInAddWalk)];
 }
-if ($daycareProvideFood !== '') {
-    $serviceDetails[] = ['label' => 'Food Provided', 'value' => boolish_label($daycareProvideFood)];
-}
-if ($daycareExtraWalks !== '') {
-    $serviceDetails[] = ['label' => 'Extra Walks', 'value' => $daycareExtraWalks];
-}
 if ($sittingExtraWalks !== '') {
     $serviceDetails[] = ['label' => 'Sitting Extra Walks', 'value' => $sittingExtraWalks];
+}
+if ($serviceType === 'sitting') {
+    $serviceDetails[] = ['label' => 'Included Walk', 'value' => '1 × 30 min'];
 }
 
 $summaryRows = [
@@ -330,6 +346,15 @@ $summaryRows = [
     ['label' => 'Rate', 'value' => $unitPrice > 0 ? money_fmt($unitPrice) : 'Calculated Total'],
     ['label' => 'Quantity', 'value' => (string) max(1, $quantity)],
 ];
+
+if ($discountAmount > 0) {
+    $summaryRows[] = ['label' => 'Original Total', 'value' => money_fmt($originalTotalAmount)];
+    $summaryRows[] = ['label' => 'Discount', 'value' => '-' . money_fmt($discountAmount)];
+}
+
+if ($ambassadorCode !== '') {
+    $summaryRows[] = ['label' => 'Ambassador Code', 'value' => $ambassadorCode];
+}
 
 if ($discountLabel !== '') {
     $summaryRows[] = ['label' => 'Price Label', 'value' => ucwords(str_replace('_', ' ', $discountLabel))];
@@ -819,9 +844,9 @@ if ($requestId > 0) {
                         <div class="hero-badge">Non-Member Checkout</div>
                         <h1 class="hero-title">Review your non-member booking payment</h1>
                         <p class="hero-text">
-                            This checkout page is dedicated to public and non-member bookings only.
-                            It reflects standard non-member pricing, separate from founder credits,
-                            member balances, and member overage logic.
+                            This checkout page is dedicated to public and non-member bookings only for walks, drop-ins, and in-home sitting.
+                            Daycare and boarding are currently included only through founder packages while availability remains,
+                            with broader access for other clients coming soon.
                         </p>
 
                         <div class="hero-grid">
@@ -842,7 +867,7 @@ if ($requestId > 0) {
 
                             <div class="hero-box">
                                 <span class="hero-box-label">Pricing</span>
-                                <div class="hero-box-value">Standard Non-Member</div>
+                                <div class="hero-box-value"><?= h($pricingType !== '' ? ucwords(str_replace('_', ' ', $pricingType)) : 'Standard Non-Member') ?></div>
                             </div>
                         </div>
                     </section>
@@ -882,8 +907,8 @@ if ($requestId > 0) {
                         <div class="total-label">Total Due</div>
                         <div class="total-value"><?= h(money_fmt($totalAmount)) ?></div>
                         <div class="total-sub">
-                            This total reflects your non-member booking price only.
-                            No membership credits or founder discounts are applied on this page.
+                            This total reflects your current non-member booking price only.
+                            Founder package access, member credits, and member-only pricing do not apply on this page.
                         </div>
                     </div>
 
@@ -909,21 +934,24 @@ if ($requestId > 0) {
                             <input type="hidden" name="email" value="<?= h($email) ?>">
                             <input type="hidden" name="phone" value="<?= h($phone) ?>">
                             <input type="hidden" name="dog_name" value="<?= h($dogName) ?>">
-                            <input type="hidden" name="dog_size" value="<?= h($dogSize) ?>">
+                            <input type="hidden" name="dog_size" value="">
                             <input type="hidden" name="service_type" value="<?= h($serviceType) ?>">
                             <input type="hidden" name="date_start" value="<?= h($dateStart) ?>">
-                            <input type="hidden" name="date_end" value="<?= h($dateEnd) ?>">
+                            <input type="hidden" name="date_end" value="">
                             <input type="hidden" name="walk_duration" value="<?= h($walkDuration) ?>">
                             <input type="hidden" name="pricing_type" value="<?= h($pricingType) ?>">
                             <input type="hidden" name="discount_label" value="<?= h($discountLabel) ?>">
                             <input type="hidden" name="quantity" value="<?= (int) max(1, $quantity) ?>">
                             <input type="hidden" name="unit_price" value="<?= h(number_format($unitPrice, 2, '.', '')) ?>">
+                            <input type="hidden" name="original_total_amount" value="<?= h(number_format($originalTotalAmount, 2, '.', '')) ?>">
+                            <input type="hidden" name="discount_amount" value="<?= h(number_format($discountAmount, 2, '.', '')) ?>">
                             <input type="hidden" name="total_amount" value="<?= h(number_format($totalAmount, 2, '.', '')) ?>">
                             <input type="hidden" name="estimated_price" value="<?= h(number_format($totalAmount, 2, '.', '')) ?>">
+                            <input type="hidden" name="ambassador_code" value="<?= h($ambassadorCode) ?>">
                             <input type="hidden" name="drop_in_hours" value="<?= h($dropInHours) ?>">
                             <input type="hidden" name="drop_in_add_walk" value="<?= h($dropInAddWalk) ?>">
-                            <input type="hidden" name="daycare_provide_food" value="<?= h($daycareProvideFood) ?>">
-                            <input type="hidden" name="daycare_extra_walks" value="<?= h($daycareExtraWalks) ?>">
+                            <input type="hidden" name="daycare_provide_food" value="0">
+                            <input type="hidden" name="daycare_extra_walks" value="0">
                             <input type="hidden" name="sitting_extra_walks" value="<?= h($sittingExtraWalks) ?>">
 
                             <button type="submit" class="payment-button">

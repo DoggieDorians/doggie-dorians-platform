@@ -75,14 +75,14 @@ $remainingFounderWalk = 13;
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Doggie Dorian’s | Premium Dog Care</title>
-    <meta name="description" content="Premium dog walks, daycare, boarding, sitting, founder memberships, and group walk applications with Doggie Dorian’s.">
+    <meta name="description" content="Premium dog walks, sitting, founder memberships, and group walk applications with Doggie Dorian’s. Founder packages currently include exclusive daycare and boarding access while available.">
     <meta name="theme-color" content="#09090d">
     <link rel="canonical" href="https://dorianspetcare.com/">
 
     <meta property="og:site_name" content="Doggie Dorian's">
     <meta property="og:type" content="website">
     <meta property="og:title" content="Doggie Dorian’s | Premium Dog Care">
-    <meta property="og:description" content="Premium dog walks, daycare, boarding, sitting, founder memberships, and group walk applications with Doggie Dorian’s.">
+    <meta property="og:description" content="Premium dog walks, sitting, founder memberships, and group walk applications with Doggie Dorian’s. Founder packages currently include exclusive daycare and boarding access while available.">
     <meta property="og:url" content="https://dorianspetcare.com/">
     <meta property="og:image" content="https://dorianspetcare.com/assets/images/doggie-dorians-share.jpeg">
     <meta property="og:image:secure_url" content="https://dorianspetcare.com/assets/images/doggie-dorians-share.jpeg">
@@ -93,7 +93,7 @@ $remainingFounderWalk = 13;
 
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Doggie Dorian’s | Premium Dog Care">
-    <meta name="twitter:description" content="Premium dog walks, daycare, boarding, sitting, founder memberships, and group walk applications with Doggie Dorian’s.">
+    <meta name="twitter:description" content="Premium dog walks, sitting, founder memberships, and group walk applications with Doggie Dorian’s. Founder packages currently include exclusive daycare and boarding access while available.">
     <meta name="twitter:image" content="https://dorianspetcare.com/assets/images/doggie-dorians-share.jpeg">
 
     <style>
@@ -485,6 +485,7 @@ $remainingFounderWalk = 13;
 
             <div class="top-links">
                 <a class="top-link" href="index.php">Home</a>
+                <a class="top-link" href="why-join.php">Why Join</a>
                 <a class="top-link" href="pricing.php">Pricing</a>
                 <a class="top-link" href="memberships.php#founders">Founder Memberships</a>
                 <a class="top-link" href="non-member-booking.php">Book Now</a>
@@ -506,7 +507,7 @@ $remainingFounderWalk = 13;
                 <div class="eyebrow">Premium Dog Care</div>
                 <h1>Luxury dog care built around trust, structure, and real-time service visibility.</h1>
                 <div class="sub">
-                    Doggie Dorian’s offers premium walks, daycare, boarding, sitting, founder memberships, and specialty care with a modern booking experience for both members and non-members.
+                    Doggie Dorian’s offers premium walks, sitting, founder memberships, and specialty care with a modern booking experience for both members and non-members. Daycare and boarding are currently included only within founder packages while availability remains, with full-time daycare and boarding for others coming soon.
                 </div>
 
                 <div class="notice-banner">
@@ -514,6 +515,8 @@ $remainingFounderWalk = 13;
                     Founder inventory currently shows <strong><?php echo h($remainingFounderElite); ?> Founder Elite Club packages remaining</strong>,
                     <strong><?php echo h($remainingFounderCare); ?> Founder Care Club packages remaining</strong>, and
                     <strong><?php echo h($remainingFounderWalk); ?> Founder Walk Club packages remaining</strong>.
+                    <br><br>
+                    <strong>Exclusive founder access:</strong> Daycare and boarding are currently included only through available founder packages. Expanded full-time daycare and boarding access for other clients will be coming soon.
                 </div>
 
                 <div class="availability-board">
@@ -538,6 +541,7 @@ $remainingFounderWalk = 13;
                 <div class="cta-row">
                     <a class="btn btn-gold" href="<?php echo h($primaryLink); ?>"><?php echo h($primaryText); ?></a>
                     <a class="btn btn-light" href="<?php echo h($secondaryLink); ?>"><?php echo h($secondaryText); ?></a>
+                    <a class="btn btn-light" href="why-join.php">Why Join Membership</a>
                     <a class="btn btn-light" href="memberships.php#founders">View Founder Memberships</a>
                     <?php if (!$isLoggedIn): ?>
                         <a class="btn btn-light" href="signup.php">Create Account</a>
@@ -570,12 +574,22 @@ $remainingFounderWalk = 13;
                 <div class="list">
                     <div class="list-item">
                         <strong>Book without an account</strong>
-                        New clients can schedule services directly without creating a membership first.
+                        New clients can schedule eligible services directly without creating a membership first.
                     </div>
 
                     <div class="list-item">
                         <strong>Member booking</strong>
-                        Returning members can manage walks, daycare, boarding, and other services from one coordinated booking hub.
+                        Returning members can manage walks, drop-ins, and other eligible services from one coordinated booking hub.
+                    </div>
+
+                    <div class="list-item">
+                        <strong>Founder-only care access</strong>
+                        Daycare and boarding are currently included only through founder packages while availability remains. Full-time access for other clients is coming soon.
+                    </div>
+
+                    <div class="list-item">
+                        <strong>Why join</strong>
+                        Explore the value of membership, priority scheduling, premium structure, and why recurring clients choose Doggie Dorian’s.
                     </div>
 
                     <div class="list-item">
@@ -591,11 +605,61 @@ $remainingFounderWalk = 13;
 
                 <div class="cta-row">
                     <a class="btn btn-light" href="non-member-booking.php">Book Without an Account</a>
+                    <a class="btn btn-light" href="why-join.php">Why Join</a>
                     <a class="btn btn-light" href="memberships.php#founders">Founder Memberships</a>
                     <a class="btn btn-light" href="group-walks.php">Apply for Group Walks</a>
                     <?php if (!$isLoggedIn): ?>
                         <a class="btn btn-light" href="signup.php">Sign Up</a>
                     <?php endif; ?>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="card">
+                <div class="group-callout">
+                    <div>
+                        <div class="eyebrow">Why Join Doggie Dorian’s</div>
+                        <h2>Membership is the premium way to experience Doggie Dorian’s.</h2>
+                        <div class="sub">
+                            For clients who want more than one-off booking, membership creates a smoother, more personalized experience with stronger long-term value, better scheduling access, and a more consistent routine for your dog.
+                        </div>
+
+                        <div class="list">
+                            <div class="list-item">
+                                <strong>Priority scheduling</strong>
+                                Members are positioned more favorably during busy periods, helping protect access when demand is highest.
+                            </div>
+                            <div class="list-item">
+                                <strong>Better recurring value</strong>
+                                Membership is built for clients who use care regularly and want a more worthwhile long-term setup.
+                            </div>
+                            <div class="list-item">
+                                <strong>Consistency for your dog</strong>
+                                Dogs thrive with familiarity, structure, and a more dependable care rhythm.
+                            </div>
+                            <div class="list-item">
+                                <strong>More personalized service</strong>
+                                Membership supports a more elevated, polished relationship instead of a basic one-time booking flow.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="card" style="margin:0;">
+                            <div class="eyebrow">Explore Membership Value</div>
+                            <h2>See why clients choose to join</h2>
+                            <div class="sub">
+                                Learn what makes membership worthwhile, who it is best for, and why regular clients choose the premium path.
+                            </div>
+
+                            <div class="cta-row">
+                                <a class="btn btn-gold" href="why-join.php">View Why Join Page</a>
+                                <a class="btn btn-light" href="memberships.php#founders">See Membership Options</a>
+                                <a class="btn btn-light" href="non-member-booking.php">Book First Service</a>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -615,15 +679,15 @@ $remainingFounderWalk = 13;
                 </div>
 
                 <div class="card feature-card">
-                    <div class="eyebrow">Care Services</div>
-                    <h2>Boarding, daycare, sitting</h2>
+                    <div class="eyebrow">Founder-Only Care Access</div>
+                    <h2>Daycare and boarding through founder packages</h2>
                     <div class="feature-copy">
-                        Members can book all core care services in one place through the unified member booking page.
+                        Daycare and boarding are currently included only within available founder packages. Full-time daycare and boarding access for other clients will be coming soon.
                     </div>
                     <div class="pill-row">
-                        <span class="pill">Boarding</span>
-                        <span class="pill">Daycare</span>
-                        <span class="pill">Sitting</span>
+                        <span class="pill">Founder-only for now</span>
+                        <span class="pill">Limited availability</span>
+                        <span class="pill">Coming soon</span>
                     </div>
                 </div>
 
@@ -631,7 +695,7 @@ $remainingFounderWalk = 13;
                     <div class="eyebrow">Founder Memberships</div>
                     <h2>Limited premium founder access</h2>
                     <div class="feature-copy">
-                        Founder memberships are designed for clients who want premium recurring care, founder-only perks, quarterly credit, rollover benefits, and private access.
+                        Founder memberships are designed for clients who want premium recurring care, founder-only perks, quarterly credit, rollover benefits, private access, and current access to daycare and boarding while packages remain available.
                     </div>
                     <div class="pill-row">
                         <span class="pill">Founder access</span>
@@ -674,7 +738,7 @@ $remainingFounderWalk = 13;
                             </div>
                             <div class="list-item">
                                 <strong>Founder Care Club</strong>
-                                Built for clients who want stronger recurring coverage across walks, daycare, drop-ins, and boarding value.
+                                Built for clients who want stronger recurring coverage across walks, daycare, boarding, drop-ins, and founder-only value while packages remain available.
                             </div>
                             <div class="list-item">
                                 <strong>Founder Elite Club</strong>
@@ -698,7 +762,7 @@ $remainingFounderWalk = 13;
                                 </div>
                                 <div class="list-item">
                                     <strong><?php echo h($remainingFounderCare); ?> Founder Care Club packages remain</strong>
-                                    Strong recurring coverage with broader care value across multiple service types.
+                                    Strong recurring coverage with broader care value across multiple service types, including current daycare and boarding access while available.
                                 </div>
                                 <div class="list-item">
                                     <strong><?php echo h($remainingFounderWalk); ?> Founder Walk Club packages remain</strong>
@@ -770,6 +834,7 @@ $remainingFounderWalk = 13;
             </div>
 
             <div class="footer-links">
+                <a href="why-join.php">Why Join</a>
                 <a href="memberships.php#founders">Founder Memberships</a>
                 <a href="privacy-policy.php">Privacy Policy</a>
                 <a href="legal-notice.php">Legal Notice</a>

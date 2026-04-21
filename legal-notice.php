@@ -60,7 +60,7 @@ require_once __DIR__ . '/includes/bootstrap.php';
 
     <h2>1. Company Information</h2>
     <p>
-        Doggie Dorian’s provides premium dog care services including walking, daycare, boarding, and sitting.
+        Doggie Dorian’s provides premium dog care services including walking, drop-ins, sitting, memberships, and founder package access.
     </p>
 
     <h2>2. Service Disclaimer</h2>

@@ -2,14 +2,16 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/includes/mailer.php';
+
 $isLoggedIn = isset($_SESSION['member_id']);
 
 /**
  * CHANGE THIS:
  * Put the inbox where you want founder applications sent.
  */
-$founderNotificationEmail = 'admin@doggiedorians.com';
-$fromEmail = 'admin@doggiedorians.com';
+$founderNotificationEmail = 'support@doggiedorians.com';
+$fromEmail = 'support@doggiedorians.com';
 $siteName = "Doggie Dorian's";
 
 $founderPlans = [
@@ -33,10 +35,10 @@ $founderPlans = [
         'value' => 650,
         'slots' => 10,
         'tag' => 'Founder Membership',
-        'summary' => 'A premium recurring care membership for clients who want more coverage across walks, daycare, drop-ins, and boarding value.',
+        'summary' => 'A premium recurring founder membership for clients who want stronger coverage across walks, drop-ins, and current founder-only daycare and boarding access while availability remains.',
         'highlights' => [
-            '16 walks, 2 daycare days, and 2 drop-ins each month',
-            '10% off boarding bookings',
+            '16 walks, 2 founder-only daycare days, and 2 drop-ins each month',
+            '10% off additional boarding requests while founder access remains',
             'Birthday gift and quarterly founder credit',
             'Private founder contact access',
         ],
@@ -47,10 +49,10 @@ $founderPlans = [
         'value' => 1100,
         'slots' => 5,
         'tag' => 'Founder Membership',
-        'summary' => 'Your most exclusive founder package for clients who want premium recurring care, boarding value, and top-tier access.',
+        'summary' => 'Your most exclusive founder package for clients who want premium recurring care, current founder-only daycare and boarding value, and top-tier access.',
         'highlights' => [
-            '20 walks, 4 daycare days, and 4 drop-ins each month',
-            '3 complimentary boarding nights + 20% off additional boarding',
+            '20 walks, 4 founder-only daycare days, and 4 drop-ins each month',
+            '3 complimentary boarding nights + 20% off additional boarding while founder access remains',
             'Highest founder scheduling priority',
             'Private founder contact access',
         ],
@@ -109,16 +111,9 @@ function dd_save_founder_applications(string $file, array $applications): bool
     ) !== false;
 }
 
-function dd_send_email(string $to, string $subject, string $message, string $fromEmail): bool
+function dd_email_html_from_text(string $message): string
 {
-    $headers = [];
-    $headers[] = 'MIME-Version: 1.0';
-    $headers[] = 'Content-type: text/plain; charset=UTF-8';
-    $headers[] = 'From: Doggie Dorian\'s <' . $fromEmail . '>';
-    $headers[] = 'Reply-To: ' . $fromEmail;
-    $headers[] = 'X-Mailer: PHP/' . phpversion();
-
-    return @mail($to, $subject, $message, implode("\r\n", $headers));
+    return nl2br(htmlspecialchars($message, ENT_QUOTES, 'UTF-8'));
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -216,7 +211,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     "Service Needs:\n{$serviceNeeds}\n\n" .
                     "Notes:\n{$notes}\n";
 
-                dd_send_email($founderNotificationEmail, $adminSubject, $adminMessage, $fromEmail);
+                dd_send_email(
+                    $founderNotificationEmail,
+                    $siteName,
+                    $adminSubject,
+                    dd_email_html_from_text($adminMessage),
+                    $adminMessage,
+                    [],
+                    [],
+                    [],
+                    [
+                        'email' => $fromEmail,
+                        'name' => $siteName,
+                    ]
+                );
 
                 $clientSubject = 'Founder Membership Request Received - ' . $siteName;
 
@@ -229,7 +237,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     "Our team will review your request and follow up with the next step.\n\n" .
                     "Thank you,\n{$siteName}";
 
-                dd_send_email($email, $clientSubject, $clientMessage, $fromEmail);
+                dd_send_email(
+                    $email,
+                    $fullName,
+                    $clientSubject,
+                    dd_email_html_from_text($clientMessage),
+                    $clientMessage,
+                    [],
+                    [],
+                    [],
+                    [
+                        'email' => $fromEmail,
+                        'name' => $siteName,
+                    ]
+                );
 
                 $formSuccess = true;
                 $fullName = '';
@@ -462,6 +483,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <p>
             Founder memberships are intentionally limited and reviewed before approval. Submit your request below,
             choose the founder tier that fits your routine, and we’ll review your application before moving you into the next step.
+            Daycare and boarding are currently included only through founder packages while availability remains, with full-time access for other clients coming soon.
           </p>
         </div>
       </div>
@@ -495,6 +517,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <div class="note-box">
               Applications are saved to your server, sent to your founder notification inbox, and can be reviewed later in your admin workflow.
+              Founder packages currently hold the available daycare and boarding access while those spots remain open. Expanded full-time access for other clients is coming soon.
             </div>
           </div>
 
@@ -578,7 +601,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
               <label class="checkbox-wrap">
                 <input type="checkbox" name="agree_terms" value="1" <?php echo $agreed ? 'checked' : ''; ?>>
-                <span>I understand founder memberships are limited, subject to review, and not guaranteed until approved.</span>
+                <span>I understand founder memberships are limited, subject to review, and not guaranteed until approved. I also understand that current daycare and boarding access is being held within founder packages while availability remains.</span>
               </label>
 
               <label class="checkbox-wrap">

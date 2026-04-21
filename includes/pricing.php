@@ -132,7 +132,7 @@ function dd_pricing_matrix(): array
                 'base_rate' => 110.00,
                 'hours' => 4,
                 'included_walks' => 1,
-                'included_walk_duration_minutes' => 30,
+                'included_walk_duration_minutes' => 45,
                 'additional_walk_rate' => 10.00,
                 'additional_walk_duration_minutes' => 30,
             ],

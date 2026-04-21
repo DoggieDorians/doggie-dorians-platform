@@ -2,7 +2,7 @@
   <div class="footer-container">
     <div class="footer-brand">
       <h3>Doggie Dorian's</h3>
-      <p>Luxury dog walking, daycare, boarding, and personalized pet care.</p>
+      <p>Luxury dog walking, drop-ins, pet sitting, memberships, and personalized pet care.</p>
     </div>
 
     <div class="footer-links">

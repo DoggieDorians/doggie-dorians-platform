@@ -3,6 +3,14 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 require_once __DIR__ . '/includes/member_config.php';
+require_once __DIR__ . '/includes/pricing.php';
+
+if (!function_exists('e')) {
+    function e($value): string
+    {
+        return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+    }
+}
 
 $errors = [];
 $success = '';
@@ -16,17 +24,19 @@ $walkDate = '';
 $walkTime = '';
 $notes = '';
 
+$pricingMatrix = dd_pricing_matrix();
+$dropInConfig = dd_get_drop_in_config(false);
+$sittingConfig = dd_get_sitting_config(false);
+
 $services = [
-    'walk_15' => ['label' => '15 Minute Walk', 'price' => 23],
-    'walk_20' => ['label' => '20 Minute Walk', 'price' => 25],
-    'walk_30' => ['label' => '30 Minute Walk', 'price' => 30],
-    'walk_45' => ['label' => '45 Minute Walk', 'price' => 38],
-    'walk_60' => ['label' => '60 Minute Walk', 'price' => 40],
-    'drop_in_30' => ['label' => '30 Minute Drop-In', 'price' => 20],
-    'daycare' => ['label' => 'Daycare Day', 'price' => 45],
-    'boarding_small' => ['label' => 'Boarding Night — Small Dog', 'price' => 80],
-    'boarding_medium' => ['label' => 'Boarding Night — Medium Dog', 'price' => 100],
-    'boarding_large' => ['label' => 'Boarding Night — Large Dog', 'price' => 120],
+    'walk_15' => ['label' => '15 Minute Walk', 'price' => (float) $pricingMatrix['walk']['non_member'][15]],
+    'walk_20' => ['label' => '20 Minute Walk', 'price' => (float) $pricingMatrix['walk']['non_member'][20]],
+    'walk_30' => ['label' => '30 Minute Walk', 'price' => (float) $pricingMatrix['walk']['non_member'][30]],
+    'walk_45' => ['label' => '45 Minute Walk', 'price' => (float) $pricingMatrix['walk']['non_member'][45]],
+    'walk_60' => ['label' => '60 Minute Walk', 'price' => (float) $pricingMatrix['walk']['non_member'][60]],
+    'drop_in_1' => ['label' => '1 Hour Drop-In', 'price' => (float) $dropInConfig['hourly_rate']],
+    'drop_in_2' => ['label' => '2 Hour Drop-In', 'price' => (float) $dropInConfig['hourly_rate'] * 2],
+    'sitting' => ['label' => 'In-Home Sitting — Up to ' . (int) $sittingConfig['hours'] . ' Hours', 'price' => (float) $sittingConfig['base_rate']],
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -80,7 +90,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $existing = [];
         if (file_exists($bookingFile)) {
-            $decoded = json_decode((string)file_get_contents($bookingFile), true);
+            $decoded = json_decode((string) file_get_contents($bookingFile), true);
             if (is_array($decoded)) {
                 $existing = $decoded;
             }
@@ -97,7 +107,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'walk_date' => $walkDate,
             'walk_time' => $walkTime,
             'notes' => $notes,
-            'created_at' => date('Y-m-d H:i:s')
+            'created_at' => date('Y-m-d H:i:s'),
         ];
 
         file_put_contents($bookingFile, json_encode($existing, JSON_PRETTY_PRINT));
@@ -265,8 +275,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <section class="instant-hero">
       <h1>Instant Booking for Non-Members</h1>
       <p>
-        Need premium care without joining first? Submit a one-time booking request here.
-        Choose your service, preferred date and time, and we’ll receive your request instantly.
+        Need premium care without joining first? Submit a one-time booking request here for walks, drop-ins, or in-home sitting.
+        Daycare and boarding are currently included only through founder packages while they remain available, and full-time daycare and boarding for other clients will be coming soon.
       </p>
     </section>
 
@@ -354,9 +364,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
 
         <div class="note-box">
-          <h3>Want better pricing?</h3>
+          <h3>Founder-only daycare and boarding right now</h3>
           <p>
-            Members receive better rates and more flexible plan options. If you plan to book regularly,
+            Daycare and boarding are currently included only through founder packages while they remain available.
+            Full-time daycare and boarding for other clients will be coming soon. If you plan to book regularly,
             membership will usually give you stronger long-term value.
           </p>
         </div>

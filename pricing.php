@@ -12,13 +12,6 @@ $pricing = dd_pricing_matrix();
 $walkNonMember = $pricing['walk']['non_member'];
 $walkMember = $pricing['walk']['member'];
 
-$boardingNonMember = $pricing['boarding']['non_member'];
-$boardingMember = $pricing['boarding']['member'];
-$boardingMember5 = $pricing['boarding']['member_5plus'];
-
-$daycareNonMember = $pricing['daycare']['non_member'];
-$daycareMember = $pricing['daycare']['member'];
-
 $dropInNonMember = $pricing['drop_in']['non_member'];
 $dropInMember = $pricing['drop_in']['member'];
 
@@ -39,7 +32,7 @@ function h($value): string
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pricing | Doggie Dorian's</title>
-  <meta name="description" content="View current member and non-member pricing for dog walks, drop-ins, daycare, in-home sitting, group walks, and boarding at Doggie Dorian’s." />
+  <meta name="description" content="View current member and non-member pricing for dog walks, drop-ins, in-home sitting, and group walks at Doggie Dorian’s. Daycare and boarding are currently available only through founder packages while availability remains." />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -505,7 +498,7 @@ function h($value): string
         <span class="eyebrow">Current Pricing</span>
         <h1>Clear pricing for <span>members and non-members.</span></h1>
         <p class="lead">
-          Doggie Dorian’s pricing is built to feel premium, transparent, and easy to understand. Members receive preferred rates across walks, drop-ins, daycare, in-home sitting, and boarding.
+          Doggie Dorian’s pricing is built to feel premium, transparent, and easy to understand. Members receive preferred rates across walks, drop-ins, in-home sitting, and group walks. Daycare and boarding are currently included only through founder packages while availability remains, with full-time access for other clients coming soon.
         </p>
 
         <div class="note" style="margin-top: 0; margin-bottom: 24px;">
@@ -515,8 +508,8 @@ function h($value): string
         <div class="hero-badges">
           <span class="badge">Walk Member Savings</span>
           <span class="badge">Drop-In Member Savings</span>
-          <span class="badge">6-Hour Daycare Sessions</span>
-          <span class="badge">Boarding by Size</span>
+          <span class="badge">Founder-Only Daycare Access</span>
+          <span class="badge">Founder-Only Boarding Access</span>
         </div>
       </div>
 
@@ -528,15 +521,15 @@ function h($value): string
           </div>
           <div class="summary-box">
             <strong>Drop-Ins</strong>
-            <span>Hourly pricing with optional walk add-ons and a clean cap before daycare becomes the better fit.</span>
+            <span>Hourly pricing with optional walk add-ons and a clean cap for shorter care visits.</span>
           </div>
           <div class="summary-box">
-            <strong>Daycare</strong>
-            <span>Now structured as a premium 6-hour session with optional food and additional walks.</span>
+            <strong>Founder-Only Daycare & Boarding</strong>
+            <span>Daycare and boarding are currently included only within founder packages while those limited packages remain available.</span>
           </div>
           <div class="summary-box">
-            <strong>Boarding</strong>
-            <span>Boarding remains priced by dog size, with deeper member savings at 5 or more nights.</span>
+            <strong>Coming Soon</strong>
+            <span>Expanded full-time daycare and boarding access for other clients will be introduced in a future release.</span>
           </div>
         </div>
       </div>
@@ -632,7 +625,7 @@ function h($value): string
 
       <div class="section-head">
         <h2>Drop-In Pricing</h2>
-        <p>Drop-ins are billed hourly and capped at 2 hours. Anything beyond that is better structured as daycare.</p>
+        <p>Drop-ins are billed hourly and capped at 2 hours for shorter, focused care windows.</p>
       </div>
 
       <div class="pricing-card">
@@ -669,55 +662,45 @@ function h($value): string
         </div>
 
         <div class="note">
-          Drop-ins are capped at <strong><?= h((string)$dropInNonMember['max_hours']) ?> hours</strong>. For longer care windows, daycare is the better booking option.
+          Drop-ins are capped at <strong><?= h((string)$dropInNonMember['max_hours']) ?> hours</strong>. For daycare or boarding access, founder packages currently hold the available access while broader availability is coming soon.
         </div>
       </div>
 
       <div class="section-head">
-        <h2>Daycare Pricing</h2>
-        <p>Daycare is now structured as a premium 6-hour session rather than a size-based daily table.</p>
+        <h2>Founder-Exclusive Care Access</h2>
+        <p>Daycare and boarding are not publicly priced at this time and are currently included only through available founder packages.</p>
       </div>
 
       <div class="pricing-card">
-        <h3>Premium Daycare</h3>
-        <p>Each session includes one complimentary 30-minute walk, with optional food and additional walk add-ons.</p>
+        <h3>Daycare & Boarding Access</h3>
+        <p>Founder packages currently hold the available daycare and boarding access while those limited packages remain open.</p>
 
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Service</th>
-                <th>Non-Member</th>
-                <th>Member</th>
+                <th>Care Type</th>
+                <th>Current Availability</th>
+                <th>Access Path</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>6-Hour Daycare Session</td>
-                <td><?= h(dd_format_money((float)$daycareNonMember['base_rate'])) ?></td>
-                <td><?= h(dd_format_money((float)$daycareMember['base_rate'])) ?></td>
+                <td>Daycare</td>
+                <td>Founder packages only</td>
+                <td>Available through founder memberships while packages remain</td>
               </tr>
               <tr>
-                <td>Food Provided by Doggie Dorian’s</td>
-                <td>+<?= h(dd_format_money((float)$daycareNonMember['food_fee'])) ?></td>
-                <td>+<?= h(dd_format_money((float)$daycareMember['food_fee'])) ?></td>
-              </tr>
-              <tr>
-                <td>Included Walk</td>
-                <td><?= h((string)$daycareNonMember['included_walks']) ?> × <?= h((string)$daycareNonMember['included_walk_duration_minutes']) ?> min</td>
-                <td><?= h((string)$daycareMember['included_walks']) ?> × <?= h((string)$daycareMember['included_walk_duration_minutes']) ?> min</td>
-              </tr>
-              <tr>
-                <td>Additional Walk</td>
-                <td>+<?= h(dd_format_money((float)$daycareNonMember['additional_walk_rate'])) ?></td>
-                <td>+<?= h(dd_format_money((float)$daycareMember['additional_walk_rate'])) ?></td>
+                <td>Boarding</td>
+                <td>Founder packages only</td>
+                <td>Available through founder memberships while packages remain</td>
               </tr>
             </tbody>
           </table>
         </div>
 
         <div class="note">
-          If the pet parent provides food, there is <strong>no food fee</strong>. Additional walks are billed per 30-minute walk.
+          <strong>Coming soon:</strong> Full-time daycare and boarding access for other clients will be introduced later. For current access, please explore the founder packages while availability remains.
         </div>
       </div>
 
@@ -728,7 +711,7 @@ function h($value): string
 
       <div class="pricing-card">
         <h3>Luxury In-Home Sitting</h3>
-        <p>Includes one complimentary 30-minute walk, with optional additional walks.</p>
+        <p>Non-members receive one complimentary 30-minute walk, while members receive one complimentary 45-minute walk, with optional additional walks.</p>
 
         <div class="table-wrap">
           <table>
@@ -747,8 +730,8 @@ function h($value): string
               </tr>
               <tr>
                 <td>Included Walk</td>
-                <td><?= h((string)$sittingNonMember['included_walks']) ?> × <?= h((string)$sittingNonMember['included_walk_duration_minutes']) ?> min</td>
-                <td><?= h((string)$sittingMember['included_walks']) ?> × <?= h((string)$sittingMember['included_walk_duration_minutes']) ?> min</td>
+                <td>1 × 30 min</td>
+                <td>1 × 45 min</td>
               </tr>
               <tr>
                 <td>Additional Walk</td>
@@ -759,53 +742,6 @@ function h($value): string
           </table>
         </div>
       </div>
-
-      <div class="section-head">
-        <h2>Boarding Pricing</h2>
-        <p>Boarding pricing remains based on dog size, with deeper member savings once 5 or more nights are booked.</p>
-      </div>
-
-      <div class="pricing-card">
-        <h3>Boutique Boarding</h3>
-        <p>Member 5+ night pricing applies automatically when the booking qualifies.</p>
-
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Dog Size</th>
-                <th>Non-Member</th>
-                <th>Member</th>
-                <th>Member 5+ Nights</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Small Dog</td>
-                <td><?= h(dd_format_money((float)$boardingNonMember['small'])) ?></td>
-                <td><?= h(dd_format_money((float)$boardingMember['small'])) ?></td>
-                <td class="save"><?= h(dd_format_money((float)$boardingMember5['small'])) ?></td>
-              </tr>
-              <tr>
-                <td>Medium Dog</td>
-                <td><?= h(dd_format_money((float)$boardingNonMember['medium'])) ?></td>
-                <td><?= h(dd_format_money((float)$boardingMember['medium'])) ?></td>
-                <td class="save"><?= h(dd_format_money((float)$boardingMember5['medium'])) ?></td>
-              </tr>
-              <tr>
-                <td>Large Dog</td>
-                <td><?= h(dd_format_money((float)$boardingNonMember['large'])) ?></td>
-                <td><?= h(dd_format_money((float)$boardingMember['large'])) ?></td>
-                <td class="save"><?= h(dd_format_money((float)$boardingMember5['large'])) ?></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="note">
-          Boarding member discount tier activates at <strong>5 or more booked nights</strong>.
-        </div>
-      </div>
     </div>
   </section>
 
@@ -814,7 +750,7 @@ function h($value): string
       <div class="cta-panel">
         <h2>Ready to book with the current pricing structure?</h2>
         <p>
-          Whether you are booking as a non-member or logging in for member pricing, the booking pages will automatically apply the correct rate for walks, drop-ins, daycare, in-home sitting, group walks, and boarding.
+          Whether you are booking as a non-member or logging in for member pricing, the booking pages will automatically apply the correct rate for walks, drop-ins, in-home sitting, and group walks. Daycare and boarding are currently reserved through founder packages while availability remains, with broader access coming soon.
         </p>
 
         <div class="cta-actions">
@@ -835,7 +771,7 @@ function h($value): string
   <div class="container footer-wrap">
     <div>
       <strong style="color: var(--text);">Doggie Dorian’s</strong><br />
-      Luxury dog walking, group walks, drop-ins, premium daycare, in-home sitting & boutique boarding in Manhattan.
+      Luxury dog walking, group walks, drop-ins, in-home sitting, and founder-access premium care in Manhattan.
     </div>
     <div>
       <a href="services.php">Services</a> &nbsp;•&nbsp;

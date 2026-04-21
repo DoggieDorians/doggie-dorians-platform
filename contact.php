@@ -48,11 +48,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $allowedServices = [
         'Dog Walking',
         'Group Walks',
-        'Daycare',
-        'Boarding',
         'Drop-Ins',
         'Pet Sitting',
         'Memberships',
+        'Founder Packages',
         'Custom Plan',
         'General Inquiry',
     ];
@@ -205,7 +204,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Contact Doggie Dorian’s | Luxury Pet Care Inquiries</title>
-  <meta name="description" content="Contact Doggie Dorian’s for luxury dog walking, daycare, boarding, memberships, and premium pet care inquiries.">
+  <meta name="description" content="Contact Doggie Dorian’s for luxury dog walking, drop-ins, memberships, founder packages, and premium pet care inquiries. Daycare and boarding are currently included only through founder packages while availability remains.">
 
   <style>
     * {
@@ -784,7 +783,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             Let’s create a more <span>premium</span> care experience for your dog.
           </h1>
           <p>
-            Reach out for bookings, memberships, daycare, boarding, group walks, custom plans, or general questions. We are building a more elevated pet care experience designed for clients who value trust, quality, and exceptional service.
+            Reach out for bookings, memberships, founder packages, group walks, custom plans, or general questions. Daycare and boarding are currently included only through founder packages while availability remains, with broader access for other clients coming soon.
           </p>
         </div>
       </div>
@@ -796,7 +795,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <div class="panel-kicker">Get In Touch</div>
           <h2>We’d love to hear from you.</h2>
           <p>
-            Whether you are looking to book your first service or want to ask about premium memberships, we are here to help you find the right fit for your dog.
+            Whether you are looking to book your first service or want to ask about premium memberships, founder packages, or a custom care setup, we are here to help you find the right fit for your dog.
           </p>
 
           <div class="contact-cards">
@@ -822,7 +821,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <div class="luxury-note">
             <h3>Luxury service begins with thoughtful communication.</h3>
             <p>
-              We aim to make every interaction feel polished, responsive, and personal from the very first inquiry.
+              We aim to make every interaction feel polished, responsive, and personal from the very first inquiry. Daycare and boarding are currently founder-package-only while spots remain available, and full-time access for other clients is coming soon.
             </p>
           </div>
         </div>
@@ -831,7 +830,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <div class="panel-kicker">Premium Inquiry Form</div>
           <h2>Send us a message</h2>
           <p class="form-intro">
-            Use the form below for service inquiries, membership questions, daycare, boarding, group walks, or custom requests.
+            Use the form below for service inquiries, membership questions, founder package questions, group walks, or custom requests.
           </p>
 
           <?php if ($successMessage !== ''): ?>
@@ -885,11 +884,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                   <option value="">Select a service</option>
                   <option value="Dog Walking" <?php echo $formData['service_type'] === 'Dog Walking' ? 'selected' : ''; ?>>Dog Walking</option>
                   <option value="Group Walks" <?php echo $formData['service_type'] === 'Group Walks' ? 'selected' : ''; ?>>Group Walks</option>
-                  <option value="Daycare" <?php echo $formData['service_type'] === 'Daycare' ? 'selected' : ''; ?>>Daycare</option>
-                  <option value="Boarding" <?php echo $formData['service_type'] === 'Boarding' ? 'selected' : ''; ?>>Boarding</option>
                   <option value="Drop-Ins" <?php echo $formData['service_type'] === 'Drop-Ins' ? 'selected' : ''; ?>>Drop-Ins</option>
                   <option value="Pet Sitting" <?php echo $formData['service_type'] === 'Pet Sitting' ? 'selected' : ''; ?>>Pet Sitting</option>
                   <option value="Memberships" <?php echo $formData['service_type'] === 'Memberships' ? 'selected' : ''; ?>>Memberships</option>
+                  <option value="Founder Packages" <?php echo $formData['service_type'] === 'Founder Packages' ? 'selected' : ''; ?>>Founder Packages</option>
                   <option value="Custom Plan" <?php echo $formData['service_type'] === 'Custom Plan' ? 'selected' : ''; ?>>Custom Plan</option>
                   <option value="General Inquiry" <?php echo $formData['service_type'] === 'General Inquiry' ? 'selected' : ''; ?>>General Inquiry</option>
                 </select>
@@ -933,7 +931,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="quick-card">
           <h3>Book a Service</h3>
           <p>
-            Ready to move forward? Start your booking request for walks, daycare, or boarding.
+            Ready to move forward? Start your booking request for walks, drop-ins, or in-home sitting.
           </p>
           <a href="<?php echo h($bookingLink); ?>"><?php echo h($bookingText); ?></a>
         </div>
@@ -961,7 +959,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="container footer-wrap">
       <div>
         <div class="footer-brand">Doggie Dorian’s</div>
-        <div class="footer-text">Luxury dog walking, daycare, boarding, and premium membership care.</div>
+        <div class="footer-text">Luxury dog walking, drop-ins, memberships, founder packages, and premium care.</div>
       </div>
 
       <div class="footer-text">

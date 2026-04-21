@@ -50,6 +50,25 @@ function service_label_from_type(string $serviceType): string
     };
 }
 
+function normalize_service_type(string $value): string
+{
+    $value = strtolower(trim($value));
+
+    return match ($value) {
+        'walk', 'walks' => 'walk',
+        'drop_in', 'drop-in', 'dropin', 'drop in' => 'drop_in',
+        'daycare', 'day care' => 'daycare',
+        'boarding', 'board' => 'boarding',
+        'sitting', 'pet sitting', 'in-home sitting', 'in_home_sitting' => 'sitting',
+        default => '',
+    };
+}
+
+function non_member_public_service_allowed(string $serviceType): bool
+{
+    return in_array(normalize_service_type($serviceType), ['walk', 'drop_in', 'sitting'], true);
+}
+
 function payment_status_is_paid(string $value): bool
 {
     return strtolower(trim($value)) === 'paid';
@@ -863,7 +882,7 @@ if ($sessionId === '') {
                 $stripePaymentNotes
             );
 
-            $booking = load_booking_row($pdoInstance, $bookingId) ?? $booking;
+            $booking = load_booking_row($pdoInstance) ? (load_booking_row($pdoInstance, $bookingId) ?? $booking) : $booking;
 
             unset($_SESSION['service_payment_portal']);
 
@@ -920,7 +939,7 @@ if ($sessionId === '') {
             }
 
             $requestId = (int) ($metadata->request_id ?? 0);
-            $serviceType = (string) ($metadata->service_type ?? '');
+            $serviceType = normalize_service_type((string) ($metadata->service_type ?? ''));
             $fullName = trim((string) ($metadata->full_name ?? ''));
             $dogName = trim((string) ($metadata->dog_name ?? ''));
             $expectedAmount = (float) ($metadata->total_amount ?? 0);
@@ -943,6 +962,12 @@ if ($sessionId === '') {
                 throw new RuntimeException('Matching non-member booking record was not found.');
             }
 
+            $row = is_array($record['row'] ?? null) ? $record['row'] : [];
+
+            if ($serviceType === '') {
+                $serviceType = normalize_service_type((string) ($row['service_type'] ?? ''));
+            }
+
             mark_non_member_paid(
                 $pdoInstance,
                 $requestId,
@@ -959,48 +984,88 @@ if ($sessionId === '') {
             $row = is_array($record['row'] ?? null) ? $record['row'] : [];
             $statusValue = (string) ($row['payment_status'] ?? '');
 
-            $itemLabel = 'Booking';
-            $itemName = service_label_from_type($serviceType);
+            $isAllowedPublicNonMemberService = non_member_public_service_allowed($serviceType);
 
-            if ($dogName !== '') {
-                $itemName .= ' · ' . $dogName;
-            }
+            if ($isAllowedPublicNonMemberService) {
+                $itemLabel = 'Booking';
+                $itemName = service_label_from_type($serviceType);
 
-            if ($fullName !== '') {
-                $itemName .= ' · ' . $fullName;
-            }
+                if ($dogName !== '') {
+                    $itemName .= ' · ' . $dogName;
+                }
 
-            if (!payment_status_is_paid($statusValue)) {
-                $viewState = 'pending';
-                $statusBadgeClass = 'pending';
-                $statusBadgeLabel = 'Payment Received';
-                $pageTitle = 'Payment Received';
-                $headline = 'We’re finalizing your booking request';
-                $bodyText = 'Stripe received your payment, but your booking request is still being updated.';
-                $primaryHref = current_request_uri();
-                $primaryLabel = 'Refresh Page';
-                $secondaryHref = 'contact.php';
-                $secondaryLabel = 'Contact Us';
-                $topLinks = [
-                    ['href' => 'non-member-booking.php', 'label' => 'Booking'],
-                    ['href' => 'contact.php', 'label' => 'Contact'],
-                ];
-                $errorMessage = 'Payment was received, but your booking request is still being finalized.';
+                if ($fullName !== '') {
+                    $itemName .= ' · ' . $fullName;
+                }
+
+                if (!payment_status_is_paid($statusValue)) {
+                    $viewState = 'pending';
+                    $statusBadgeClass = 'pending';
+                    $statusBadgeLabel = 'Payment Received';
+                    $pageTitle = 'Payment Received';
+                    $headline = 'We’re finalizing your booking request';
+                    $bodyText = 'Stripe received your payment, but your booking request is still being updated.';
+                    $primaryHref = current_request_uri();
+                    $primaryLabel = 'Refresh Page';
+                    $secondaryHref = 'contact.php';
+                    $secondaryLabel = 'Contact Us';
+                    $topLinks = [
+                        ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+                        ['href' => 'contact.php', 'label' => 'Contact'],
+                    ];
+                    $errorMessage = 'Payment was received, but your booking request is still being finalized.';
+                } else {
+                    $viewState = 'success';
+                    $statusBadgeClass = 'success';
+                    $statusBadgeLabel = 'Payment Confirmed';
+                    $pageTitle = 'Payment Successful';
+                    $headline = 'Non-Member Booking Paid';
+                    $bodyText = 'Your non-member booking payment has been verified successfully. Your request is now marked as paid and ready for follow-up.';
+                    $primaryHref = 'non-member-booking.php';
+                    $primaryLabel = 'Book Another Service';
+                    $secondaryHref = 'contact.php';
+                    $secondaryLabel = 'Contact Us';
+                    $topLinks = [
+                        ['href' => 'non-member-booking.php', 'label' => 'Booking'],
+                        ['href' => 'contact.php', 'label' => 'Contact'],
+                    ];
+                }
             } else {
-                $viewState = 'success';
-                $statusBadgeClass = 'success';
-                $statusBadgeLabel = 'Payment Confirmed';
-                $pageTitle = 'Payment Successful';
-                $headline = 'Non-Member Booking Paid';
-                $bodyText = 'Your non-member booking payment has been verified successfully. Your request is now marked as paid and ready for follow-up.';
-                $primaryHref = 'non-member-booking.php';
-                $primaryLabel = 'Book Another Service';
-                $secondaryHref = 'contact.php';
-                $secondaryLabel = 'Contact Us';
-                $topLinks = [
-                    ['href' => 'non-member-booking.php', 'label' => 'Booking'],
-                    ['href' => 'contact.php', 'label' => 'Contact'],
-                ];
+                $itemLabel = 'Request';
+                $itemName = 'Founder Package Follow-Up';
+
+                if (!payment_status_is_paid($statusValue)) {
+                    $viewState = 'pending';
+                    $statusBadgeClass = 'pending';
+                    $statusBadgeLabel = 'Payment Received';
+                    $pageTitle = 'Payment Received';
+                    $headline = 'We’re reviewing your request';
+                    $bodyText = 'Stripe received your payment. Daycare and boarding are currently included only through founder packages while availability remains, so our team will review this request and follow up directly.';
+                    $primaryHref = current_request_uri();
+                    $primaryLabel = 'Refresh Page';
+                    $secondaryHref = 'memberships.php#founders';
+                    $secondaryLabel = 'View Founder Packages';
+                    $topLinks = [
+                        ['href' => 'memberships.php#founders', 'label' => 'Founder Packages'],
+                        ['href' => 'contact.php', 'label' => 'Contact'],
+                    ];
+                    $errorMessage = 'Payment was received, and this request is being reviewed directly.';
+                } else {
+                    $viewState = 'success';
+                    $statusBadgeClass = 'success';
+                    $statusBadgeLabel = 'Payment Confirmed';
+                    $pageTitle = 'Payment Received';
+                    $headline = 'Payment received successfully';
+                    $bodyText = 'Your payment was received successfully. Daycare and boarding are currently included only through founder packages while availability remains, so our team will follow up directly regarding this request.';
+                    $primaryHref = 'memberships.php#founders';
+                    $primaryLabel = 'View Founder Packages';
+                    $secondaryHref = 'contact.php';
+                    $secondaryLabel = 'Contact Us';
+                    $topLinks = [
+                        ['href' => 'memberships.php#founders', 'label' => 'Founder Packages'],
+                        ['href' => 'contact.php', 'label' => 'Contact'],
+                    ];
+                }
             }
         }
     } catch (Throwable $e) {
